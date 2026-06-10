@@ -1,0 +1,406 @@
+{
+  "resources": {
+    "ada": {
+      "name": "给爷死",
+      "url": "https://github.com/FoKit/PagerMaid_Plugins/raw/modify/eat/eatada.png",
+      "me": {
+        "x": 283,
+        "y": 146,
+        "mask": "https://github.com/FoKit/PagerMaid_Plugins/raw/modify/eat/maskada.png"
+      },
+      "you": {
+        "x": 223,
+        "y": 314,
+        "mask": "https://github.com/FoKit/PagerMaid_Plugins/raw/modify/eat/maskada.png"
+      }
+    },
+    "at": {
+      "name": "为什么艾特我",
+      "url": "eat/eatat.png",
+      "you": {
+        "x": 46,
+        "y": 15,
+        "rotate": -19,
+        "mask": "eat/maskat.png"
+      }
+    },
+    "az": {
+      "name": "按住",
+      "url": "eat/eataz.png",
+      "you": {
+        "x": -17,
+        "y": 250,
+        "rotate": -90,
+        "mask": "eat/maskaz.png"
+      }
+    },
+    "bc": {
+      "name": "鞭笞",
+      "url": "eat/eatbc.png",
+      "me": {
+        "x": 331,
+        "y": 76,
+        "mask": "eat/maskbc1.png"
+      },
+      "you": {
+        "x": 23,
+        "y": 292,
+        "mask": "eat/maskbc2.png"
+      }
+    },
+    "bp": {
+      "name": "群伸手党前来白嫖",
+      "url": "eat/eatbp.png",
+      "you": {
+        "x": 98,
+        "y": 39,
+        "mask": "eat/maskbp.png"
+      }
+    },
+    "bfq": {
+      "name": "怎么，你不服气吗",
+      "url": "eat/eatbfq.png",
+      "you": {
+        "x": 53,
+        "y": 0,
+        "mask": "eat/maskbfq.png",
+        "rotate": -15
+      }
+    },
+    "cn": {
+      "name": "呲你",
+      "url": "eat/eatcn.png",
+      "you": {
+        "x": 188,
+        "y": 58,
+        "mask": "eat/maskcn.png"
+      }
+    },
+    "css": {
+      "name": "吃手手",
+      "url": "eat/eatcss.png",
+      "you": {
+        "x": 88,
+        "y": 0,
+        "mask": "eat/maskcss.png"
+      }
+    },
+    "dd": {
+      "name": "逗逗你呀~",
+      "url": "eat/eatdd.png",
+      "you": {
+        "x": 175,
+        "y": 62,
+        "mask": "eat/maskdd.png"
+      }
+    },
+    "dl": {
+      "name": "大佬~可靠",
+      "url": "eat/eatdl.png",
+      "me": {
+        "x": 350,
+        "y": 197,
+        "mask": "eat/maskdl1.png"
+      },
+      "you": {
+        "x": 91,
+        "y": 16,
+        "mask": "eat/maskdl2.png"
+      }
+    },
+    "fk": {
+      "name": "国际友好手势",
+      "url": "eat/eatfk.png",
+      "me": {
+        "x": 184,
+        "y": 143,
+        "mask": "eat/maskfk.png"
+      }
+    },
+    "fl": {
+      "name": "翻脸",
+      "url": "eat/eatfl.png",
+      "you": {
+        "x": 7,
+        "y": 19,
+        "mask": "eat/maskfl.png",
+        "flip": true
+      }
+    },
+    "gb": {
+      "name": "gangbang",
+      "url": "eat/eatgb.png",
+      "you": {
+        "x": 675,
+        "y": 400,
+        "mask": "eat/maskgb.png"
+      }
+    },
+    "gyx": {
+      "name": "帮忙盖一下",
+      "url": "eat/eatgyx.jpg",
+      "you": {
+        "x": 86,
+        "y": 206,
+        "mask": "eat/maskgyx.png",
+        "rotate": -45
+      }
+    },
+    "hy": {
+      "name": "你很勇喔",
+      "url": "eat/eathy.png",
+      "me": {
+        "x": 430,
+        "y": -10,
+        "mask": "eat/maskhy1.png"
+      },
+      "you": {
+        "x": 770,
+        "y": 100,
+        "mask": "eat/maskhy2.png"
+      }
+    },
+    "jgw": {
+      "name": "凭什么就你们有龟壳",
+      "url": "eat/eatjgw.png",
+      "you": {
+        "x": 237,
+        "y": 69,
+        "mask": "eat/maskjgw.png"
+      }
+    },
+    "kf": {
+      "name": "狂粉",
+      "url": "eat/eatkf.png",
+      "you": {
+        "x": 115,
+        "y": 0,
+        "mask": "eat/maskkf.png"
+      }
+    },
+    "ko": {
+      "name": "升龙拳",
+      "url": "https://github.com/FoKit/PagerMaid_Plugins/raw/modify/eat/eatko.png",
+      "you": {
+        "x": 170,
+        "y": 95,
+        "mask": "https://github.com/FoKit/PagerMaid_Plugins/raw/modify/eat/maskko.png"
+      }
+    },
+    "kz": {
+      "name": "看来真得控制你了",
+      "url": "eat/eatkz.png",
+      "you": {
+        "x": 1,
+        "y": 202,
+        "mask": "eat/maskkz.png"
+      }
+    },
+    "ld": {
+      "name": "我没意见",
+      "url": "eat/eatld.png",
+      "you": {
+        "x": 157,
+        "y": 0,
+        "mask": "eat/maskld.png"
+      }
+    },
+    "mb": {
+      "name": "膜拜大佬",
+      "url": "eat/eatmb.png",
+      "you": {
+        "x": 275,
+        "y": 321,
+        "mask": "eat/maskmb.png"
+      }
+    },
+    "pd": {
+      "name": "扑倒~",
+      "url": "eat/eatpd.png",
+      "you": {
+        "x": 146,
+        "y": 146,
+        "mask": "eat/maskpd.png"
+      }
+    },
+    "pl": {
+      "name": "我他妈直接跑路",
+      "url": "eat/eatpl.png",
+      "me": {
+        "x": 163,
+        "y": 15,
+        "mask": "eat/maskpl.png"
+      }
+    },
+    "pr": {
+      "name": "prpr~",
+      "url": "eat/eatpr.png",
+      "you": {
+        "x": -15,
+        "y": 209,
+        "mask": "eat/maskpr.png"
+      }
+    },
+    "qy": {
+      "name": "揭竿而起！",
+      "url": "eat/eatqy.png",
+      "me": {
+        "x": 237,
+        "y": 63,
+        "mask": "eat/maskqy.png"
+      }
+    },
+    "ri": {
+      "name": "日一下",
+      "url": "https://github.com/FoKit/PagerMaid_Plugins/raw/modify/eat/eatri.png",
+      "you": {
+        "x": 64,
+        "y": 87,
+        "mask": "https://github.com/FoKit/PagerMaid_Plugins/raw/modify/eat/maskri.png"
+      }
+    },
+    "sj": {
+      "name": "我会一直视奸你",
+      "url": "eat/eatsj.png",
+      "me": {
+        "x": 118,
+        "y": 42,
+        "brightness": 0.6,
+        "mask": "eat/masksj.png"
+      }
+    },
+    "sm": {
+      "name": "sm",
+      "url": "eat/eatsm.png",
+      "me": {
+        "x": 344,
+        "y": 238,
+        "mask": "eat/masksm2.png"
+      },
+      "you": {
+        "x": 108,
+        "y": 196,
+        "mask": "eat/masksm1.png"
+      }
+    },
+    "tc": {
+      "name": "老汉推车",
+      "url": "https://github.com/FoKit/PagerMaid_Plugins/raw/modify/eat/eattc.png",
+      "me": {
+        "x": 224,
+        "y": 173,
+        "mask": "https://github.com/FoKit/PagerMaid_Plugins/raw/modify/eat/masktc.png"
+      },
+      "you": {
+        "x": 55,
+        "y": 286,
+        "mask": "https://github.com/FoKit/PagerMaid_Plugins/raw/modify/eat/masktc.png"
+      }
+    },
+    "tlg": {
+      "name": "偷撸狗",
+      "url": "eat/eattlg.png",
+      "you": {
+        "x": 16,
+        "y": 280,
+        "mask": "eat/masktlg.png"
+      }
+    },
+    "wg": {
+      "name": "why are you gay",
+      "url": "eat/eatwg.jpg",
+      "you": {
+        "x": 35,
+        "y": 80,
+        "mask": "eat/maskwg.png"
+      }
+    },
+    "wyy": {
+      "name": "网抑云时间",
+      "url": "eat/eatwyy.png",
+      "you": {
+        "x": 135,
+        "y": 160,
+        "mask": "eat/maskwyy.png"
+      }
+    },
+    "wyz": {
+      "name": "我有罪",
+      "url": "eat/eatwyz.png",
+      "you": {
+        "x": 153,
+        "y": 0,
+        "mask": "eat/maskwyz.png"
+      }
+    },
+    "xm": {
+      "name": "羡慕死了",
+      "url": "eat/eatxm.png",
+      "me": {
+        "x": 131,
+        "y": 22,
+        "mask": "eat/maskxm.png"
+      }
+    },
+    "xd": {
+      "name": "心动",
+      "url": "eat/eatxd.jpg",
+      "you": {
+        "x": 46,
+        "y": 68,
+        "mask": "eat/maskxd.png"
+      }
+    },
+    "xt": {
+      "name": "虾头！",
+      "url": "eat/eatxt.png",
+      "you": {
+        "x": 68,
+        "y": 202,
+        "mask": "eat/maskxt.png"
+      }
+    },
+    "xyy": {
+      "name": "性压抑了",
+      "url": "eat/eatxyy.png",
+      "you": {
+        "x": 146,
+        "y": 0,
+        "mask": "eat/maskxyy.png"
+      }
+    },
+    "yuyu": {
+      "name": "我有郁郁症",
+      "url": "eat/eatyuyu.png",
+      "you": {
+        "x": 55,
+        "y": 52,
+        "mask": "eat/maskyuyu.png"
+      }
+    },
+    "bsdw": {
+      "name": "搬史大王",
+      "url": "eat/eatbsdw.png",
+      "me": {
+        "x": 270,
+        "y": 170,
+        "mask": "eat/maskbsdw.png"
+      },
+      "you": {
+        "x": 50,
+        "y": 240,
+        "mask": "eat/maskbsdw.png"
+      }
+    },
+    "tuzai": {
+      "name": "屠宰",
+      "url": "eat/eattuzai.png",
+      "stamp": {
+        "size": 512,
+        "scale": 0.9,
+        "rotate": -12,
+        "opacity": 0.6
+      }
+    }
+  }
+}
