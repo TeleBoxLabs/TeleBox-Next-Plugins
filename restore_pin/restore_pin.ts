@@ -126,7 +126,7 @@ class RestorePinPlugin extends Plugin {
       // 每3条更新一次进度
       if ((i + 1) % 3 === 0) {
         await msg.edit({ 
-          text: html`🔄 正在恢复第 ${i + 1}/${messageIds.length} 条置顶消息...\n✅ 成功: ${successCount} ❌ 失败: ${errorCount}` 
+          text: html`🔄 正在恢复第 ${i + 1}/${messageIds.length} 条置顶消息...<br>✅ 成功: ${successCount} ❌ 失败: ${errorCount}` 
         });
       }
 
