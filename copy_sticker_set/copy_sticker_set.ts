@@ -4,6 +4,7 @@ import { getPrefixes } from "@utils/pluginManager";
 import type { MessageContext } from "@mtcute/dispatcher";
 import { html } from "@mtcute/html-parser";
 import { tl } from "@mtcute/core";
+import { logger } from "@utils/logger";
 
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
@@ -172,8 +173,8 @@ class CopyStickerSetPlugin extends Plugin {
           });
           return;
         }
-      } catch (error) {
-        console.error('Failed to get sticker set:', error);
+      } catch (error: unknown) {
+        logger.error('Failed to get sticker set:', error);
         const prefixes = getPrefixes();
         await msg.edit({
           text: html(`<b>❌ 贴纸包不存在</b><br/><br/>无法找到贴纸包：<code>${htmlEscape(stickerSetName)}</code><br/>请检查贴纸包名称是否正确<br/><br/>使用 <code>${prefixes[0]}copy_sticker_set</code> 查看帮助`)
@@ -254,8 +255,8 @@ class CopyStickerSetPlugin extends Plugin {
 
           stickerInputs.push(inputSticker);
           
-        } catch (stickerError) {
-          console.error(`Failed to process sticker ${i}:`, stickerError);
+        } catch (stickerError: unknown) {
+          logger.error(`Failed to process sticker ${i}:`, stickerError);
           // 继续处理下一个贴纸
         }
       }
@@ -305,8 +306,8 @@ class CopyStickerSetPlugin extends Plugin {
           });
         }
         
-      } catch (createError) {
-        console.error("Failed to create sticker set:", createError);
+      } catch (createError: unknown) {
+        logger.error("Failed to create sticker set:", createError);
         
         const prefixes = getPrefixes();
         let errorMsg = `<b>❌ 创建错误</b><br/><br/>创建贴纸包时出现错误<br/><br/>使用 <code>${prefixes[0]}copy_sticker_set</code> 查看帮助`;
@@ -328,8 +329,8 @@ class CopyStickerSetPlugin extends Plugin {
         });
       }
       
-    } catch (error) {
-      console.error("CopyStickerSet plugin error:", error);
+    } catch (error: unknown) {
+      logger.error("CopyStickerSet plugin error:", error);
       const prefixes = getPrefixes();
       await msg.edit({
         text: html(`<b>❌ 插件错误</b><br/><br/>复制贴纸包时出现错误：<code>${htmlEscape(error instanceof Error ? error.message : String(error))}</code><br/><br/>使用 <code>${prefixes[0]}copy_sticker_set</code> 查看帮助`)

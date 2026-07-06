@@ -4,8 +4,10 @@ import { getGlobalClient } from "@utils/globalClient";
 import { createDirectoryInAssets } from "@utils/pathHelpers";
 import { banUser } from "@utils/banUtils";
 import { safeGetReplyMessage } from "@utils/safeGetMessages";
+import { hasRawType, getMessageMedia } from "@utils/entityTypeGuards";
 import type { MessageContext } from "@mtcute/dispatcher";
 import type { TelegramClient } from "@mtcute/node";
+import type { Chat } from "@mtcute/core";
 import { html } from "@mtcute/html-parser";
 // 使用简化的事件类型定义
 interface NewMessageEvent {
@@ -19,6 +21,9 @@ interface EditedMessageEvent {
 import { JSONFilePreset } from "lowdb/node";
 import * as path from "path";
 import * as crypto from "crypto";
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
+import { htmlEscape } from "@utils/htmlEscape";
 // ==================== 类型定义 ====================
 type Action = "delete" | "ban";
 
@@ -72,32 +77,23 @@ const HELP_TEXT = `<b>🖼️ 图片监控插件 (image_monitor)</b>
 • 回复图片/媒体/贴纸使用 <code>.im [delete|ban]</code> - 快速添加（图片MD5/文件MD5/贴纸ID），未指定时使用默认操作`;
 
 // ==================== 工具函数 ====================
-const htmlEscape = (text: string): string =>
-  text.replace(/[&<>'"/]/g, (m) => ({
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    '"': "&quot;",
-    "'": "&#x27;",
-    "/": "&#x2F;",
-  }[m] || m));
 
 async function getPeerId(client: TelegramClient, msg: MessageContext, chatIdStr?: string): Promise<string | null> {
     try {
         const peer: any = chatIdStr ? chatIdStr : msg.chat.id;
-        const resolved: any = await client.resolvePeer(peer);
-        if ((resolved as any)._ === "inputPeerChannel") {
-            return `-100${resolved.channelId}`;
+        const resolved = await client.resolvePeer(peer);
+        if (hasRawType(resolved, "inputPeerChannel")) {
+            return `-100${(resolved as { channelId?: number }).channelId}`;
         }
-        if ((resolved as any)._ === "inputPeerChat") {
-            return `-${resolved.chatId}`;
+        if (hasRawType(resolved, "inputPeerChat")) {
+            return `-${(resolved as { chatId?: number }).chatId}`;
         }
-        if ((resolved as any)._ === "inputPeerUser") {
-            return `${resolved.userId}`;
+        if (hasRawType(resolved, "inputPeerUser")) {
+            return `${(resolved as { userId?: number }).userId}`;
         }
         return null;
-    } catch (e) {
-        console.error(`[${PLUGIN_NAME}] Could not resolve peer:`, e);
+    } catch (e: unknown) {
+        logger.error(`[${PLUGIN_NAME}] Could not resolve peer:`, e);
         return null;
     }
 }
@@ -125,19 +121,17 @@ class MessageManager {
       if (deleteAfter > 0) {
         const timer = setTimeout(() => {
           clearTrackedTimer(timer);
-          msg.delete({ revoke: true }).catch(() => {});
+          msg.delete({ revoke: true }).catch(() => { /* msg may already be deleted */ });
         }, deleteAfter * 1000);
         trackTimer(timer);
       }
-    } catch (e) {
-      // Ignore errors if message was deleted or something
-    }
+    } catch (e: unknown) { logger.warn(`[im] Ignore errors if message was deleted or something:`, e) }
   }
 }
 
 // ==================== 配置管理器 ====================
 class ConfigManager {
-  private static db: any = null;
+  private static db: Awaited<ReturnType<typeof JSONFilePreset<Config>>> | null = null;
 
   static async init() {
     if (this.db) return;
@@ -151,16 +145,16 @@ class ConfigManager {
     await this.init();
     // 再次保证标准化（防止外部意外写入）
     this.normalize();
-    return this.db.data;
+    return this.db!.data;
   }
 
   static async saveConfig() {
     await this.init();
-    await this.db.write();
+    await this.db!.write();
   }
 
   private static normalize() {
-    const data = this.db?.data as any;
+    const data = this.db?.data as { monitoredChats?: unknown; bannedStickerIds?: Record<string, string>; defaultAction?: string } | undefined;
     if (!data) return;
     // 兼容旧版 monitoredChats: (string|number)[] -> MonitoredChat[]
     if (Array.isArray(data.monitoredChats)) {
@@ -197,7 +191,7 @@ class ImageMonitorPlugin extends Plugin {
 
   private async initialize() {
     await ConfigManager.init();
-    console.log("[image_monitor] Plugin initialized");
+    logger.info("[image_monitor] Plugin initialized");
   }
 
   // 消息监听器 - TeleBox会自动调用这个方法
@@ -226,31 +220,32 @@ class ImageMonitorPlugin extends Plugin {
         if (!config.bannedStickerIds) config.bannedStickerIds = {};
         const action = (subCommand === 'ban' || subCommand === 'delete') ? subCommand as Action : config.defaultAction;
 
-        const media = (repliedMsg as any).media?.raw ?? (repliedMsg as any).media;
+        const media = (repliedMsg as { media?: { raw?: unknown } }).media?.raw ?? (repliedMsg as { media?: unknown }).media;
         if (!media) {
             await MessageManager.edit(msg, "❌ 该回复不是图片、媒体或贴纸。请回复包含图片/媒体/贴纸的消息后再使用 <code>.im</code>。");
             return;
         }
 
         try {
-            if ((media as any)._ === "messageMediaDocument") {
-                const docRaw = (media as any).document;
-                if (docRaw && (docRaw as any)._ === "document") {
-                    const isSticker = Array.isArray(docRaw.attributes) && docRaw.attributes.some((a: any) => (a as any)._ === "documentAttributeSticker");
+            if (hasRawType(media, "messageMediaDocument")) {
+                const docRaw = (media as { document?: unknown }).document;
+                if (docRaw && hasRawType(docRaw, "document")) {
+                    const isSticker = Array.isArray((docRaw as { attributes?: unknown[] }).attributes) && (docRaw as { attributes?: unknown[] }).attributes!.some((a: unknown) => hasRawType(a, "documentAttributeSticker"));
                     if (isSticker) {
-                        const stickerId = String(docRaw.id);
+                        const stickerId = String((docRaw as { id?: unknown }).id);
                         config.bannedStickerIds[stickerId] = action;
                         await ConfigManager.saveConfig();
                         await MessageManager.edit(msg, `✅ 已添加贴纸ID: <code>${htmlEscape(stickerId)}</code>，操作: <code>${action}</code>`);
                         return;
                     }
-                    if (docRaw.size && Number(docRaw.size) > MAX_FILE_SIZE) {
+                    const docSize = (docRaw as { size?: unknown }).size;
+                    if (docSize && Number(docSize) > MAX_FILE_SIZE) {
                         await MessageManager.edit(msg, "❌ 文件过大，已超过限制。" );
                         return;
                     }
                 }
                 await MessageManager.edit(msg, "⏳ 正在计算文件MD5...", { deleteAfter: 0 });
-                const buffer = Buffer.from(await client.downloadAsBuffer(media as any));
+                const buffer = Buffer.from(await client.downloadAsBuffer(media as never));
                 if (!buffer) {
                     await MessageManager.edit(msg, "❌ 下载媒体失败。");
                     return;
@@ -262,9 +257,9 @@ class ImageMonitorPlugin extends Plugin {
                 return;
             }
 
-            if ((media as any)._ === "messageMediaPhoto") {
+            if (hasRawType(media, "messageMediaPhoto")) {
                 await MessageManager.edit(msg, "⏳ 正在计算图片MD5...", { deleteAfter: 0 });
-                const buffer = Buffer.from(await client.downloadAsBuffer(media as any));
+                const buffer = Buffer.from(await client.downloadAsBuffer(media as never));
                 if (!buffer) {
                     await MessageManager.edit(msg, "❌ 下载图片失败。");
                     return;
@@ -277,9 +272,9 @@ class ImageMonitorPlugin extends Plugin {
             }
 
             await MessageManager.edit(msg, "❌ 不支持的媒体类型。请回复图片、媒体或贴纸。");
-        } catch (error: any) {
-            console.error(`[${PLUGIN_NAME}] Failed to process replied media:`, error);
-            await MessageManager.edit(msg, `❌ 处理媒体时出错: ${htmlEscape(error.message)}`);
+        } catch (error: unknown) {
+            logger.error(`[${PLUGIN_NAME}] Failed to process replied media:`, error);
+            await MessageManager.edit(msg, `❌ 处理媒体时出错: ${htmlEscape(getErrorMessage(error))}`);
         }
         return;
     }
@@ -332,7 +327,7 @@ class ImageMonitorPlugin extends Plugin {
               await MessageManager.edit(msg, "❌ 无法解析群组ID或用户名。");
               return;
             }
-            const entity: any = await client.getChat(peerIdentifier).catch(() => null);
+            const entity = await client.getChat(peerIdentifier).catch(() => null);
             let chatName: string;
             if (entity && 'username' in entity && entity.username) {
               chatName = `@${entity.username}`;
@@ -343,13 +338,13 @@ class ImageMonitorPlugin extends Plugin {
             }
 
             if (!config.monitoredChats.some(c => c.id === peerId)) {
-              config.monitoredChats.push({ id: peerId, name: chatName, username: entity?.username });
+              config.monitoredChats.push({ id: peerId, name: chatName, username: entity?.username ?? undefined });
               await ConfigManager.saveConfig();
               await MessageManager.edit(msg, `✅ 已添加监控群组: <code>${htmlEscape(chatName)}</code> (<code>${peerId}</code>)`);
             } else {
               await MessageManager.edit(msg, `ℹ️ 群组 <code>${htmlEscape(chatName)}</code> 已在监控列表中。`);
             }
-          } catch (e) {
+          } catch (_e: unknown) {
             await MessageManager.edit(msg, "❌ 无法解析群组ID或用户名。");
           }
           break;
@@ -363,7 +358,7 @@ class ImageMonitorPlugin extends Plugin {
               await MessageManager.edit(msg, "❌ 无法解析群组ID或用户名。");
               return;
             }
-            const entity: any = await client.getChat(peerIdentifier).catch(() => null);
+            const entity = await client.getChat(peerIdentifier).catch(() => null);
             let chatName: string;
             if (entity && 'username' in entity && entity.username) {
               chatName = `@${entity.username}`;
@@ -382,7 +377,7 @@ class ImageMonitorPlugin extends Plugin {
             } else {
               await MessageManager.edit(msg, `ℹ️ 群组 <code>${htmlEscape(chatName)}</code> 不在监控列表中。`);
             }
-          } catch (e) {
+          } catch (_e: unknown) {
             await MessageManager.edit(msg, "❌ 无法解析群组ID或用户名。");
           }
           break;
@@ -452,9 +447,9 @@ class ImageMonitorPlugin extends Plugin {
           await MessageManager.edit(msg, HELP_TEXT, { deleteAfter: 30 });
           break;
       }
-    } catch (error: any) {
-        console.error(`[${PLUGIN_NAME}] Command failed:`, error);
-        await MessageManager.edit(msg, `❌ 命令执行失败: ${htmlEscape(error.message)}`);
+    } catch (error: unknown) {
+        logger.error(`[${PLUGIN_NAME}] Command failed:`, error);
+        await MessageManager.edit(msg, `❌ 命令执行失败: ${htmlEscape(getErrorMessage(error))}`);
     }
   }
 
@@ -469,7 +464,7 @@ class ImageMonitorPlugin extends Plugin {
     const chatId = await getPeerId(client, msg);
 
         if (chatId && config.monitoredChats.some(c => c.id === chatId)) {
-        console.log(`[${PLUGIN_NAME}] Processing new message ${msg.id} in chat ${chatId}`);
+        logger.info(`[${PLUGIN_NAME}] Processing new message ${msg.id} in chat ${chatId}`);
         await this.processImageMessage(msg, client, config);
     }
   }
@@ -485,7 +480,7 @@ class ImageMonitorPlugin extends Plugin {
     const chatId = await getPeerId(client, msg);
 
         if (chatId && config.monitoredChats.some(c => c.id === chatId)) {
-        console.log(`[${PLUGIN_NAME}] Processing edited message ${msg.id} in chat ${chatId}`);
+        logger.info(`[${PLUGIN_NAME}] Processing edited message ${msg.id} in chat ${chatId}`);
         await this.processImageMessage(msg, client, config);
     }
   }
@@ -494,15 +489,15 @@ class ImageMonitorPlugin extends Plugin {
     let media: any;
     let fileSize: number | undefined;
 
-    const rawMedia: any = (msg as any).media?.raw ?? (msg as any).media;
+    const rawMedia: unknown = (msg as { media?: { raw?: unknown } }).media?.raw ?? (msg as { media?: unknown }).media;
     if (!rawMedia) return;
 
-    if ((rawMedia as any)._ === "messageMediaDocument") {
-        const docRaw = (rawMedia as any).document;
-        if (docRaw && (docRaw as any)._ === "document") {
-            const isSticker = Array.isArray(docRaw.attributes) && docRaw.attributes.some((a: any) => (a as any)._ === "documentAttributeSticker");
+    if (hasRawType(rawMedia, "messageMediaDocument")) {
+        const docRaw = (rawMedia as { document?: unknown }).document;
+        if (docRaw && hasRawType(docRaw, "document")) {
+            const isSticker = Array.isArray((docRaw as { attributes?: unknown[] }).attributes) && (docRaw as { attributes?: unknown[] }).attributes!.some((a: unknown) => hasRawType(a, "documentAttributeSticker"));
             if (isSticker) {
-                const stickerId = String(docRaw.id);
+                const stickerId = String((docRaw as { id?: unknown }).id);
                 const action = config.bannedStickerIds?.[stickerId];
                 if (action) {
                     try {
@@ -515,35 +510,37 @@ class ImageMonitorPlugin extends Plugin {
                                 await msg.delete({ revoke: true });
                             }
                         }
-                    } catch (err: any) {
-                        if (err.message?.includes('CHAT_ADMIN_REQUIRED')) {
-                            console.error(`[${PLUGIN_NAME}] Action failed in chat ${msg.chat.id}: Bot is not an admin or lacks permissions.`);
-                        } else if (err.message?.includes('USER_ID_INVALID')) {
-                            console.error(`[${PLUGIN_NAME}] Action failed in chat ${msg.chat.id}: Invalid user ID.`);
+                    } catch (err: unknown) {
+                        const errMsg = err instanceof Error ? err.message : String(err);
+                        if (errMsg.includes('CHAT_ADMIN_REQUIRED')) {
+                            logger.error(`[${PLUGIN_NAME}] Action failed in chat ${msg.chat.id}: Bot is not an admin or lacks permissions.`);
+                        } else if (errMsg.includes('USER_ID_INVALID')) {
+                            logger.error(`[${PLUGIN_NAME}] Action failed in chat ${msg.chat.id}: Invalid user ID.`);
                         } else {
-                            console.error(`[${PLUGIN_NAME}] Action failed for message ${msg.id}:`, err);
+                            logger.error(`[${PLUGIN_NAME}] Action failed for message ${msg.id}:`, err);
                         }
                     }
                     return;
                 }
                 return; // 是贴纸但不在封禁列表，直接返回，不作为普通图片处理
             }
-            if (docRaw.mimeType?.startsWith("image/")) {
-                fileSize = docRaw.size ? Number(docRaw.size) : undefined;
+            const docSizeRaw = docRaw as { mimeType?: string; size?: unknown };
+            if (docSizeRaw.mimeType?.startsWith("image/")) {
+                fileSize = docSizeRaw.size ? Number(docSizeRaw.size) : undefined;
                 media = rawMedia;
             } else {
                 return;
             }
         }
-    } else if ((rawMedia as any)._ === "messageMediaPhoto") {
+    } else if (hasRawType(rawMedia, "messageMediaPhoto")) {
         media = rawMedia;
-        const photo = (media as any).photo;
+        const photo = (media as { photo?: { sizes?: unknown[] } }).photo;
         const sizes: number[] = [];
         for (const s of photo?.sizes ?? []) {
-            if ((s as any)._ === "photoSize") {
-                sizes.push((s as any).size);
-            } else if ((s as any)._ === "photoSizeProgressive") {
-                sizes.push(Math.max(...(s as any).sizes));
+            if (hasRawType(s, "photoSize")) {
+                sizes.push((s as { size?: number }).size ?? 0);
+            } else if (hasRawType(s, "photoSizeProgressive")) {
+                sizes.push(Math.max(...((s as { sizes?: number[] }).sizes ?? [])));
             }
         }
         if (sizes.length > 0) {
@@ -556,7 +553,7 @@ class ImageMonitorPlugin extends Plugin {
     }
 
     try {
-        const buffer = Buffer.from(await client.downloadAsBuffer(media as any));
+        const buffer = Buffer.from(await client.downloadAsBuffer(media as never));
         if (!buffer) {
             return;
         }
@@ -573,19 +570,20 @@ class ImageMonitorPlugin extends Plugin {
                         await msg.delete({ revoke: true });
                     }
                 }
-            } catch (err: any) {
-                if (err.message?.includes('CHAT_ADMIN_REQUIRED')) {
-                    console.error(`[${PLUGIN_NAME}] Action failed in chat ${msg.chat.id}: Bot is not an admin or lacks permissions.`);
-                } else if (err.message?.includes('USER_ID_INVALID')) {
-                    console.error(`[${PLUGIN_NAME}] Action failed in chat ${msg.chat.id}: Invalid user ID.`);
-                } else {
-                    console.error(`[${PLUGIN_NAME}] Action failed for message ${msg.id}:`, err);
+            } catch (err: unknown) {
+                        const errMsg = err instanceof Error ? err.message : String(err);
+                        if (errMsg.includes('CHAT_ADMIN_REQUIRED')) {
+                            logger.error(`[${PLUGIN_NAME}] Action failed in chat ${msg.chat.id}: Bot is not an admin or lacks permissions.`);
+                        } else if (errMsg.includes('USER_ID_INVALID')) {
+                            logger.error(`[${PLUGIN_NAME}] Action failed in chat ${msg.chat.id}: Invalid user ID.`);
+                        } else {
+                            logger.error(`[${PLUGIN_NAME}] Action failed for message ${msg.id}:`, err);
+                        }
+                    }
                 }
+            } catch (error: unknown) {
+                logger.error(`[${PLUGIN_NAME}] Failed to process media in message ${msg.id}:`, error);
             }
-        }
-    } catch (error: any) {
-        console.error(`[${PLUGIN_NAME}] Failed to process media in message ${msg.id}:`, error);
-    }
   }
 
   cleanup(): void {

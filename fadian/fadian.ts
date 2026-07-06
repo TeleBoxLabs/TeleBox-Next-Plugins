@@ -8,6 +8,9 @@ import axios from "axios";
 import * as fs from "fs";
 import * as path from "path";
 import { safeGetReplyMessage } from "@utils/safeGetMessages";
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
+import { htmlEscape } from "@utils/htmlEscape";
 
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
@@ -31,21 +34,6 @@ let configCache: { [key: string]: string[] } = {};
 let lastUpdateCheck = 0;
 const UPDATE_INTERVAL = 5 * 60 * 1000; // 5分钟检查一次
 
-const htmlEscape = (text: string): string =>
-  (text || "").replace(
-    /[&<>"']/g,
-    (m) =>
-      ((
-        {
-          "&": "&amp;",
-          "<": "&lt;",
-          ">": "&gt;",
-          '"': "&quot;",
-          "'": "&#x27;",
-        } as any
-      )[m] || m)
-  );
-
 const filterInput = (s: string): string =>
   (s || "")
     .split("")
@@ -59,7 +47,7 @@ function readJsonArray(file: string): string[] {
     const raw = fs.readFileSync(file, "utf-8");
     const data = JSON.parse(raw);
     return Array.isArray(data) ? data : [];
-  } catch {
+  } catch (_e: unknown) {
     return [];
   }
 }
@@ -76,8 +64,8 @@ async function downloadConfigFile(filename: string): Promise<void> {
 
     // 更新缓存
     configCache[filename] = Array.isArray(response.data) ? response.data : [];
-  } catch (error) {
-    console.error(`下载配置文件失败: ${filename}`, error);
+  } catch (error: unknown) {
+    logger.error(`下载配置文件失败: ${filename}`, error);
   }
 }
 
@@ -197,7 +185,7 @@ class FadianPlugin extends Plugin {
             if (!targetName) {
               const replyMsg = await safeGetReplyMessage(msg);
               if (replyMsg) {
-                const sender = replyMsg.sender as any;
+                const sender = replyMsg.sender as { firstName?: string; lastName?: string; username?: string; title?: string } | undefined;
                 if (sender) {
                   const firstName = sender.firstName || "";
                   const lastName = sender.lastName || "";
@@ -288,19 +276,20 @@ class FadianPlugin extends Plugin {
               )}</code>`,
             });
         }
-      } catch (error: any) {
-        console.error("[fadian] 插件执行失败:", error);
+      } catch (error: unknown) {
+        logger.error("[fadian] 插件执行失败:", error);
+        const errMsg = getErrorMessage(error);
 
         // 处理特定错误类型
-        if (error.message?.includes("FLOOD_WAIT")) {
-          const waitTime = parseInt(error.message.match(/\d+/)?.[0] || "60");
+        if (errMsg.includes("FLOOD_WAIT")) {
+          const waitTime = parseInt(errMsg.match(/\d+/)?.[0] || "60");
           await msg.edit({
             text: html`⏳ <b>请求过于频繁</b><br><br>需要等待 ${waitTime} 秒后重试`,
           });
           return;
         }
 
-        if (error.message?.includes("MESSAGE_TOO_LONG")) {
+        if (errMsg.includes("MESSAGE_TOO_LONG")) {
           await msg.edit({
             text: html`❌ <b>消息过长</b><br><br>请减少内容长度或使用文件发送`,
           });
@@ -310,7 +299,7 @@ class FadianPlugin extends Plugin {
         // 通用错误处理
         await msg.edit({
           text: html`❌ <b>插件执行失败:</b> ${htmlEscape(
-            error.message || "未知错误"
+            errMsg || "未知错误"
           )}`,
         });
       }
@@ -349,11 +338,11 @@ class FadianPlugin extends Plugin {
       await msg.edit({
         text: html`🧹 已清理缓存，下次使用时将重新下载配置`,
       });
-    } catch (error: any) {
-      console.error("[fadian] 清理缓存失败:", error);
+    } catch (error: unknown) {
+      logger.error("[fadian] 清理缓存失败:", error);
       await msg.edit({
         text: html`❌ <b>清理缓存失败:</b> ${htmlEscape(
-          error?.message || "未知错误"
+          getErrorMessage(error) || "未知错误"
         )}`,
       });
     }

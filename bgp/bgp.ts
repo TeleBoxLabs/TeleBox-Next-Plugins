@@ -9,6 +9,10 @@ import * as fs from "fs";
 import * as path from "path";
 import { createDirectoryInTemp } from "@utils/pathHelpers";
 import * as cheerio from "cheerio";
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
+
+// ─── helpers ─────────────────────────────────────────────────────────
 
 function htmlEscape(text: string): string {
     return text
@@ -142,8 +146,12 @@ async function fetchBgpSvgWithFallback(ip: string): Promise<BgpFetchResult> {
             }
 
             return { status: "ok", svgBuffer, usedPrefix: prefix };
-        } catch (err: any) {
-            if (err.response?.status === 404) continue;
+        } catch (err: unknown) {
+            const errObj = err as Record<string, unknown>;
+            if (errObj.response && typeof errObj.response === "object") {
+              const resp = errObj.response as Record<string, unknown>;
+              if (resp.status === 404) continue;
+            }
             continue;
         }
     }
@@ -180,8 +188,12 @@ async function fetchDnsWithFallback(ip: string): Promise<{ dnsLines: string[]; u
             if (dnsResult.dnsLines.length > 0) {
                 return { dnsLines: dnsResult.dnsLines, usedPrefix: prefix };
             }
-        } catch (err: any) {
-            if (err.response?.status === 404) continue;
+        } catch (err: unknown) {
+            const errObj = err as Record<string, unknown>;
+            if (errObj.response && typeof errObj.response === "object") {
+              const resp = errObj.response as Record<string, unknown>;
+              if (resp.status === 404) continue;
+            }
             continue;
         }
     }
@@ -244,7 +256,7 @@ function extractDNSData(html: string): {
             totalRecords: domainRecords.length,
             filteredRecords: domainRecords.length - dnsLines.length,
         };
-    } catch {
+    } catch (_e: unknown) {
         return { dnsLines: [], totalRecords: 0, filteredRecords: 0 };
     }
 }
@@ -334,8 +346,8 @@ class BGPPlugin extends Plugin {
 
                         await msg.edit({ text: html(formattedOutput) });
 
-                    } catch (err: any) {
-                        const message = err?.message || "";
+                    } catch (err: unknown) {
+                        const message = getErrorMessage(err);
 
                         if (message.includes("未找到DNS记录")) {
                             const prefixForLink =
@@ -407,7 +419,7 @@ class BGPPlugin extends Plugin {
                         try {
                             await msg.delete();
                             msgDeleted = true;
-                        } catch {}
+                        } catch (e: unknown) { logger.warn('[bgp] delete msg failed:', e) }
 
                         await client.sendMedia(msg.chat.id, {
                             type: "photo",
@@ -448,18 +460,18 @@ class BGPPlugin extends Plugin {
                     try {
                         if (fs.existsSync(svgPath)) fs.unlinkSync(svgPath);
                         if (fs.existsSync(pngPath)) fs.unlinkSync(pngPath);
-                    } catch {}
+                    } catch (e: unknown) { logger.warn('[bgp] cleanup temp files failed:', e) }
                 }
 
-            } catch (err: any) {
-                const errText = `❌ <b>BGP查询失败</b>\n\n${htmlEscape(err.message || "未知错误")}`;
+            } catch (err: unknown) {
+                const errText = `❌ <b>BGP查询失败</b>\n\n${htmlEscape(getErrorMessage(err) || "未知错误")}`;
                 try {
                     if (msgDeleted) {
                         await client.sendText(msg.chat.id, html(errText));
                     } else {
                         await msg.edit({ text: html(errText) });
                     }
-                } catch {}
+                } catch (e: unknown) { logger.warn('[bgp] send error msg failed:', e) }
             }
         },
     };

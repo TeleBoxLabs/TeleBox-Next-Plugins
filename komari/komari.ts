@@ -1,10 +1,35 @@
 import { Plugin } from "@utils/pluginBase";
 import type { MessageContext } from "@mtcute/dispatcher";
 import { html } from "@mtcute/html-parser";
+import { htmlEscape } from "@utils/htmlEscape";
 import axios from "axios";
 import Database from "better-sqlite3";
 import * as fs from "fs";
 import * as path from "path";
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
+import { TelegramFormatter } from "@utils/telegramFormatter";
+
+/** Komari API 节点对象类型 */
+interface KomariNode {
+  uuid: string;
+  name: string;
+  cpu_cores?: number;
+  mem_total?: number;
+  swap_total?: number;
+  disk_total?: number;
+}
+
+/** Komari API 实时数据类型 */
+interface KomariRealtimeData {
+  cpu?: { usage?: number };
+  load?: { load1?: number; load5?: number; load15?: number };
+  ram?: { used?: number; total?: number };
+  swap?: { used?: number; total?: number };
+  disk?: { used?: number; total?: number };
+  network?: { totalDown?: number; totalUp?: number; down?: number; up?: number };
+  connections?: { tcp?: number; udp?: number };
+}
 
 // 配置存储键名
 const CONFIG_KEYS = {
@@ -13,7 +38,7 @@ const CONFIG_KEYS = {
 
 // 数据库路径
 const CONFIG_DB_PATH = path.join(
-  (globalThis as any).process?.cwd?.() || ".",
+  (globalThis as { process?: { cwd?: () => string } })?.process?.cwd?.() || ".",
   "assets",
   "komari_config.db"
 );
@@ -42,8 +67,8 @@ class ConfigManager {
         )
       `);
       this.initialized = true;
-    } catch (error) {
-      console.error("初始化Komari配置数据库失败:", error);
+    } catch (error: unknown) {
+      logger.error("初始化Komari配置数据库失败:", error);
     }
   }
 
@@ -58,8 +83,8 @@ class ConfigManager {
       if (row) {
         return row.value;
       }
-    } catch (error) {
-      console.error("读取Komari配置失败:", error);
+    } catch (error: unknown) {
+      logger.error("读取Komari配置失败:", error);
     }
 
     return defaultValue || "";
@@ -75,8 +100,8 @@ class ConfigManager {
         VALUES (?, ?, CURRENT_TIMESTAMP)
       `);
       stmt.run(key, value);
-    } catch (error) {
-      console.error("保存Komari配置失败:", error);
+    } catch (error: unknown) {
+      logger.error("保存Komari配置失败:", error);
     }
   }
 
@@ -95,8 +120,8 @@ class ConfigManager {
       });
 
       return config;
-    } catch (error) {
-      console.error("读取所有Komari配置失败:", error);
+    } catch (error: unknown) {
+      logger.error("读取所有Komari配置失败:", error);
       return {};
     }
   }
@@ -109,8 +134,8 @@ class ConfigManager {
     try {
       const stmt = this.db.prepare("DELETE FROM config WHERE key = ?");
       stmt.run(key);
-    } catch (error) {
-      console.error("删除Komari配置失败:", error);
+    } catch (error: unknown) {
+      logger.error("删除Komari配置失败:", error);
     }
   }
 
@@ -119,7 +144,7 @@ class ConfigManager {
     if (this.db) {
       try {
         this.db.close();
-      } catch {}
+      } catch (e: unknown) { logger.warn('操作失败', e) }
     }
     this.db = null;
     this.initialized = false;
@@ -211,7 +236,7 @@ function formatExpiredDate(dateStr: string): string {
     } else {
       return `${dateString} (已过期 ${Math.abs(diffDays)} 天)`;
     }
-  } catch {
+  } catch (_e: unknown) {
     return "未知";
   }
 }
@@ -232,11 +257,12 @@ async function makeRequest(url: string, endpoint: string): Promise<any> {
     }
 
     return response.data;
-  } catch (error: any) {
-    if (error.response) {
-      throw new Error(`API 请求失败: HTTP ${error.response.status}`);
+  } catch (error: unknown) {
+    if (error !== null && error !== undefined && typeof error === "object" && "response" in error && (error as { response?: { status?: number } }).response) {
+      const resp = (error as { response: { status?: number } }).response;
+      throw new Error(`API 请求失败: HTTP ${resp.status}`);
     }
-    throw new Error(`网络请求失败: ${error.message}`);
+    throw new Error(`网络请求失败: ${getErrorMessage(error)}`);
   }
 }
 
@@ -270,7 +296,7 @@ async function getServerInfo(baseUrl: string): Promise<string> {
     let totalSwap = 0;
     let totalDisk = 0;
 
-    nodes.forEach((node: any) => {
+    nodes.forEach((node: KomariNode) => {
       totalCores += node.cpu_cores || 0;
       totalMemory += node.mem_total || 0;
       totalSwap += node.swap_total || 0;
@@ -289,8 +315,8 @@ async function getServerInfo(baseUrl: string): Promise<string> {
 • **内存总量**: \`${formatBytes(totalMemory)}\`
 • **交换分区总量**: \`${formatBytes(totalSwap)}\`
 • **硬盘总量**: \`${formatBytes(totalDisk)}\``;
-  } catch (error: any) {
-    throw new Error(`获取服务器信息失败: ${error.message}`);
+  } catch (error: unknown) {
+    throw new Error(`获取服务器信息失败: ${getErrorMessage(error)}`);
   }
 }
 
@@ -312,28 +338,31 @@ async function getNodesOverview(baseUrl: string): Promise<string> {
 
     // 尝试通过 WebSocket 获取实时数据
     let onlineNodes: string[] = [];
-    let realtimeData: { [key: string]: any } = {};
+    let realtimeData: { [key: string]: KomariRealtimeData } = {};
 
     try {
-      // 这里我们通过 /api/recent/ 接口来获取每个节点的最新数据
-      // 作为 WebSocket 的替代方案
-      for (const node of nodes) {
-        try {
-          const recentData = await makeRequest(
-            baseUrl,
-            `/api/recent/${node.uuid}`
-          );
-          if (recentData.status === "success" && recentData.data.length > 0) {
-            onlineNodes.push(node.uuid);
-            realtimeData[node.uuid] = recentData.data[0];
-          }
-        } catch {
-          // 节点可能离线，忽略错误
+      // 并行获取每个节点的最新数据（作为 WebSocket 的替代方案）
+      const results = await Promise.all(
+        nodes.map(async (node: KomariNode) => {
+          try {
+            const recentData = await makeRequest(
+              baseUrl,
+              `/api/recent/${node.uuid}`
+            );
+            if (recentData.status === "success" && recentData.data.length > 0) {
+              return { uuid: node.uuid, data: recentData.data[0] };
+            }
+            return null;
+          } catch (e: unknown) { logger.warn(`[komari] 节点可能离线，忽略错误:`, e); return null; }
+        })
+      );
+      for (const r of results) {
+        if (r) {
+          onlineNodes.push(r.uuid);
+          realtimeData[r.uuid] = r.data;
         }
       }
-    } catch {
-      // 如果获取实时数据失败，使用节点列表数据
-    }
+    } catch (e: unknown) { logger.warn(`[komari] 如果获取实时数据失败，使用节点列表数据:`, e) }
 
     const totalNodes = nodes.length;
     const onlineCount = onlineNodes.length;
@@ -363,7 +392,7 @@ async function getNodesOverview(baseUrl: string): Promise<string> {
       const data = realtimeData[uuid];
       if (data) {
         // 找到对应的节点信息以获取核心数
-        const node = nodes.find((n: any) => n.uuid === uuid);
+        const node = nodes.find((n: KomariNode) => n.uuid === uuid);
         if (node) {
           totalCores += node.cpu_cores || 0;
         }
@@ -434,8 +463,8 @@ async function getNodesOverview(baseUrl: string): Promise<string> {
 • **下载速度**: \`${formatSpeed(totalDownSpeed)}\`
 • **上传速度**: \`${formatSpeed(totalUpSpeed)}\`
 • **连接数**: \`${totalTcpConnections} TCP / ${totalUdpConnections} UDP\``;
-  } catch (error: any) {
-    throw new Error(`获取节点总览失败: ${error.message}`);
+  } catch (error: unknown) {
+    throw new Error(`获取节点总览失败: ${getErrorMessage(error)}`);
   }
 }
 
@@ -459,7 +488,7 @@ async function getNodeDetails(
     const nodes = nodesData.data;
 
     // 查找指定名称的节点
-    const targetNode = nodes.find((node: any) => node.name === nodeName);
+    const targetNode = nodes.find((node: KomariNode) => node.name === nodeName);
     if (!targetNode) {
       throw new Error(`未找到名为 "${nodeName}" 的节点`);
     }
@@ -561,8 +590,8 @@ async function getNodeDetails(
     } UDP\`
 
 **⏰ 更新时间**: \`${updateTime}\``;
-  } catch (error: any) {
-    throw new Error(`获取节点详情失败: ${error.message}`);
+  } catch (error: unknown) {
+    throw new Error(`获取节点详情失败: ${getErrorMessage(error)}`);
   }
 }
 
@@ -593,7 +622,7 @@ async function handleKomariRequest(msg: MessageContext): Promise<void> {
       });
 
       setTimeout(() => {
-        msg.delete().catch(() => {});
+        msg.delete().catch(() => { /* msg may already be deleted */ });
       }, 5000);
       return;
     }
@@ -610,20 +639,20 @@ async function handleKomariRequest(msg: MessageContext): Promise<void> {
     // 处理不同的子命令
     if (args.length === 0 || args[0] === "status") {
       await msg.edit({ text: html`🔄 获取服务器信息中...` });
-     const result = await getServerInfo(baseUrl);
+     const result = TelegramFormatter.markdownToHtml(await getServerInfo(baseUrl));
       await msg.edit({
         text: html`${result}`,
       });
     } else if (args[0] === "total") {
       await msg.edit({ text: html`🔄 获取节点总览中...` });
-     const result = await getNodesOverview(baseUrl);
+     const result = TelegramFormatter.markdownToHtml(await getNodesOverview(baseUrl));
       await msg.edit({
         text: html`${result}`,
       });
     } else if (args[0] === "show" && args.length >= 2) {
       const nodeName = args.slice(1).join(" ");
-      await msg.edit({ text: html`🔄 获取节点 "${nodeName}" 信息中...` });
-     const result = await getNodeDetails(baseUrl, nodeName);
+      await msg.edit({ text: html`🔄 获取节点 "${htmlEscape(nodeName)}" 信息中...` });
+     const result = TelegramFormatter.markdownToHtml(await getNodeDetails(baseUrl, nodeName));
       await msg.edit({
         text: html`${result}`,
       });
@@ -638,14 +667,14 @@ async function handleKomariRequest(msg: MessageContext): Promise<void> {
 • <code>komari _set_url &lt;URL&gt;</code> - 设置 Komari 服务器 URL`,
       });
     }
-  } catch (error: any) {
-    console.error("Komari处理错误:", error);
+  } catch (error: unknown) {
+    logger.error("Komari处理错误:", error);
 
-    const errorMsg = `❌ 错误：${error.message}`;
+    const errorMsg = `❌ 错误：${getErrorMessage(error)}`;
     await msg.edit({ text: html`${errorMsg}` });
 
     setTimeout(() => {
-      msg.delete().catch(() => {});
+      msg.delete().catch(() => { /* msg may already be deleted */ });
     }, 10000);
   }
 }

@@ -1,18 +1,19 @@
+import { getErrorMessage } from "@utils/errorHelpers";
 import { Plugin } from "@utils/pluginBase";
 import type { MessageContext } from "@mtcute/dispatcher";
 import { html } from "@mtcute/html-parser";
-import { TelegramClient } from "@mtcute/node";
 import { getGlobalClient } from "@utils/globalClient";
 import { safeGetReplyMessage } from "@utils/safeGetMessages";
+import { logger } from "@utils/logger";
+import type { tl } from "@mtcute/core";
+import { htmlEscape } from "@utils/htmlEscape";
 
-const htmlEscape = (text: string): string =>
-  text.replace(/[&<>"']/g, (m) => ({
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    '"': "&quot;",
-    "'": "&#x27;",
-  }[m] || m));
+/** Shape of the users.userFull TL response wrapper */
+interface UsersUserFullResponse {
+  users: tl.TypeUser[];
+  chats: tl.TypeChat[];
+  fullUser: tl.TypeUserFull;
+}
 
 const dc = async (msg: MessageContext) => {
   const args = msg.text.slice(1).split(" ").slice(1);
@@ -59,13 +60,13 @@ const dc = async (msg: MessageContext) => {
 
       try {
         // 尝试获取用户信息
-        const fullUser: any = await client.call({
+        const fullUser = await client.call({
           _: 'users.getFullUser',
-          id: await client.resolvePeer(senderId) as any,
-        });
+          id: await client.resolveUser(senderId),
+        }) as UsersUserFullResponse;
 
         const user = fullUser.users[0];
-        if (!user.photo || user.photo._ === "userProfilePhotoEmpty") {
+        if (!user || user._ === "userEmpty" || !user.photo || user.photo._ === "userProfilePhotoEmpty") {
           await msg.edit({
             text: html`❌ 目标用户没有头像，无法获取 DC 信息`,
           });
@@ -78,14 +79,14 @@ const dc = async (msg: MessageContext) => {
           text: html`📍 <b>${htmlEscape(firstName)}</b> 所在数据中心为: <b>DC${photo.dcId}</b>`,
         });
         return;
-      } catch (error) {
+      } catch (_e: unknown) {
         // 如果获取用户失败，尝试获取聊天信息
         try {
           const chat = await (replyMessage as MessageContext).getCompleteChat();
           if (
             !chat ||
-            !(chat as any).photo ||
-            (chat as any).photo?._ === "chatPhotoEmpty"
+            !chat.photo ||
+            (chat.photo.raw._ !== "userProfilePhoto" && chat.photo.raw._ !== "chatPhoto")
           ) {
             await msg.edit({
               text: html`❌ 回复的消息所在对话需要先设置头像`,
@@ -93,13 +94,13 @@ const dc = async (msg: MessageContext) => {
             return;
           }
 
-          const photo = (chat as any).photo;
-          const title = (chat as any).title || "未知聊天";
+          const photo = chat.photo.raw;
+          const title = chat.displayName || "未知聊天";
           await msg.edit({
             text: html`📍 <b>${htmlEscape(title)}</b> 所在数据中心为: <b>DC${photo.dcId}</b>`,
           });
           return;
-        } catch (chatError) {
+        } catch (_e: unknown) {
           await msg.edit({
             text: html`❌ 无法获取该对象的 DC 信息`,
           });
@@ -113,8 +114,8 @@ const dc = async (msg: MessageContext) => {
       const chat = await msg.getCompleteChat();
       if (
         !chat ||
-        !(chat as any).photo ||
-        (chat as any).photo?._ === "chatPhotoEmpty"
+        !chat.photo ||
+        (chat.photo.raw._ !== "userProfilePhoto" && chat.photo.raw._ !== "chatPhoto")
       ) {
         await msg.edit({
           text: html`❌ 当前群组/频道没有头像，无法获取 DC 信息`,
@@ -122,8 +123,8 @@ const dc = async (msg: MessageContext) => {
         return;
       }
 
-      const photo = (chat as any).photo;
-      const title = (chat as any).title || "当前聊天";
+      const photo = chat.photo.raw;
+      const title = chat.displayName || "当前聊天";
       await msg.edit({
         text: html`📍 <b>${htmlEscape(title)}</b> 所在数据中心为: <b>DC${photo.dcId}</b>`,
       });
@@ -131,17 +132,17 @@ const dc = async (msg: MessageContext) => {
     }
 
     // 处理用户参数
-    let targetUser: any = null;
+    let targetUser: string | number | null = null;
 
     try {
       // 检查消息实体（@用户名或电话号码）
       if (msg.entities) {
         for (const entity of msg.entities) {
-          if ((entity as any)._ === "messageEntityMentionName") {
-            targetUser = (entity as any).userId.toString();
+          if (entity.is('text_mention')) {
+            targetUser = entity.params.userId.toString();
             break;
           }
-          if ((entity as any)._ === "messageEntityPhone") {
+          if (entity.kind === "phone_number") {
             if (/^\d+$/.test(param)) {
               targetUser = parseInt(param);
             }
@@ -158,8 +159,8 @@ const dc = async (msg: MessageContext) => {
           targetUser = param;
         }
       }
-    } catch (entityError) {
-      console.error("解析消息实体失败:", entityError);
+    } catch (entityError: unknown) {
+      logger.error("解析消息实体失败:", entityError);
       // 降级为直接使用参数
       if (/^\d+$/.test(param)) {
         targetUser = parseInt(param);
@@ -180,13 +181,13 @@ const dc = async (msg: MessageContext) => {
       const userEntity = await client.getChat(targetUser);
 
       // 获取完整用户信息
-      const fullUser: any = await client.call({
+      const fullUser = await client.call({
         _: 'users.getFullUser',
-        id: await client.resolvePeer((userEntity as any).id) as any,
-      });
+        id: await client.resolveUser(userEntity.id),
+      }) as UsersUserFullResponse;
 
       const user = fullUser.users[0];
-      if (!user.photo || user.photo._ === "userProfilePhotoEmpty") {
+      if (!user || user._ === "userEmpty" || !user.photo || user.photo._ === "userProfilePhotoEmpty") {
         await msg.edit({
           text: html`❌ 目标用户需要先设置头像才能获取 DC 信息`,
         });
@@ -198,7 +199,7 @@ const dc = async (msg: MessageContext) => {
       await msg.edit({
         text: html`📍 <b>${htmlEscape(firstName)}</b> 所在数据中心为: <b>DC${photo.dcId}</b>`,
       });
-    } catch (error) {
+    } catch (error: unknown) {
       const errorStr = String(error);
 
       if (errorStr.includes("Cannot find any entity corresponding to")) {
@@ -218,7 +219,7 @@ const dc = async (msg: MessageContext) => {
           text: html`❌ 用户ID过长，请检查输入`,
         });
       } else {
-        console.error("DC插件获取用户信息失败:", error);
+        logger.error("DC插件获取用户信息失败:", error);
         await msg.edit({
           text: html`❌ <b>获取用户信息失败:</b> ${htmlEscape(
             errorStr.length > 100
@@ -228,10 +229,10 @@ const dc = async (msg: MessageContext) => {
         });
       }
     }
-  } catch (error) {
-    console.error("DC插件执行失败:", error);
+  } catch (error: unknown) {
+    logger.error("DC插件执行失败:", error);
     await msg.edit({
-      text: html`❌ <b>DC 查询失败:</b> ${htmlEscape(String(error))}`,
+      text: html`❌ <b>DC 查询失败:</b> ${htmlEscape(getErrorMessage(error))}`,
     });
   }
 };

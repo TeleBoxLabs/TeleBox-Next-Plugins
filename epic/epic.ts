@@ -4,14 +4,12 @@ import { html } from "@mtcute/html-parser";
 import { getGlobalClient } from "@utils/globalClient";
 import { getPrefixes } from "@utils/pluginManager";
 import axios from "axios";
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
+import { htmlEscape } from "@utils/htmlEscape";
 
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
-
-const htmlEscape = (text: string): string => {
-  if (typeof text !== "string") return "";
-  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
-};
 
 const help_text = `⚙️ <b>Epic 限免游戏</b>
 
@@ -38,8 +36,70 @@ interface EpicGame {
   imageUrl: string;
 }
 
+interface EpicCategory {
+  path: string;
+}
+
+interface EpicKeyImage {
+  type: string;
+  url: string;
+}
+
+interface EpicPrice {
+  totalPrice?: {
+    fmtPrice?: {
+      originalPrice?: string;
+    };
+    discountPrice?: number;
+  };
+}
+
+interface EpicPromoOffer {
+  startDate?: string;
+  endDate?: string;
+  discountSetting?: {
+    discountPercentage?: number;
+  };
+}
+
+interface EpicPromotions {
+  promotionalOffers?: { promotionalOffers: EpicPromoOffer[] }[];
+  upcomingPromotionalOffers?: { promotionalOffers: EpicPromoOffer[] }[];
+}
+
+interface EpicGameElement {
+  title?: string;
+  description?: string;
+  categories?: EpicCategory[];
+  keyImages?: EpicKeyImage[];
+  price?: EpicPrice;
+  promotions?: EpicPromotions;
+  offerMappings?: { pageSlug?: string }[];
+  catalogNs?: { mappings?: { pageSlug?: string }[] };
+  productSlug?: string;
+  urlSlug?: string;
+}
+
+interface EpicApiResponse {
+  data?: {
+    Catalog?: {
+      searchStore?: {
+        elements?: EpicGameElement[];
+      };
+    };
+  };
+}
+
+interface EpicGameBase {
+  title: string;
+  description: string;
+  originalPrice: string;
+  url: string;
+  imageUrl: string;
+}
+
 // 解析限免游戏数据
-function parseFreeGames(data: any): { current: EpicGame[]; upcoming: EpicGame[] } {
+function parseFreeGames(data: EpicApiResponse): { current: EpicGame[]; upcoming: EpicGame[] } {
   const current: EpicGame[] = [];
   const upcoming: EpicGame[] = [];
 
@@ -47,7 +107,7 @@ function parseFreeGames(data: any): { current: EpicGame[]; upcoming: EpicGame[] 
 
   for (const game of elements) {
     // 跳过非游戏类型
-    if (!game.categories?.some((c: any) => c.path === "freegames")) continue;
+    if (!game.categories?.some((c: EpicCategory) => c.path === "freegames")) continue;
 
     const promotions = game.promotions;
     if (!promotions) continue;
@@ -57,13 +117,13 @@ function parseFreeGames(data: any): { current: EpicGame[]; upcoming: EpicGame[] 
     const url = pageSlug ? `https://store.epicgames.com/zh-CN/p/${pageSlug}` : "";
 
     // 获取图片
-    const imageUrl = game.keyImages?.find((img: any) => img.type === "OfferImageWide" || img.type === "Thumbnail")?.url || "";
+    const imageUrl = game.keyImages?.find((img: EpicKeyImage) => img.type === "OfferImageWide" || img.type === "Thumbnail")?.url || "";
 
     // 获取价格
     const price = game.price?.totalPrice;
     const originalPrice = price?.fmtPrice?.originalPrice || "免费";
 
-    const baseInfo: Omit<EpicGame, "startDate" | "endDate"> = {
+    const baseInfo: EpicGameBase = {
       title: game.title || "未知游戏",
       description: game.description || "",
       originalPrice,
@@ -76,8 +136,8 @@ function parseFreeGames(data: any): { current: EpicGame[]; upcoming: EpicGame[] 
     if (currentPromo && price?.discountPrice === 0) {
       current.push({
         ...baseInfo,
-        startDate: currentPromo.startDate,
-        endDate: currentPromo.endDate,
+        startDate: currentPromo.startDate || "",
+        endDate: currentPromo.endDate || "",
       });
       continue;
     }
@@ -87,8 +147,8 @@ function parseFreeGames(data: any): { current: EpicGame[]; upcoming: EpicGame[] 
     if (upcomingPromo && upcomingPromo.discountSetting?.discountPercentage === 0) {
       upcoming.push({
         ...baseInfo,
-        startDate: upcomingPromo.startDate,
-        endDate: upcomingPromo.endDate,
+        startDate: upcomingPromo.startDate || "",
+        endDate: upcomingPromo.endDate || "",
       });
     }
   }
@@ -101,7 +161,7 @@ function formatDate(dateStr: string): string {
   try {
     const date = new Date(dateStr);
     return date.toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
-  } catch {
+  } catch (_e: unknown) {
     return dateStr;
   }
 }
@@ -145,7 +205,7 @@ class EpicPlugin extends Plugin {
         await msg.edit({ text: "🎮 获取 Epic 限免游戏中..." });
 
         const res = await axios.get(EPIC_API_URL, { timeout: 15000 });
-        const { current, upcoming } = parseFreeGames(res.data);
+        const { current, upcoming } = parseFreeGames(res.data as EpicApiResponse);
         let text = "🎮 <b>Epic Games 限免游戏</b><br><br>";
 
         if (current.length > 0) {
@@ -155,10 +215,15 @@ class EpicPlugin extends Plugin {
           text += "📢 <b>当前限免:</b> 暂无<br><br>";
         }
 
+        if (upcoming.length > 0) {
+          text += "🔜 <b>即将限免:</b><br><br>";
+          upcoming.forEach((g, i) => (text += buildGameText(g, i + 1) + "<br><br>"));
+        }
+
         await msg.edit({ text: html`${text}`, disableWebPreview: true });
-      } catch (error: any) {
-        console.error("[epic] 获取失败:", error);
-        await msg.edit({ text: html`❌ <b>获取失败:</b> ${htmlEscape(error.message || "网络错误")}` });
+      } catch (error: unknown) {
+        logger.error("[epic] 获取失败:", error);
+        await msg.edit({ text: html`❌ <b>获取失败:</b> ${htmlEscape(getErrorMessage(error) || "网络错误")}` });
       }
     },
   };

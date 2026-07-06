@@ -8,7 +8,7 @@ import type { MessageContext } from "@mtcute/dispatcher";
 import type { TelegramClient } from "@mtcute/node";
 import { html } from "@mtcute/html-parser";
 import { getPrefixes } from "@utils/pluginManager";
-import bigInt from "big-integer";
+import { logger } from "@utils/logger";
 
 // Track pending setTimeout handles for safe cleanup on reload
 const pendingTimers = new Set<ReturnType<typeof setTimeout>>();
@@ -43,6 +43,42 @@ enum PrizeStatus {
   EXPIRED = "expired"   // ❌ 已过期
 }
 
+// Database row interfaces
+interface PrizeWarehouseRow {
+  id: number;
+  warehouse_name: string;
+  prize_text: string;
+  stock_count: number;
+  order_index: number;
+  created_at: number;
+  next_order?: number;
+}
+
+interface LotteryConfigRow {
+  id: number;
+  chat_id: string;
+  title: string;
+  keyword: string;
+  max_participants: number;
+  winner_count: number;
+  mode: string;
+  distribution_mode: string;
+  claim_timeout: number;
+  delete_delay: number;
+  require_avatar: number | boolean;
+  require_username: number | boolean;
+  required_channel: string;
+  prize_warehouse: string;
+  allow_bots: number | boolean;
+  member_filter: string;
+  auto_draw_time: number;
+  created_at: number;
+  status: string;
+  creator_id: string;
+  unique_id: string;
+  message_id: string;
+}
+
 // Lottery mode enum
 enum LotteryMode {
   MANUAL = "manual",    // 手动开奖
@@ -55,12 +91,50 @@ enum DistributionMode {
   AUTO_SEND = "auto"    // 发奖者主动派奖
 }
 
+interface TableInfoRow {
+  name: string;
+}
+
+/** Aggregate row for warehouse prize counts */
+interface WarehouseSummaryRow {
+  warehouse_name: string;
+  prize_count: number;
+  total_stock: number;
+}
+
+/** Loticipant row from lottery_participants table */
+interface LotteryParticipantRow {
+  id: number;
+  lottery_id: number;
+  user_id: string;
+  username: string | null;
+  first_name: string | null;
+  last_name: string | null;
+  joined_at: number;
+}
+
+/** Winner row from lottery_winners table */
+interface LotteryWinnerRow {
+  id: number;
+  lottery_id: number;
+  user_id: string;
+  username: string | null;
+  first_name: string | null;
+  last_name: string | null;
+  prize_id: number | null;
+  prize_text: string | null;
+  status: string;
+  assigned_at: number;
+  claimed_at: number | null;
+  expires_at: number | null;
+}
+
 // Initialize enhanced database tables
 if (db) {
   // Ensure database schema is up to date
   try {
     // Check and migrate lottery_config table
-    const tableInfo = db.prepare("PRAGMA table_info(lottery_config)").all() as any[];
+    const tableInfo = db.prepare("PRAGMA table_info(lottery_config)").all() as TableInfoRow[];
     const hasWarehouseColumn = tableInfo.some(col => col.name === 'prize_warehouse');
     const hasMessageIdColumn = tableInfo.some(col => col.name === 'message_id');
     
@@ -70,9 +144,7 @@ if (db) {
     if (!hasMessageIdColumn) {
       db.exec(`ALTER TABLE lottery_config ADD COLUMN message_id TEXT`);
     }
-  } catch (error) {
-    // Table doesn't exist yet, will be created below
-  }
+  } catch (error: unknown) { logger.warn(`[lottery] Table doesn't exist yet, will be created below:`, error) }
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS lottery_config (
@@ -177,7 +249,7 @@ function addPrizeToWarehouse(warehouseName: string, prizeText: string, stock: nu
   const existingPrize = db.prepare(`
     SELECT id, stock_count FROM prize_warehouse 
     WHERE warehouse_name = ? AND prize_text = ?
-  `).get(warehouseName, prizeText) as any;
+  `).get(warehouseName, prizeText) as PrizeWarehouseRow | undefined;
   
   if (existingPrize) {
     // Update existing prize stock
@@ -193,7 +265,7 @@ function addPrizeToWarehouse(warehouseName: string, prizeText: string, stock: nu
       SELECT COALESCE(MAX(order_index), 0) + 1 as next_order 
       FROM prize_warehouse WHERE warehouse_name = ?
     `);
-    const nextOrder = (maxOrderStmt.get(warehouseName) as any)?.next_order || 1;
+    const nextOrder = (maxOrderStmt.get(warehouseName) as PrizeWarehouseRow | undefined)?.next_order || 1;
     
     // Insert new prize
     const stmt = db.prepare(`
@@ -211,10 +283,10 @@ function getPrizeWarehouses(): string[] {
     SELECT DISTINCT warehouse_name FROM prize_warehouse 
     ORDER BY warehouse_name
   `);
-  return stmt.all().map((row: any) => row.warehouse_name);
+  return (stmt.all() as WarehouseSummaryRow[]).map((row) => row.warehouse_name);
 }
 
-function getAllWarehousesWithPrizes(): any[] {
+function getAllWarehousesWithPrizes(): WarehouseSummaryRow[] {
   if (!db) return [];
   
   const stmt = db.prepare(`
@@ -224,7 +296,7 @@ function getAllWarehousesWithPrizes(): any[] {
     GROUP BY warehouse_name 
     ORDER BY warehouse_name
   `);
-  return stmt.all();
+  return stmt.all() as unknown as WarehouseSummaryRow[];
 }
 
 function getWarehouseByNameOrIndex(identifier: string, warehouses: string[]): string | null {
@@ -242,7 +314,7 @@ function getWarehouseByNameOrIndex(identifier: string, warehouses: string[]): st
   return null;
 }
 
-function getWarehousePrizes(warehouseName: string): any[] {
+function getWarehousePrizes(warehouseName: string): PrizeWarehouseRow[] {
   if (!db) return [];
   
   const stmt = db.prepare(`
@@ -250,10 +322,10 @@ function getWarehousePrizes(warehouseName: string): any[] {
     WHERE warehouse_name = ? AND stock_count > 0 
     ORDER BY order_index
   `);
-  return stmt.all(warehouseName);
+  return stmt.all(warehouseName) as PrizeWarehouseRow[];
 }
 
-function getNextAvailablePrize(warehouseName: string): any | null {
+function getNextAvailablePrize(warehouseName: string): PrizeWarehouseRow | null {
   if (!db) return null;
   
   const stmt = db.prepare(`
@@ -262,7 +334,7 @@ function getNextAvailablePrize(warehouseName: string): any | null {
     ORDER BY order_index 
     LIMIT 1
   `);
-  return stmt.get(warehouseName) || null;
+  return (stmt.get(warehouseName) as PrizeWarehouseRow | undefined) || null;
 }
 
 function consumePrize(prizeId: number): boolean {
@@ -317,14 +389,36 @@ function deleteLotteryActivity(lotteryId: number): boolean {
     
     transaction();
     return true;
-  } catch (error) {
-    console.error("Failed to delete lottery activity:", error);
+  } catch (error: unknown) {
+    logger.error("Failed to delete lottery activity:", error);
     return false;
   }
 }
 
 // Enhanced lottery management functions
-function createLotteryConfig(config: any): number {
+/** Input for creating a new lottery */
+interface CreateLotteryInput {
+  chat_id: string;
+  title: string;
+  keyword: string;
+  max_participants: number;
+  winner_count: number;
+  mode: string;
+  distribution_mode: string;
+  claim_timeout: number;
+  delete_delay: number;
+  require_avatar: boolean | number;
+  require_username: boolean | number;
+  required_channel?: string | null;
+  prize_warehouse?: string;
+  allow_bots: boolean | number;
+  member_filter?: string | null;
+  auto_draw_time?: number | null;
+  creator_id: string;
+  unique_id: string;
+}
+
+function createLotteryConfig(config: CreateLotteryInput): number {
   if (!db) return 0;
   
   const stmt = db.prepare(`
@@ -348,7 +442,7 @@ function createLotteryConfig(config: any): number {
   return result.lastInsertRowid as number;
 }
 
-function getActiveLottery(chatId: string): any | null {
+function getActiveLottery(chatId: string): LotteryConfigRow | null {
   if (!db) return null;
   
   const stmt = db.prepare(`
@@ -356,10 +450,18 @@ function getActiveLottery(chatId: string): any | null {
     WHERE chat_id = ? AND status = 'active' 
     ORDER BY created_at DESC LIMIT 1
   `);
-  return stmt.get(chatId) as any;
+  return stmt.get(chatId) as LotteryConfigRow | null;
 }
 
-function addParticipantToLottery(lotteryId: number, participant: any): boolean {
+/** Input for adding a participant to a lottery */
+interface AddParticipantInput {
+  user_id: string | number;
+  username?: string | null;
+  first_name?: string | null;
+  last_name?: string | null;
+}
+
+function addParticipantToLottery(lotteryId: number, participant: AddParticipantInput): boolean {
   if (!db) return false;
   
   try {
@@ -396,38 +498,50 @@ function addParticipantToLottery(lotteryId: number, participant: any): boolean {
     
     transaction();
     return true;
-  } catch (error) {
-    console.error("Failed to add participant:", error);
+  } catch (error: unknown) {
+    logger.error("Failed to add participant:", error);
     return false;
   }
 }
 
-function getLotteryParticipants(lotteryId: number): any[] {
+function getLotteryParticipants(lotteryId: number): LotteryParticipantRow[] {
   if (!db) return [];
-  
+
   const stmt = db.prepare(`
-    SELECT * FROM lottery_participants 
+    SELECT * FROM lottery_participants
     WHERE lottery_id = ? ORDER BY joined_at
   `);
-  return stmt.all(lotteryId);
+  return stmt.all(lotteryId) as LotteryParticipantRow[];
 }
 
-function getLotteryWinners(lotteryId: number): any[] {
+function getLotteryWinners(lotteryId: number): LotteryWinnerRow[] {
   if (!db) return [];
-  
+
   const stmt = db.prepare(`
-    SELECT w.*, p.username, p.first_name, p.last_name 
+    SELECT w.*, p.username, p.first_name, p.last_name
     FROM lottery_winners w
     LEFT JOIN lottery_participants p ON w.user_id = p.user_id AND w.lottery_id = p.lottery_id
     WHERE w.lottery_id = ?
     ORDER BY w.assigned_at
   `);
-  return stmt.all(lotteryId);
+  return stmt.all(lotteryId) as LotteryWinnerRow[];
 }
 
 
+/** Minimal user info from Telegram */
+interface LotteryUser {
+  id?: number | string;
+  user_id?: string;
+  bot?: boolean;
+  username?: string | null;
+  first_name?: string | null;
+  last_name?: string | null;
+  firstName?: string;
+  lastName?: string;
+}
+
 // User validation functions
-async function validateUserConditions(client: TelegramClient, user: any, lottery: any, chatId: string): Promise<{ valid: boolean; reason?: string }> {
+async function validateUserConditions(client: TelegramClient, user: LotteryUser, lottery: LotteryConfigRow, chatId: string): Promise<{ valid: boolean; reason?: string }> {
   try {
     // Check if user is a bot
     if (!lottery.allow_bots && user.bot) {
@@ -437,8 +551,8 @@ async function validateUserConditions(client: TelegramClient, user: any, lottery
     // Check avatar requirement
     if (lottery.require_avatar) {
       const userId = user.id || user;
-      const userEntity = await getEntityWithHash(client, userId as any);
-      if (userEntity && typeof userEntity === "object" && "photo" in userEntity && !(userEntity as any).photo) {
+      const userEntity = await getEntityWithHash(client, userId as number);
+      if (userEntity && typeof userEntity === "object" && "photo" in userEntity && !(userEntity as { photo?: unknown }).photo) {
         return { valid: false, reason: "需要设置头像才能参与抽奖" };
       }
     }
@@ -451,22 +565,26 @@ async function validateUserConditions(client: TelegramClient, user: any, lottery
     // Check channel subscription requirement
     if (lottery.required_channel) {
       try {
-        const userId = user.id || user;
+        const rawUserId = user.id;
+        const userId = typeof rawUserId === 'number' ? rawUserId : (typeof rawUserId === 'string' ? Number(rawUserId) : 0);
+        if (!userId) {
+          return { valid: false, reason: "无法获取用户ID" };
+        }
         const participant = await client.getChatMember({
-          chatId: lottery.required_channel,
-          userId: userId,
+          chatId: lottery.required_channel ?? '',
+          userId,
         });
         if (!participant) {
           return { valid: false, reason: `需要关注频道 ${lottery.required_channel} 才能参与抽奖` };
         }
-      } catch (error) {
+      } catch (_e: unknown) {
         return { valid: false, reason: `需要关注指定频道才能参与抽奖` };
       }
     }
 
     return { valid: true };
-  } catch (error) {
-    console.error("Error validating user conditions:", error);
+  } catch (error: unknown) {
+    logger.error("Error validating user conditions:", error);
     return { valid: true }; // Default to allow if validation fails
   }
 }
@@ -521,7 +639,7 @@ function expireOldClaims(): number {
 }
 
 // Enhanced prize distribution
-async function distributePrizes(client: TelegramClient, lottery: any, winners: any[]): Promise<void> {
+async function distributePrizes(client: TelegramClient, lottery: LotteryConfigRow, winners: LotteryUser[]): Promise<void> {
   if (!db) return;
   
   try {
@@ -554,7 +672,7 @@ async function distributePrizes(client: TelegramClient, lottery: any, winners: a
         );
         
         // Consume prize stock if from warehouse
-        if (prize) {
+        if (prize?.id) {
           consumePrize(prize.id);
         }
       }
@@ -567,19 +685,19 @@ async function distributePrizes(client: TelegramClient, lottery: any, winners: a
       for (const winner of winners) {
         const winnerRecord = getLotteryWinners(lottery.id).find(w => w.user_id === winner.user_id);
         if (winnerRecord) {
-          await sendPrizeToWinner(client, winner, winnerRecord.prize_text, lottery);
+          await sendPrizeToWinner(client, winner, winnerRecord.prize_text ?? '', lottery);
           await new Promise(resolve => setTimeout(resolve, 1000)); // Rate limiting
         }
       }
     }
-  } catch (error) {
-    console.error("Failed to distribute prizes:", error);
+  } catch (error: unknown) {
+    logger.error("Failed to distribute prizes:", error);
     throw error;
   }
 }
 
 // Send prize message to winner
-async function sendPrizeToWinner(client: TelegramClient, winner: any, prizeText: string, lottery: any): Promise<boolean> {
+async function sendPrizeToWinner(client: TelegramClient, winner: LotteryUser, prizeText: string, lottery: LotteryConfigRow): Promise<boolean> {
   try {
     const displayName = winner.username ? `@${winner.username}` : 
                        (winner.first_name || winner.last_name || `用户 ${winner.user_id}`);
@@ -595,7 +713,7 @@ async function sendPrizeToWinner(client: TelegramClient, winner: any, prizeText:
       `🎊 <b>感谢您的参与，祝您好运!</b>\n` +
       `💡 <b>提示:</b> 如有疑问请联系活动发起者`;
 
-    await client.sendText(winner.user_id, html(prizeMessage));
+    await client.sendText(winner.user_id ?? winner.id ?? 0, html(prizeMessage));
 
     // Update status to sent
     const updateStmt = db.prepare(`
@@ -605,16 +723,16 @@ async function sendPrizeToWinner(client: TelegramClient, winner: any, prizeText:
     `);
     updateStmt.run(PrizeStatus.SENT, Date.now(), lottery.id, String(winner.user_id));
 
-    console.log(`Prize sent to user ${winner.user_id} (${displayName})`);
+    logger.info(`Prize sent to user ${winner.user_id} (${displayName})`);
     return true;
-  } catch (error) {
-    console.error(`Failed to send prize to user ${winner.user_id}:`, error);
+  } catch (error: unknown) {
+    logger.error(`Failed to send prize to user ${winner.user_id}:`, error);
     return false;
   }
 }
 
 // Format user line for display
-function formatUserLine(uid: number, userObj?: any): string {
+function formatUserLine(uid: number, userObj?: LotteryUser | null): string {
   let displayName = "";
   let username = "";
   
@@ -650,21 +768,21 @@ async function isUserAdmin(client: TelegramClient, chatId: string, userId: strin
       return member.status === "admin" || member.status === "creator";
     }
     return false;
-  } catch (error) {
-    console.error("Error checking admin status:", error);
+  } catch (error: unknown) {
+    logger.error("Error checking admin status:", error);
     return false;
   }
 }
 
-async function performLotteryDraw(client: TelegramClient, lottery: any): Promise<void> {
+async function performLotteryDraw(client: TelegramClient, lottery: LotteryConfigRow): Promise<void> {
   try {
     // Delete original lottery message
     if (lottery.message_id) {
       try {
         await client.deleteMessagesById(lottery.chat_id, [parseInt(lottery.message_id)], { revoke: true });
-        console.log(`[lottery] Deleted original lottery message ${lottery.message_id}`);
-      } catch (error) {
-        console.warn("Failed to delete original lottery message:", error);
+        logger.info(`[lottery] Deleted original lottery message ${lottery.message_id}`);
+      } catch (error: unknown) {
+        logger.warn("Failed to delete original lottery message:", error);
       }
     }
 
@@ -742,22 +860,22 @@ async function performLotteryDraw(client: TelegramClient, lottery: any): Promise
     const resultMsg = await client.sendText(lottery.chat_id, html(endText));
 
     // 不再自动置顶开奖结果，让用户自己决定是否置顶
-    console.log(`[lottery] Draw result sent, message ID: ${resultMsg.id}`);
+    logger.info(`[lottery] Draw result sent, message ID: ${resultMsg.id}`);
 
     // Mark lottery as completed
     const stmt = db.prepare(`UPDATE lottery_config SET status = 'completed' WHERE id = ?`);
     stmt.run(lottery.id);
     
     
-  } catch (error) {
-    console.error("Failed to perform lottery draw:", error);
+  } catch (error: unknown) {
+    logger.error("Failed to perform lottery draw:", error);
     await client.sendText(lottery.chat_id, html(`❌ <b>开奖失败</b><br><br>发生错误，请稍后重试。`));
   }
 }
 
 
 // Enhanced message listener for lottery participation
-async function handleEnhancedLotteryJoin(msg: any): Promise<void> {
+async function handleEnhancedLotteryJoin(msg: MessageContext & { peerId?: number; chatId?: number; getSender: () => Promise<any>; reply: (params: any) => Promise<any> }): Promise<void> {
   if (!msg.text || !msg.sender?.id || !msg.client) return;
   
   let chatId: string;
@@ -771,7 +889,7 @@ async function handleEnhancedLotteryJoin(msg: any): Promise<void> {
     } else {
       return;
     }
-  } catch {
+  } catch (_e: unknown) {
     return;
   }
 
@@ -803,24 +921,24 @@ async function handleEnhancedLotteryJoin(msg: any): Promise<void> {
         try {
           await replyMsg.delete();
           await msg.delete();
-        } catch (error) {
-          console.warn("Failed to delete duplicate participation messages:", error);
+        } catch (error: unknown) {
+          logger.warn("Failed to delete duplicate participation messages:", error);
         }
       }, activeLottery.delete_delay * 1000);
       pendingTimers.add(t1);
-    } catch (error) {
-      console.warn("Failed to handle duplicate participation:", error);
+    } catch (error: unknown) {
+      logger.warn("Failed to handle duplicate participation:", error);
     }
     return;
   }
 
   // Validate user conditions
-  const validation = await validateUserConditions(msg.client, sender, activeLottery, chatId);
+  const validation = await validateUserConditions(msg.client as TelegramClient, sender, activeLottery, chatId);
   if (!validation.valid) {
     try {
       await msg.delete(); // Silently delete invalid participation
-    } catch (error) {
-      console.warn("Failed to delete invalid participation message:", error);
+    } catch (error: unknown) {
+      logger.warn("Failed to delete invalid participation message:", error);
     }
     return;
   }
@@ -860,18 +978,18 @@ async function handleEnhancedLotteryJoin(msg: any): Promise<void> {
       try {
         await replyMsg.delete();
         await msg.delete();
-      } catch (error) {
-        console.warn("Failed to delete participation messages:", error);
+      } catch (error: unknown) {
+        logger.warn("Failed to delete participation messages:", error);
       }
     }, activeLottery.delete_delay * 1000);
     pendingTimers.add(t2);
-  } catch (error) {
-    console.warn("Failed to send join confirmation:", error);
+  } catch (error: unknown) {
+    logger.warn("Failed to send join confirmation:", error);
   }
 
   // Auto-draw if max participants reached
   if (currentCount >= activeLottery.max_participants) {
-    await performLotteryDraw(msg.client, activeLottery);
+    await performLotteryDraw(msg.client as TelegramClient, activeLottery);
   }
 }
 
@@ -1005,7 +1123,7 @@ const lottery = async (msg: MessageContext) => {
       } else {
         throw new Error("无法获取聊天ID");
       }
-    } catch (error) {
+    } catch (error: unknown) {
       await msg.edit({
         text: html(`❌ <b>获取聊天ID失败:</b> ${htmlEscape(String(error))}`)
       });
@@ -1056,12 +1174,13 @@ const lottery = async (msg: MessageContext) => {
         `);
 
         await msg.edit({
-          text: html("✅ <b>数据库初始化完成</b>\n\n已重建 lottery_winners 表结构，现在可以正常进行抽奖了。")
+          text: html("✅ <b>数据库初始化完成</b><br><br>已重建 lottery_winners 表结构，现在可以正常进行抽奖了。")
         });
         return;
-      } catch (error: any) {
+      } catch (error: unknown) {
+        const errMsg = error instanceof Error ? error.message : String(error);
         await msg.edit({
-          text: html(`❌ <b>错误:</b> 数据库初始化失败 - ${htmlEscape(error.message || String(error))}`)
+          text: html(`❌ <b>错误:</b> 数据库初始化失败 - ${htmlEscape(errMsg)}`)
         });
         return;
       }
@@ -1213,12 +1332,12 @@ const lottery = async (msg: MessageContext) => {
         try {
           await msg.client?.pinMessage({ chatId, message: sentMsg.id, notify: shouldNotify });
           if (shouldNotify) {
-            console.log(`[lottery] Pinned lottery message with notification`);
+            logger.info(`[lottery] Pinned lottery message with notification`);
           } else {
-            console.log(`[lottery] Pinned lottery message silently`);
+            logger.info(`[lottery] Pinned lottery message silently`);
           }
-        } catch (error) {
-          console.warn("Failed to pin lottery message:", error);
+        } catch (error: unknown) {
+          logger.warn("Failed to pin lottery message:", error);
         }
       }
 
@@ -1524,9 +1643,9 @@ const lottery = async (msg: MessageContext) => {
             file: txtContent,
             fileName,
             caption: html(`📋 <b>完整参与名单</b><br><br>🎯 活动: ${htmlEscape(activeLottery.title)}<br>👥 总计: ${currentCount} 人`)
-          } as any);
-        } catch (error) {
-          console.error("Failed to send participants file:", error);
+          });
+        } catch (error: unknown) {
+          logger.error("Failed to send participants file:", error);
           // Fallback to truncated list
           const displayList = participants.slice(0, 30).map((p, index) => {
             const displayName = p.username ? `@${p.username}` : 
@@ -1618,10 +1737,11 @@ const lottery = async (msg: MessageContext) => {
     await msg.edit({
     });
 
-  } catch (error: any) {
-    console.error("[lottery] 插件执行失败:", error);
+  } catch (error: unknown) {
+    logger.error("[lottery] 插件执行失败:", error);
+    const errMsg = error instanceof Error ? error.message : String(error);
     await msg.edit({
-      text: html(`❌ <b>错误:</b> ${htmlEscape(error.message || String(error))}`)
+      text: html(`❌ <b>错误:</b> ${htmlEscape(errMsg)}`)
     });
   }
 };
@@ -1635,8 +1755,8 @@ class LotteryPlugin extends Plugin {
     if (db) {
       try {
         db.close();
-      } catch {}
-      db = null as any;
+      } catch (e: unknown) { logger.warn('操作失败', e) }
+      db = null as unknown as typeof db;
     }
   }
 
@@ -1647,7 +1767,7 @@ class LotteryPlugin extends Plugin {
   };
   
   listenMessageHandler?: ((msg: MessageContext) => Promise<void>) | undefined =
-    handleEnhancedLotteryJoin;
+    handleEnhancedLotteryJoin as unknown as (msg: MessageContext) => Promise<void>;
 }
 
 export default new LotteryPlugin();

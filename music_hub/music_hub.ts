@@ -4,10 +4,13 @@ import { getGlobalClient } from "@utils/globalClient";
 import { getPrefixes } from "@utils/pluginManager";
 import { createDirectoryInAssets, createDirectoryInTemp } from "@utils/pathHelpers";
 import type { MessageContext } from "@mtcute/dispatcher";
+import type { MtcuteMessageContext } from "@utils/mtcuteTypes";
+import type { Message } from "@mtcute/core";
 import { html } from "@mtcute/html-parser";
 import { JSONFilePreset } from "lowdb/node";
 import * as fs from "fs";
 import * as path from "path";
+import { logger } from "@utils/logger";
 
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
@@ -218,15 +221,14 @@ function idToString(value: any): string {
     return JSON.stringify(value, (_key, item) =>
       typeof item === "bigint" ? item.toString() : item
     );
-  } catch {
+  } catch (_e: unknown) {
     return String(value);
   }
 }
 
 function getSessionKey(msg: MessageContext): string {
-  const peerKey = idToString((msg as any).chatId ?? msg.chat?.id) || "unknown-peer";
-  const userKey =
-    idToString((msg as any).senderId ?? (msg as any).fromId) || "unknown-user";
+  const peerKey = idToString(msg.chat?.id) || "unknown-peer";
+  const userKey = idToString(msg.sender?.id) || "unknown-user";
   return `${peerKey}:${userKey}`;
 }
 
@@ -338,7 +340,7 @@ function detectAudioExtension(url: string, contentType?: string): string {
     if (match && ["mp3", "flac", "m4a", "aac", "ogg", "wav"].includes(match[1])) {
       return match[1];
     }
-  } catch {}
+  } catch (e: unknown) { logger.warn('[music_hub] parse URL failed:', e) }
 
   return "mp3";
 }
@@ -542,7 +544,7 @@ class MusicHubPlugin extends Plugin {
           };
         }
         errors.push(`${source}: 无结果`);
-      } catch (error) {
+      } catch (error: unknown) {
         errors.push(`${source}: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
@@ -632,9 +634,9 @@ class MusicHubPlugin extends Plugin {
     this.sessions.set(getSessionKey(msg), session);
   }
 
-  private rememberSessionMessage(session: SearchSession, message?: MessageContext): void {
+  private rememberSessionMessage(session: SearchSession, message?: Message | MessageContext): void {
     if (!message) return;
-    session.message = message;
+    session.message = message as MessageContext;
     if (message.id) session.messageId = Number(message.id);
   }
 
@@ -647,7 +649,7 @@ class MusicHubPlugin extends Plugin {
     try {
       await message.delete({ revoke: true });
       return;
-    } catch {}
+    } catch (e: unknown) { logger.warn('[music_hub] delete message failed:', e) }
 
     try {
       const client = (await getGlobalClient());
@@ -657,32 +659,32 @@ class MusicHubPlugin extends Plugin {
         await client.deleteMessagesById(peer, [id], { revoke: true });
         return;
       }
-    } catch {}
+    } catch (e: unknown) { logger.warn('[music_hub] delete message by id failed:', e) }
 
     try {
       await message.delete();
-    } catch {}
+    } catch (e: unknown) { logger.warn('操作失败', e) }
   }
 
   private async sendTextMessage(
     sourceMsg: MessageContext,
     text: string,
-  ): Promise<MessageContext | undefined> {
+  ): Promise<Message | undefined> {
     const client = (await getGlobalClient());
     if (!client) return undefined;
-    return await client.sendText(sourceMsg.chat.id, text) as any;
+    return await client.sendText(sourceMsg.chat.id, text);
   }
 
   private async editOrReplaceMessage(
     sourceMsg: MessageContext,
     targetMsg: MessageContext | undefined,
     text: string,
-  ): Promise<MessageContext | undefined> {
+  ): Promise<Message | undefined> {
     if (targetMsg) {
       try {
         const edited = await targetMsg.edit({ text: html(text) });
-        return (edited as any as MessageContext) || targetMsg;
-      } catch (error) {
+        return edited || targetMsg;
+      } catch (error: unknown) {
         if (isMessageNotModifiedError(error)) return targetMsg;
         await this.deleteQuietly(targetMsg);
       }
@@ -694,7 +696,7 @@ class MusicHubPlugin extends Plugin {
   private async editOrReplaceCommandMessage(
     msg: MessageContext,
     text: string,
-  ): Promise<MessageContext | undefined> {
+  ): Promise<Message | undefined> {
     return await this.editOrReplaceMessage(msg, msg, text);
   }
 
@@ -702,7 +704,7 @@ class MusicHubPlugin extends Plugin {
     msg: MessageContext,
     session: SearchSession,
     text: string,
-  ): Promise<MessageContext | undefined> {
+  ): Promise<Message | undefined> {
     const updated = await this.editOrReplaceMessage(msg, session.message, text);
     this.rememberSessionMessage(session, updated);
     return updated;
@@ -768,8 +770,8 @@ class MusicHubPlugin extends Plugin {
   private getReplyTarget(msg: MessageContext, session?: SearchSession): number | undefined {
     return (
       session?.messageId ||
-      (msg as any).replyTo?.replyToTopId ||
-      (msg as any).replyTo?.replyToMsgId ||
+      msg.replyToMessage?.raw?.replyToTopId ||
+      msg.replyToMessage?.raw?.replyToMsgId ||
       msg.id
     );
   }
@@ -808,18 +810,18 @@ class MusicHubPlugin extends Plugin {
     const enqueue = (text: string): Promise<void> => {
       sentText = text;
       updateQueue = updateQueue
-        .catch(() => undefined)
+        .catch((e) => logger.debug('[music_hub] updateQueue error:', e))
         .then(async () => {
           await updateStatus(text);
         })
-        .catch(() => undefined);
+        .catch((e) => logger.debug('[music_hub] updateStatus error:', e));
       return updateQueue;
     };
 
     const sendLatest = (force = false): Promise<void> => {
-      if (!latestText) return updateQueue.catch(() => undefined);
+      if (!latestText) return updateQueue.catch((e) => logger.debug('[music_hub] updateQueue error:', e));
       if (!force && latestText === sentText) {
-        return updateQueue.catch(() => undefined);
+        return updateQueue.catch((e) => logger.debug('[music_hub] updateQueue error:', e));
       }
       return enqueue(latestText);
     };
@@ -870,7 +872,7 @@ class MusicHubPlugin extends Plugin {
         },
       });
 
-      const reader = response.data as any;
+      const reader = response.data;
       if (!reader || typeof reader.pipe !== "function") {
         throw new Error("下载响应不是可读流");
       }
@@ -907,10 +909,10 @@ class MusicHubPlugin extends Plugin {
           settled = true;
           try {
             if (typeof reader.destroy === "function") reader.destroy();
-          } catch {}
+          } catch (e: unknown) { logger.warn('[music_hub] reader destroy failed:', e) }
           try {
             if (typeof writer.destroy === "function") writer.destroy();
-          } catch {}
+          } catch (e: unknown) { logger.warn('[music_hub] writer destroy failed:', e) }
           reject(error instanceof Error ? error : new Error(String(error)));
         };
 
@@ -970,7 +972,7 @@ class MusicHubPlugin extends Plugin {
             duration: 0,
             title: song.name,
             performer: formatArtists(song.artist),
-          } as any,
+          } as never, // mtcute InputMediaAudio type lacks attributes field; needed for TL layer
         ],
         forceDocument: false,
         progressCallback: (progress: number) => {
@@ -995,7 +997,7 @@ class MusicHubPlugin extends Plugin {
       if (tempFilePath) {
         try {
           fs.unlinkSync(tempFilePath);
-        } catch {}
+        } catch (e: unknown) { logger.warn('[music_hub] cleanup temp file failed:', e) }
       }
     }
   }
@@ -1033,7 +1035,7 @@ class MusicHubPlugin extends Plugin {
     let urlInfo: SongUrlInfo;
     try {
       urlInfo = await this.getSongUrl(song, config.br);
-    } catch (error) {
+    } catch (error: unknown) {
       await updateStatus(
         `❌ <b>获取播放链接失败</b>\n<code>${htmlEscape(error instanceof Error ? error.message : String(error))}</code>`
       );
@@ -1060,7 +1062,7 @@ class MusicHubPlugin extends Plugin {
       const caption = this.buildSongCaption(song, urlInfo);
       await this.sendTelegramUrl(client, msg, urlInfo, caption, session);
       await this.finishSongSend(msg, session);
-    } catch (directError) {
+    } catch (directError: unknown) {
       const progress = this.createTransferProgressReporter(updateStatus, song);
       await progress.report({
         stage: "download",
@@ -1084,7 +1086,7 @@ class MusicHubPlugin extends Plugin {
         );
         await progress.stop();
         await this.finishSongSend(msg, session);
-      } catch (fallbackError) {
+      } catch (fallbackError: unknown) {
         await progress.stop();
         await updateStatus(
           `❌ <b>上传失败，保留下载链接</b>\n${codeTag(urlInfo.url)}\n\n` +
@@ -1126,7 +1128,7 @@ class MusicHubPlugin extends Plugin {
         elapsedMs: Date.now() - started,
         sample: `${first.name} - ${formatArtists(first.artist)}`,
       };
-    } catch (error) {
+    } catch (error: unknown) {
       return {
         key: source,
         ok: false,
@@ -1154,7 +1156,7 @@ class MusicHubPlugin extends Plugin {
   }
 
   private async checkAllSources(msg: MessageContext): Promise<void> {
-    let statusMessage = await this.editOrReplaceCommandMessage(
+    let statusMessage: Message | undefined = await this.editOrReplaceCommandMessage(
       msg,
       `🔍 <b>开始测活</b> ${codeTag(MUSIC_SOURCES.length)} 个音乐源...`
     );
@@ -1162,12 +1164,12 @@ class MusicHubPlugin extends Plugin {
 
     const queueStatusUpdate = (text: string): Promise<void> => {
       statusUpdateQueue = statusUpdateQueue
-        .catch(() => undefined)
+        .catch((e) => logger.debug('[music_hub] statusUpdateQueue error:', e))
         .then(async () => {
-          const updated = await this.editOrReplaceMessage(msg, statusMessage, text);
+          const updated = await this.editOrReplaceMessage(msg, statusMessage as MtcuteMessageContext | undefined, text);
           if (updated) statusMessage = updated;
         })
-        .catch(() => undefined);
+        .catch((e) => logger.debug('[music_hub] editOrReplaceMessage error:', e));
       return statusUpdateQueue;
     };
 
@@ -1250,7 +1252,7 @@ class MusicHubPlugin extends Plugin {
       return;
     }
 
-    const statusMessage = await this.editOrReplaceCommandMessage(
+    const statusMessage: Message | undefined = await this.editOrReplaceCommandMessage(
       msg,
       `🔍 <b>正在搜索</b> ${codeTag(keyword)}\n📡 音源: ${codeTag(sourceLabel(sourceMode))}`
     );
@@ -1260,10 +1262,10 @@ class MusicHubPlugin extends Plugin {
       this.rememberSessionMessage(session, statusMessage);
       this.saveSession(msg, session);
       await this.editOrReplaceSessionMessage(msg, session, this.renderSearchPage(session));
-    } catch (error) {
+    } catch (error: unknown) {
       await this.editOrReplaceMessage(
         msg,
-        statusMessage,
+        statusMessage as MtcuteMessageContext | undefined,
         `❌ <b>搜索失败</b>\n<code>${htmlEscape(error instanceof Error ? error.message : String(error))}</code>\n\n` +
           `💡 可尝试 ${codeTag(`${commandName} check`)} 查看源状态。`
       );

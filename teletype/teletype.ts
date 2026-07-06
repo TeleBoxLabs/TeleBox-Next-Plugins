@@ -4,25 +4,26 @@ import { getPrefixes } from "@utils/pluginManager";
 import type { MessageContext } from "@mtcute/dispatcher";
 import { html } from "@mtcute/html-parser";
 import { JSONFilePreset } from "lowdb/node";
+import type { Low } from "lowdb";
 import { createDirectoryInAssets } from "@utils/pathHelpers";
 import * as path from "path";
 
 import { safeGetMe } from "@utils/authGuards";
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
+import { htmlEscape } from "@utils/htmlEscape";
+
+type TeletypeDbData = { autoMode: boolean; enabledUsers: string[] };
+
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
 
-
-const htmlEscape = (text: string): string => 
-  text.replace(/[&<>"']/g, m => ({ 
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', 
-    '"': '&quot;', "'": '&#x27;' 
-  }[m] || m));
 
 class TeletypePlugin extends Plugin {
 
   private readonly PLUGIN_NAME = "teletype";
   private readonly PLUGIN_VERSION = "1.1.0";
-  private db: any = null;
+  private db!: Awaited<ReturnType<typeof JSONFilePreset<{ autoMode: boolean; enabledUsers: string[] }>>>;
   
   private readonly HELP_TEXT = `⌨️ <b>打字机效果插件</b>
 
@@ -53,15 +54,15 @@ class TeletypePlugin extends Plugin {
     try {
       const dbPath = path.join(createDirectoryInAssets(this.PLUGIN_NAME), "config.json");
       this.db = await JSONFilePreset(dbPath, {
-        autoMode: false,
+        autoMode: false as boolean,
         enabledUsers: [] as string[]
       });
-    } catch (error) {
-      console.error(`[${this.PLUGIN_NAME}] 数据库初始化失败:`, error);
+    } catch (error: unknown) {
+      logger.error(`[${this.PLUGIN_NAME}] 数据库初始化失败:`, error);
       this.db = {
         data: { autoMode: false, enabledUsers: [] },
         write: async () => {}
-      };
+      } as unknown as Awaited<ReturnType<typeof JSONFilePreset<TeletypeDbData>>>;
     }
   }
   
@@ -95,7 +96,7 @@ class TeletypePlugin extends Plugin {
           }
       }
       
-    } catch (error: any) {
+    } catch (error: unknown) {
       await this.handleError(msg, error);
     }
   }
@@ -198,8 +199,8 @@ class TeletypePlugin extends Plugin {
     
     try {
       await this.executeTeletype(msg, text);
-    } catch (error: any) {
-      console.error(`[${this.PLUGIN_NAME}] Auto teletype error:`, error);
+    } catch (error: unknown) {
+      logger.error(`[${this.PLUGIN_NAME}] Auto teletype error:`, error);
     }
   }
   
@@ -212,37 +213,32 @@ class TeletypePlugin extends Plugin {
     const cursor = "█";
     let buffer = "";
     
-    let currentMsg: any = await msg.edit({
+    await msg.edit({
       text: html(cursor)
     });
     
-    if (!currentMsg) return;
-    
     await this.sleep(interval);
     
+    // 注意：必须按顺序逐字符编辑消息以实现打字机效果，不能并行
     for (const character of text) {
       buffer += character;
       const bufferWithCursor = `${htmlEscape(buffer)}${cursor}`;
       
       try {
-        currentMsg = await currentMsg?.edit({
+        await msg.edit({
           text: html(bufferWithCursor)
         });
         
-        if (!currentMsg) return;
-        
         await this.sleep(interval);
         
-        if (buffer.length > 0 && currentMsg) {
-          currentMsg = await currentMsg.edit({
+        if (buffer.length > 0) {
+          await msg.edit({
             text: html(htmlEscape(buffer))
           });
-          
-          if (!currentMsg) return;
         }
         
-      } catch (error: any) {
-        if (!error.message?.includes("MESSAGE_NOT_MODIFIED")) {
+      } catch (error: unknown) {
+        if (!getErrorMessage(error).includes("MESSAGE_NOT_MODIFIED")) {
           throw error;
         }
         continue;
@@ -253,31 +249,30 @@ class TeletypePlugin extends Plugin {
     
     const finalText = htmlEscape(text);
     try {
-      if (currentMsg) {
-        await currentMsg.edit({
-          text: html(finalText)
-        });
-      }
-    } catch (error: any) {
-      if (!error.message?.includes("MESSAGE_NOT_MODIFIED")) {
+      await msg.edit({
+        text: html(finalText)
+      });
+    } catch (error: unknown) {
+      if (!getErrorMessage(error).includes("MESSAGE_NOT_MODIFIED")) {
         throw error;
       }
     }
   }
   
-  private async handleError(msg: MessageContext, error: any): Promise<void> {
-    console.error(`[${this.PLUGIN_NAME}] Error:`, error);
+  private async handleError(msg: MessageContext, error: unknown): Promise<void> {
+    logger.error(`[${this.PLUGIN_NAME}] Error:`, error);
     
-    if (error.message?.includes("MESSAGE_NOT_MODIFIED")) {
+    const errMsg = getErrorMessage(error);
+    if (errMsg?.includes("MESSAGE_NOT_MODIFIED")) {
       return;
     }
     
     let errorMessage = "❌ <b>操作失败:</b> ";
     
-    if (error.message?.includes("MESSAGE_TOO_LONG")) {
+    if (errMsg?.includes("MESSAGE_TOO_LONG")) {
       errorMessage += "消息过长";
     } else {
-      errorMessage += htmlEscape(error.message || "未知错误");
+      errorMessage += htmlEscape(getErrorMessage(error) || "未知错误");
     }
     
     await msg.edit({

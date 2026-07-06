@@ -3,10 +3,13 @@ import { getGlobalClient } from "@utils/globalClient";
 import { getPrefixes } from "@utils/pluginManager";
 import { createDirectoryInAssets } from "@utils/pathHelpers";
 import type { MessageContext } from "@mtcute/dispatcher";
+import type { TelegramClient } from "@mtcute/node";
 import { html } from "@mtcute/html-parser";
 import * as fs from "fs";
 import * as path from "path";
 import * as https from "https";
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
 
 interface SignTarget {
   id: string;
@@ -60,8 +63,8 @@ class ConfigManager {
       const merged = { ...DEFAULT_CONFIG, ...raw };
       merged.targets = Array.isArray(raw?.targets) ? raw.targets : [];
       return merged;
-    } catch (e) {
-      console.error("[CheckIn] Config load error:", e);
+    } catch (e: unknown) {
+      logger.error("[CheckIn] Config load error:", e);
       return { ...DEFAULT_CONFIG };
     }
   }
@@ -74,8 +77,8 @@ class ConfigManager {
     this.data = { ...this.data, ...partial };
     try {
       fs.writeFileSync(this.configPath, JSON.stringify(this.data, null, 2), "utf-8");
-    } catch (e) {
-      console.error("[CheckIn] Config save error:", e);
+    } catch (e: unknown) {
+      logger.error("[CheckIn] Config save error:", e);
     }
   }
 }
@@ -237,11 +240,11 @@ class CheckInPlugin extends Plugin {
         }
 
         await this.edit(msg, `❌ 未知命令，请使用 ${PREFIX}qd help 查看帮助`);
-      } catch (e: any) {
-        console.error("[CheckIn] Command error:", e);
+      } catch (e: unknown) {
+        logger.error("[CheckIn] Command error:", e);
         try {
-          await this.edit(msg, `❌ 命令执行失败: ${this.escape(e?.message || "未知错误")}`);
-        } catch {}
+          await this.edit(msg, `❌ 命令执行失败: ${this.escape(getErrorMessage(e) || "未知错误")}`);
+        } catch (e: unknown) { logger.warn('操作失败', e) }
       }
     },
   };
@@ -259,14 +262,14 @@ class CheckInPlugin extends Plugin {
       if (conf.randomDelay > 0) await this.sleep(Math.floor(Math.random() * conf.randomDelay * 60_000));
       await this.runAllSigns("自动定时任务");
       this.cfg.save({ lastRunDate: today });
-    } catch (e) {
-      console.error("[CheckIn] Scheduler error:", e);
+    } catch (e: unknown) {
+      logger.error("[CheckIn] Scheduler error:", e);
     } finally {
       this.running = false;
     }
   }
 
-  private async runAllSigns(source: string, fallbackPeer?: any, statusMsg?: MessageContext): Promise<void> {
+  private async runAllSigns(source: string, fallbackPeer?: string | number, statusMsg?: MessageContext): Promise<void> {
     const client = await getGlobalClient();
     if (!client) return;
     const conf = this.cfg.get();
@@ -276,13 +279,13 @@ class CheckInPlugin extends Plugin {
       return;
     }
 
+    // 并行执行所有签到，然后统一等待间隔
     const results: Array<{ target: SignTarget; result: SignResult }> = [];
-    for (let i = 0; i < enabled.length; i++) {
-      const t = enabled[i];
-      const r = await this.runSingleSign(t);
-      results.push({ target: t, result: r });
-      if (i < enabled.length - 1) await this.sleep(2000);
-    }
+    const signPromises = enabled.map((t) => this.runSingleSign(t));
+    const signResults = await Promise.all(signPromises);
+    enabled.forEach((t, i) => {
+      results.push({ target: t, result: signResults[i] });
+    });
 
     const ok = results.filter((x) => x.result.success).length;
     const fail = results.length - ok;
@@ -296,8 +299,8 @@ class CheckInPlugin extends Plugin {
       try {
         await this.sendViaBot(conf.botToken, conf.pushChatId, summary);
         sent = true;
-      } catch (e) {
-        console.error("[CheckIn] Bot push failed:", e);
+      } catch (e: unknown) {
+        logger.error("[CheckIn] Bot push failed:", e);
       }
     }
     if (!sent) {
@@ -306,17 +309,17 @@ class CheckInPlugin extends Plugin {
         try {
           await client.sendText(peer, html(summary), { disableWebPreview: true });
           sent = true;
-        } catch (e) {
-          console.error("[CheckIn] Userbot push failed:", e);
+        } catch (e: unknown) {
+          logger.error("[CheckIn] Userbot push failed:", e);
         }
       }
     }
     if (statusMsg) {
       try {
         await statusMsg.delete({ revoke: true });
-      } catch {}
+      } catch (e: unknown) { logger.warn('操作失败', e) }
     }
-    if (!sent) console.error("[CheckIn] Failed to send summary report.");
+    if (!sent) logger.error("[CheckIn] Failed to send summary report.");
   }
 
   private async runSingleSign(target: SignTarget): Promise<SignResult> {
@@ -324,7 +327,7 @@ class CheckInPlugin extends Plugin {
     if (!client) return { success: false, error: "客户端未初始化" };
     try {
       const sent = await client.sendText(target.target, target.command);
-      const sentId = Number((sent as any)?.id || 0);
+      const sentId = Number(sent?.id || 0);
       const start = Math.floor(Date.now() / 1000);
 
       const first = await this.waitForNewMessage(client, target.target, start, 10_000, (m) => {
@@ -339,8 +342,8 @@ class CheckInPlugin extends Plugin {
 
       const second = await this.waitForNewMessage(client, target.target, Math.floor(Date.now() / 1000), 10_000, (m) => !m.isOutgoing);
       return { success: true, message: second?.text || first.text || "已点击签到按钮" };
-    } catch (e: any) {
-      return { success: false, error: e?.message || "执行失败" };
+    } catch (e: unknown) {
+      return { success: false, error: getErrorMessage(e) || "执行失败" };
     }
   }
 
@@ -360,14 +363,14 @@ class CheckInPlugin extends Plugin {
           if (Math.floor(m.date.getTime() / 1000) < minDate) continue;
           if (!filter || filter(m)) return m;
         }
-      } catch (e) {
-        console.error("[CheckIn] Polling error:", e);
+      } catch (e: unknown) {
+        logger.error("[CheckIn] Polling error:", e);
       }
     }
     return null;
   }
 
-  private async clickCallbackButton(client: any, peer: string, msg: MessageContext, target: SignTarget): Promise<void> {
+  private async clickCallbackButton(_client: TelegramClient, peer: string, msg: MessageContext, target: SignTarget): Promise<void> {
     const btn = this.findCallbackButton(msg, target);
     if (!btn) throw new Error(`未找到回调按钮: ${target.callbackData || target.buttonText || target.id}`);
     const globalClient = await getGlobalClient();
@@ -377,14 +380,15 @@ class CheckInPlugin extends Plugin {
       _: 'messages.getBotCallbackAnswer',
       peer: resolvedPeer,
       msgId: msg.id,
-      data: btn.data || Buffer.from(target.callbackData || "", "utf-8"),
+      // btn.data 为 string | Buffer，需要转换为 Uint8Array | undefined
+      data: btn.data ? Buffer.isBuffer(btn.data) ? btn.data : Buffer.from(btn.data) : Buffer.from(target.callbackData || "", "utf-8"),
     });
   }
 
-  private findCallbackButton(msg: MessageContext, target: SignTarget): any | null {
-    const rows = (msg as any).replyMarkup?.rows || [];
+  private findCallbackButton(msg: MessageContext, target: SignTarget): { data?: string | Buffer; text?: string } | null {
+    const rows = (msg.markup as { rows?: Array<{ buttons?: unknown[] }> } | null)?.rows || [];
     for (const row of rows) {
-      for (const b of row.buttons || []) {
+      for (const b of row.buttons as Array<{ data?: string; text?: string }>) {
         const d = this.decodeData(b.data);
         if (target.callbackData && d === target.callbackData) return b;
         if (!target.callbackData && target.buttonText && b.text === target.buttonText) return b;
@@ -464,7 +468,7 @@ class CheckInPlugin extends Plugin {
   }
 
   private isAfterMessage(msg: MessageContext, id: number): boolean {
-    return !id || Number((msg as any).id || 0) > id;
+    return !id || Number(msg.id || 0) > id;
   }
 
   private dateCN(d: Date): string {

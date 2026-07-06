@@ -13,20 +13,17 @@ import archiver from "archiver";
 import dayjs from "dayjs";
 import crypto from "crypto";
 
-// SSH2模块直接导入 - 跳过类型检查
-// @ts-ignore
+import type { TelegramClient } from '@mtcute/core/client.js';
+import type { InputPeerLike } from '@mtcute/core/highlevel/types/index.js';
+// @ts-ignore - ssh2 has no type declarations
 import { Client as SSH2Client } from 'ssh2';
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
+import { htmlEscape } from "@utils/htmlEscape";
 
 const execAsync = promisify(exec);
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
-
-// HTML转义函数
-const htmlEscape = (text: string): string => 
-  text.replace(/[&<>"']/g, m => ({ 
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', 
-    '"': '&quot;', "'": '&#x27;' 
-  }[m] || m));
 
 // Shell参数转义函数 - 防止命令注入
 const shellEscape = (arg: string): string => {
@@ -64,32 +61,42 @@ async function checkPortInUse(port: number): Promise<{ inUse: boolean; processIn
     if (stdout.trim()) {
       // 解析进程信息
       const lines = stdout.trim().split('\n');
-      const processInfos: string[] = [];
-      
-      for (const line of lines) {
+
+      // 并行获取所有进程名称，加速端口占用检查
+      const processInfoLines = lines.filter((line) => line.trim().split(/\s+/).length >= 7);
+
+      const processNamePids = processInfoLines.map((line) => {
         const parts = line.trim().split(/\s+/);
-        if (parts.length >= 7) {
-          const protocol = parts[0];
-          const address = parts[3];
-          const processInfo = parts[6];
-          
-          let processName = '未知进程';
-          if (processInfo && processInfo !== '-') {
-            const pid = processInfo.split('/')[0];
-            if (pid && pid !== '-') {
-              try {
-                const { stdout: nameOutput } = await execAsync(`ps -p ${pid} -o comm= 2>/dev/null || echo "未知"`);
-                processName = nameOutput.trim() || '未知进程';
-              } catch {
-                processName = '未知进程';
-              }
-            }
-          }
-          
-          processInfos.push(`${protocol} ${address} (${processName})`);
+        const processInfo = parts[6];
+        if (processInfo && processInfo !== '-') {
+          const pid = processInfo.split('/')[0];
+          return pid && pid !== '-' ? pid : null;
         }
-      }
-      
+        return null;
+      });
+
+      // 并行查询所有进程名称
+      const processNameResults = await Promise.all(
+        processNamePids.map(async (pid) => {
+          if (!pid) return null;
+          try {
+            const { stdout: nameOutput } = await execAsync(`ps -p ${pid} -o comm= 2>/dev/null || echo "未知"`);
+            return nameOutput.trim() || '未知进程';
+          } catch (_e: unknown) {
+            logger.debug(`[ssh] 无法获取进程 ${pid} 的名称`);
+            return '未知进程';
+          }
+        })
+      );
+
+      const processInfos = processInfoLines.map((line, i) => {
+        const parts = line.trim().split(/\s+/);
+        const protocol = parts[0];
+        const address = parts[3];
+        const processName = processNameResults[i] || '未知进程';
+        return `${protocol} ${address} (${processName})`;
+      });
+
       return {
         inUse: true,
         processInfo: processInfos.join(', ')
@@ -97,7 +104,8 @@ async function checkPortInUse(port: number): Promise<{ inUse: boolean; processIn
     }
     
     return { inUse: false };
-  } catch (error) {
+  } catch (_e: unknown) {
+    logger.debug(`[ssh] netstat 检测端口 ${port} 失败，尝试 ss 命令`);
     // 如果netstat失败，尝试使用ss命令
     try {
       const { stdout } = await execAsync(`ss -tlnp 2>/dev/null | grep ":${port} "`);
@@ -108,7 +116,8 @@ async function checkPortInUse(port: number): Promise<{ inUse: boolean; processIn
         };
       }
       return { inUse: false };
-    } catch {
+    } catch (_e: unknown) {
+      logger.debug(`[ssh] ss 命令检测端口 ${port} 也失败，尝试连接测试`);
       // 如果两个命令都失败，尝试简单的端口连接测试
       try {
         await execAsync(`timeout 2 bash -c "</dev/tcp/localhost/${port}" 2>/dev/null`);
@@ -116,12 +125,13 @@ async function checkPortInUse(port: number): Promise<{ inUse: boolean; processIn
           inUse: true,
           processInfo: '端口被占用 (无法获取进程信息)'
         };
-      } catch {
+      } catch (_e: unknown) {
+        logger.debug(`[ssh] 端口 ${port} 检测: netstat/ss/connect 均失败，判定为未使用`);
         return { inUse: false };
       }
     }
   }
-};
+}
 
 // 密码复杂度验证
 const validatePassword = (password: string): boolean => {
@@ -146,7 +156,7 @@ const DEFAULT_CONFIG: Record<string, string> = {
 
 // 配置管理器
 class ConfigManager {
-  private static db: any = null;
+  private static db: Awaited<ReturnType<typeof JSONFilePreset<Record<string, string>>>> | null = null;
   private static initialized = false;
   private static initLock = false;  // 添加锁防止并发初始化
   private static configPath: string;
@@ -175,13 +185,13 @@ class ConfigManager {
         createDirectoryInAssets("sshkey"),
         "sshkey_config.json"
       );
-      this.db = await JSONFilePreset<Record<string, any>>(
+      this.db = await JSONFilePreset<Record<string, string>>(
         this.configPath,
         { ...DEFAULT_CONFIG }
       );
       this.initialized = true;
-    } catch (error) {
-      console.error("[ssh] 初始化配置失败:", error);
+    } catch (error: unknown) {
+      logger.error("[ssh] 初始化配置失败:", error);
     } finally {
       this.initLock = false;
     }
@@ -201,8 +211,8 @@ class ConfigManager {
       this.db.data[key] = value;
       await this.db.write();
       return true;
-    } catch (error) {
-      console.error(`[ssh] 设置配置失败 ${key}:`, error);
+    } catch (error: unknown) {
+      logger.error(`[ssh] 设置配置失败 ${key}:`, error);
       return false;
     }
   }
@@ -223,7 +233,7 @@ const restartSSHService = async (): Promise<{ success: boolean; command?: string
     try {
       await execAsync(cmd);
       return { success: true, command: cmd };
-    } catch {
+    } catch (_e: unknown) {
       continue;
     }
   }
@@ -314,7 +324,7 @@ class SSHPlugin extends Plugin {
     }
 
     // 检查执行权限 - 只能在收藏夹或指定会话执行
-    const isPrivate = (msg as any).isPrivate;
+    const isPrivate = (msg as { isPrivate?: boolean }).isPrivate;
     const chatId = (msg.chat?.id)?.toString();
     const userId = (msg.sender?.id)?.toString();
     const targetChat = await ConfigManager.get(CONFIG_KEYS.TARGET_CHAT);
@@ -429,16 +439,16 @@ class SSHPlugin extends Plugin {
           await msg.edit({
           });
       }
-    } catch (error: any) {
-      console.error("[ssh] 执行失败:", error);
+    } catch (error: unknown) {
+      logger.error("[ssh] 执行失败:", error);
       await msg.edit({
-        text: `❌ <b>执行失败:</b> ${htmlEscape(error.message || "未知错误")}`,
+        text: `❌ <b>执行失败:</b> ${htmlEscape(getErrorMessage(error) || "未知错误")}`,
       });
     }
   }
 
   // 生成SSH密钥
-  private async generateSSHKeys(msg: MessageContext, client: any, mode: "add" | "replace" = "add"): Promise<void> {
+  private async generateSSHKeys(msg: MessageContext, client: TelegramClient, mode: "add" | "replace" = "add"): Promise<void> {
     await msg.edit({ text: "🔄 正在生成SSH密钥对..." });
 
     const timestamp = dayjs().format("YYYYMMDD_HHmmss");
@@ -475,12 +485,12 @@ class SSHPlugin extends Plugin {
         // 首先检查 puttygen 是否可用
         try {
           await execAsync('puttygen --version');
-        } catch {
+        } catch (_e: unknown) {
           // puttygen 不可用，尝试安装 putty-tools
-          console.log("[ssh] puttygen 未找到，正在安装 putty-tools...");
+          logger.info("[ssh] puttygen 未找到，正在安装 putty-tools...");
           try {
             await execAsync('apt-get update && apt-get install -y putty-tools');
-          } catch {
+          } catch (_e: unknown) {
             throw new Error("无法安装 putty-tools");
           }
         }
@@ -488,9 +498,9 @@ class SSHPlugin extends Plugin {
         // 转换为PPK格式
         await execAsync(`puttygen ${escapedPath} -o ${escapedPath}.ppk`);
         ppkKey = fs.readFileSync(`${keyPath}.ppk`, "utf-8");
-        console.log("[ssh] PPK格式密钥生成成功");
-      } catch (error: any) {
-        console.log(`[ssh] PPK转换失败: ${error.message}，跳过PPK格式`);
+        logger.info("[ssh] PPK格式密钥生成成功");
+      } catch (error: unknown) {
+        logger.info(`[ssh] PPK转换失败: ${getErrorMessage(error)}，跳过PPK格式`);
       }
 
       // 获取服务器信息
@@ -537,7 +547,7 @@ class SSHPlugin extends Plugin {
         const backupTimestamp = dayjs().format("YYYYMMDD_HHmmss");
         try {
           await execAsync(`cp /root/.ssh/authorized_keys /root/.ssh/authorized_keys.backup.${backupTimestamp} 2>/dev/null || true`);
-        } catch {}
+        } catch (e: unknown) { logger.warn('操作失败', e) }
         
         await msg.edit({ text: "🔄 正在替换密钥..." });
         // 直接写入公钥，确保格式正确
@@ -548,7 +558,7 @@ class SSHPlugin extends Plugin {
         let existingKeys = "";
         try {
           existingKeys = fs.readFileSync("/root/.ssh/authorized_keys", "utf-8");
-        } catch {}
+        } catch (e: unknown) { logger.warn('操作失败', e) }
         
         // 检查密钥是否已存在（通过比较公钥数据部分）
         const newKeyData = keyParts[1];
@@ -572,21 +582,21 @@ class SSHPlugin extends Plugin {
         try {
           await modifySSHConfig("PubkeyAuthentication", "yes", false);
           await modifySSHConfig("AuthorizedKeysFile", "/root/.ssh/authorized_keys", false);
-        } catch (configError) {
-          console.log("[ssh] SSH配置优化失败，但密钥已正确设置:", configError);
+        } catch (configError: unknown) {
+          logger.info("[ssh] SSH配置优化失败，但密钥已正确设置:", configError);
         }
       }
 
       // 获取目标会话
       const targetChat = await ConfigManager.get(CONFIG_KEYS.TARGET_CHAT);
-      let peer: any;
+      let peer: InputPeerLike;
 
       if (targetChat === "me") {
         peer = "me";
       } else {
         try {
           peer = await client.resolvePeer(targetChat);
-        } catch {
+        } catch (_e: unknown) {
           peer = "me";
           await msg.replyText(html(`⚠️ 无法找到指定会话 ${targetChat}，已发送到收藏夹`));
         }
@@ -594,8 +604,10 @@ class SSHPlugin extends Plugin {
 
       // 发送文件
       await client.sendMedia(peer, {
+        type: "document",
         file: Buffer.from(fs.readFileSync(archivePath)),
-        caption: `🔐 <b>SSH密钥包</b> - ${hostname} - ${timestamp}\n\n<b>包含文件：</b>\n• RSA私钥 (OpenSSH格式)\n• RSA公钥\n${ppkKey ? "• RSA私钥 (PPK格式)\n" : ""}• 使用说明\n\n⚠️ <b>请妥善保管私钥文件</b>`,
+        fileName: `${hostname}_ssh_keys.zip`,
+        caption: `🔐 <b>SSH密钥包</b> - ${hostname} - ${timestamp}<br><br><b>包含文件：</b><br>• RSA私钥 (OpenSSH格式)<br>• RSA私钥 (PPK格式)<br>• 使用说明<br><br>⚠️ <b>请妥善保管私钥文件</b>`,
       });
 
       const modeText = mode === "replace" ? "已替换所有旧密钥" : "已追加到现有密钥";
@@ -605,7 +617,7 @@ class SSHPlugin extends Plugin {
       try {
         const keysContent = fs.readFileSync("/root/.ssh/authorized_keys", "utf-8");
         keyCount = keysContent.trim().split('\n').filter(line => line.trim() && !line.startsWith('#')).length;
-      } catch {}
+      } catch (e: unknown) { logger.warn('操作失败', e) }
 
       // 生成状态消息
       let setupMessage = "";
@@ -620,7 +632,7 @@ class SSHPlugin extends Plugin {
       // 清理临时文件
       fs.rmSync(workDir, { recursive: true, force: true });
 
-    } catch (error: any) {
+    } catch (error: unknown) {
       // 清理临时文件
       if (fs.existsSync(workDir)) {
         fs.rmSync(workDir, { recursive: true, force: true });
@@ -639,7 +651,7 @@ class SSHPlugin extends Plugin {
       // 检查文件是否存在
       try {
         await execAsync(`test -f ${authorizedKeysPath}`);
-      } catch {
+      } catch (_e: unknown) {
         await msg.edit({
           text: html`❌ <b>未找到授权密钥文件</b><br><br>文件路径: <code>/root/.ssh/authorized_keys</code><br>状态: 不存在`
         });
@@ -727,8 +739,8 @@ class SSHPlugin extends Plugin {
         text: keyList,
       });
       
-    } catch (error: any) {
-      throw new Error(`查看授权密钥失败: ${error.message}`);
+    } catch (error: unknown) {
+      throw new Error(`查看授权密钥失败: ${getErrorMessage(error)}`);
     }
   }
 
@@ -743,9 +755,7 @@ class SSHPlugin extends Plugin {
       const timestamp = dayjs().format("YYYYMMDD_HHmmss");
       try {
         await execAsync(`cp ${authorizedKeysPath} ${authorizedKeysPath}.backup.${timestamp}`);
-      } catch {
-        // 文件不存在时忽略备份错误
-      }
+      } catch (e: unknown) { logger.warn(`[ssh] 文件不存在时忽略备份错误:`, e) }
       
       // 清空密钥文件
       await execAsync(`mkdir -p /root/.ssh && chmod 700 /root/.ssh`);
@@ -756,8 +766,8 @@ class SSHPlugin extends Plugin {
         text: `✅ <b>授权密钥已清空</b>\n\n🗂️ 备份文件: <code>${authorizedKeysPath}.backup.${timestamp}</code>\n\n⚠️ <b>警告:</b> 所有SSH密钥登录已失效，请确保有其他方式访问服务器`,
       });
       
-    } catch (error: any) {
-      throw new Error(`清空授权密钥失败: ${error.message}`);
+    } catch (error: unknown) {
+      throw new Error(`清空授权密钥失败: ${getErrorMessage(error)}`);
     }
   }
 
@@ -771,7 +781,7 @@ class SSHPlugin extends Plugin {
       // 检查文件是否存在
       try {
         await execAsync(`test -f ${authorizedKeysPath}`);
-      } catch {
+      } catch (_e: unknown) {
         await msg.edit({
           text: html`❌ <b>未找到授权密钥文件</b><br><br>文件路径: <code>/root/.ssh/authorized_keys</code><br>状态: 不存在`
         });
@@ -840,14 +850,14 @@ ${keysContent}`;
       }
 
       const targetChat = await ConfigManager.get(CONFIG_KEYS.TARGET_CHAT);
-      let peer: any;
+      let peer: InputPeerLike;
 
       if (targetChat === "me") {
         peer = "me";
       } else {
         try {
           peer = await client.resolvePeer(targetChat);
-        } catch {
+        } catch (_e: unknown) {
           peer = "me";
         }
       }
@@ -857,18 +867,18 @@ ${keysContent}`;
         type: "document",
         file: Buffer.from(fs.readFileSync(archivePath)),
         fileName: `${hostname}_ssh_keys.zip`,
-        caption: `📦 <b>SSH密钥导出包</b>\n\n🖥️ 服务器: ${hostname}\n📊 密钥数量: ${lines.length}\n📅 导出时间: ${dayjs().format("YYYY-MM-DD HH:mm:ss")}\n\n📁 <b>包含文件:</b>\n• authorized_keys_export.txt (带注释说明)\n• authorized_keys (纯密钥文件)\n\n⚠️ <b>安全提示:</b> 请妥善保管密钥文件`,
-      } as any);
+        caption: `📦 <b>SSH密钥导出包</b><br><br>🖥️ 服务器: ${hostname}<br>📊 密钥数量: ${lines.length}<br>📅 导出时间: ${dayjs().format("YYYY-MM-DD HH:mm:ss")}<br><br>📁 <b>包含文件:</b><br>• authorized_keys_export.txt (带注释说明)<br>• authorized_keys (纯密钥文件)<br><br>⚠️ <b>安全提示:</b> 请妥善保管密钥文件`,
+      });
 
       await msg.edit({
-        text: `✅ <b>密钥导出成功</b>\n\n📊 导出密钥数量: ${lines.length}\n📁 文件已发送到: ${targetChat === "me" ? "收藏夹" : htmlEscape(targetChat)}\n\n💡 <b>文件说明:</b>\n• 带注释的完整导出文件\n• 纯净的authorized_keys文件\n• 可直接用于其他服务器配置`,
+        text: html(`✅ <b>密钥导出成功</b><br><br>📊 导出密钥数量: ${lines.length}<br>📁 文件已发送到: ${targetChat === "me" ? "收藏夹" : htmlEscape(targetChat)}<br><br>💡 <b>文件说明:</b><br>• 带注释的完整导出文件<br>• 纯净的authorized_keys文件<br>• 可直接用于其他服务器配置`),
       });
 
       // 清理临时文件
       fs.rmSync(workDir, { recursive: true, force: true });
 
-    } catch (error: any) {
-      throw new Error(`导出授权密钥失败: ${error.message}`);
+    } catch (error: unknown) {
+      throw new Error(`导出授权密钥失败: ${getErrorMessage(error)}`);
     }
   }
 
@@ -902,8 +912,8 @@ ${keysContent}`;
       await msg.edit({
         text: `✅ <b>root密码修改成功</b>\n\n⚠️ 请妥善保管新密码`,
       });
-    } catch (error: any) {
-      throw new Error(`修改密码失败: ${error.message}`);
+    } catch (error: unknown) {
+      throw new Error(`修改密码失败: ${getErrorMessage(error)}`);
     }
   }
 
@@ -950,15 +960,15 @@ ${keysContent}`;
         // 尝试保存iptables规则
         try {
           await execAsync(`iptables-save > /etc/iptables/rules.v4`);
-        } catch {
+        } catch (e: unknown) {
           try {
             await execAsync(`service iptables save`);
-          } catch {
-            console.log("[ssh] 无法持久化iptables规则");
+          } catch (e: unknown) {
+            logger.info("[ssh] 无法持久化iptables规则:", e);
           }
         }
-      } catch (firewallError: any) {
-        console.warn("[ssh] 防火墙端口开放失败:", firewallError.message);
+      } catch (firewallError: unknown) {
+        logger.warn("[ssh] 防火墙端口开放失败:", getErrorMessage(firewallError));
       }
       
       await msg.edit({ text: `🔄 防火墙已配置，正在重启SSH服务...` });
@@ -981,8 +991,8 @@ ${keysContent}`;
       await msg.edit({
         text: `✅ <b>SSH端口修改成功</b>\n\n🔧 新端口: <code>${port}</code>\n🛡️ 防火墙: 已自动开放 TCP/UDP ${port}\n📄 备份文件: /etc/ssh/sshd_config.backup.${htmlEscape(timestamp)}${oldPortWarning}\n\n⚠️ <b>重要:</b> 请用新端口测试连接后再断开当前会话`,
       });
-    } catch (error: any) {
-      throw new Error(`修改SSH端口失败: ${error.message}`);
+    } catch (error: unknown) {
+      throw new Error(`修改SSH端口失败: ${getErrorMessage(error)}`);
     }
   }
 
@@ -1023,8 +1033,8 @@ ${keysContent}`;
       await msg.edit({
         text: `✅ <b>密码登录已${action}</b>\n\n当前状态: ${enable ? "✅ 已开启" : "❌ 已关闭"}\n备份文件: /etc/ssh/sshd_config.backup.${timestamp}`,
       });
-    } catch (error: any) {
-      throw new Error(`${action}密码登录失败: ${error.message}`);
+    } catch (error: unknown) {
+      throw new Error(`${action}密码登录失败: ${getErrorMessage(error)}`);
     }
   }
 
@@ -1072,8 +1082,8 @@ ${keysContent}`;
       await msg.edit({
         text: `✅ <b>密钥登录已${action}</b>\n\n当前状态: ${enable ? "✅ 已开启" : "❌ 已关闭"}\n备份文件: /etc/ssh/sshd_config.backup.${timestamp}${warningText}`,
       });
-    } catch (error: any) {
-      throw new Error(`${action}密钥登录失败: ${error.message}`);
+    } catch (error: unknown) {
+      throw new Error(`${action}密钥登录失败: ${getErrorMessage(error)}`);
     }
   }
 
@@ -1120,7 +1130,7 @@ ${keysContent}`;
             });
             return;
           }
-        } catch {
+        } catch (_e: unknown) {
           // 检查失败时给出警告
           await msg.edit({
             text: `⚠️ <b>无法检测用户账户</b>\n\n建议使用 <code>${mainPrefix}ssh rootlogin keyonly</code> 而不是完全禁用\n\n如需继续禁用root登录:\n<code>${mainPrefix}ssh rootlogin off</code>`,
@@ -1155,8 +1165,8 @@ ${keysContent}`;
       await msg.edit({
         text: `✅ <b>Root登录配置已更新</b>\n\n状态: ${statusText}\n配置值: <code>PermitRootLogin ${authValue}</code>\n备份文件: /etc/ssh/sshd_config.backup.${timestamp}\n\n${securityTip}`,
       });
-    } catch (error: any) {
-      throw new Error(`配置Root登录失败: ${error.message}`);
+    } catch (error: unknown) {
+      throw new Error(`配置Root登录失败: ${getErrorMessage(error)}`);
     }
   }
 
@@ -1204,8 +1214,8 @@ ${keysContent}`;
         text: `✅ <b>Root账户已启用</b>\n\n🔑 Root密码: <code>${htmlEscape(password)}</code>\n🔓 账户状态: 已解锁\n🚪 SSH登录: 已允许\n📄 备份文件: /etc/ssh/sshd_config.backup.${currentConfig}\n\n✨ <b>现在可以直接用root登录SSH了！</b>\n\n⚠️ <b>安全提示:</b>\n• 建议设置复杂密码\n• 考虑配置SSH密钥登录\n• 可用 <code>${mainPrefix}ssh rootlogin keyonly</code> 提升安全性`,
       });
       
-    } catch (error: any) {
-      throw new Error(`启用root账户失败: ${error.message}`);
+    } catch (error: unknown) {
+      throw new Error(`启用root账户失败: ${getErrorMessage(error)}`);
     }
   }
 
@@ -1228,11 +1238,11 @@ ${keysContent}`;
       try {
         await execAsync("systemctl is-active --quiet sshd || systemctl is-active --quiet ssh");
         sshStatus = "✅ 运行中";
-      } catch {
+      } catch (_e: unknown) {
         try {
           await execAsync("pgrep sshd");
           sshStatus = "✅ 运行中";
-        } catch {
+        } catch (_e: unknown) {
           sshStatus = "❌ 未运行";
         }
       }
@@ -1240,8 +1250,8 @@ ${keysContent}`;
       await msg.edit({
         text: `✅ <b>SSH服务重启成功</b>\n\n重启命令: <code>${htmlEscape(restartResult.command || "未知")}</code>\n服务状态: ${sshStatus}\n\n💡 建议重启后验证SSH连接`,
       });
-    } catch (error: any) {
-      throw new Error(`重启SSH服务失败: ${error.message}`);
+    } catch (error: unknown) {
+      throw new Error(`重启SSH服务失败: ${getErrorMessage(error)}`);
     }
   }
 
@@ -1266,20 +1276,20 @@ ${keysContent}`;
       // 尝试保存iptables规则
       try {
         await execAsync(`iptables-save > /etc/iptables/rules.v4`);
-      } catch {
+      } catch (e: unknown) {
         // 某些系统可能没有这个目录
         try {
           await execAsync(`service iptables save`);
-        } catch {
-          console.log("[sshkey] 无法持久化iptables规则");
+        } catch (e: unknown) {
+          logger.info("[sshkey] 无法持久化iptables规则:", e);
         }
       }
 
       await msg.edit({
         text: `✅ <b>端口 ${port} 已开放</b>\n\n协议: TCP/UDP\n\n💡 提示: 规则已添加到iptables，重启后可能需要重新设置`,
       });
-    } catch (error: any) {
-      throw new Error(`开放端口失败: ${error.message}`);
+    } catch (error: unknown) {
+      throw new Error(`开放端口失败: ${getErrorMessage(error)}`);
     }
   }
 
@@ -1308,19 +1318,19 @@ ${keysContent}`;
       // 尝试保存iptables规则
       try {
         await execAsync(`iptables-save > /etc/iptables/rules.v4`);
-      } catch {
+      } catch (e: unknown) {
         try {
           await execAsync(`service iptables save`);
-        } catch {
-          console.log("[sshkey] 无法持久化iptables规则");
+        } catch (e: unknown) {
+          logger.info("[sshkey] 无法持久化iptables规则:", e);
         }
       }
 
       await msg.edit({
         text: `✅ <b>端口 ${port} 已关闭</b>\n\n协议: TCP/UDP\n\n💡 提示: 规则已添加到iptables，重启后可能需要重新设置`,
       });
-    } catch (error: any) {
-      throw new Error(`关闭端口失败: ${error.message}`);
+    } catch (error: unknown) {
+      throw new Error(`关闭端口失败: ${getErrorMessage(error)}`);
     }
   }
 
@@ -1342,7 +1352,7 @@ ${keysContent}`;
         if (client) {
           try {
             await client.resolvePeer(target);
-          } catch {
+          } catch (_e: unknown) {
             await msg.edit({
               text: `⚠️ <b>无法验证目标有效性</b>\n\n目标 <code>${htmlEscape(target)}</code> 可能无效，但配置已保存。\n\n发送时如果失败将自动使用收藏夹。`,
             });
@@ -1358,8 +1368,8 @@ ${keysContent}`;
       await msg.edit({
         text: `✅ <b>接收目标已设置</b>\n\n目标: <code>${htmlEscape(target)}</code>\n\n${target === "me" ? "密钥将发送到收藏夹" : "密钥将发送到指定会话"}`,
       });
-    } catch (error: any) {
-      throw new Error(`设置目标失败: ${error.message}`);
+    } catch (error: unknown) {
+      throw new Error(`设置目标失败: ${getErrorMessage(error)}`);
     }
   }
 
@@ -1368,22 +1378,24 @@ ${keysContent}`;
     await msg.edit({ text: "🔄 正在获取SSH状态信息..." });
 
     try {
-      // 获取插件配置
-      const targetChat = await ConfigManager.get(CONFIG_KEYS.TARGET_CHAT);
-      const sshPort = await ConfigManager.get(CONFIG_KEYS.SSH_PORT);
-      const passwordAuth = await ConfigManager.get(CONFIG_KEYS.PASSWORD_AUTH);
-      const pubkeyAuth = await ConfigManager.get(CONFIG_KEYS.PUBKEY_AUTH);
+      // 获取插件配置（并行读取）
+      const [targetChat, sshPort, passwordAuth, pubkeyAuth] = await Promise.all([
+        ConfigManager.get(CONFIG_KEYS.TARGET_CHAT),
+        ConfigManager.get(CONFIG_KEYS.SSH_PORT),
+        ConfigManager.get(CONFIG_KEYS.PASSWORD_AUTH),
+        ConfigManager.get(CONFIG_KEYS.PUBKEY_AUTH),
+      ]);
 
       // 获取当前SSH服务状态
       let sshStatus = "未知";
       try {
         await execAsync("systemctl is-active --quiet sshd || systemctl is-active --quiet ssh");
         sshStatus = "✅ 运行中";
-      } catch {
+      } catch (_e: unknown) {
         try {
           await execAsync("pgrep sshd");
           sshStatus = "✅ 运行中";
-        } catch {
+        } catch (_e: unknown) {
           sshStatus = "❌ 未运行";
         }
       }
@@ -1433,8 +1445,8 @@ ${keysContent}`;
         const portMatch = configContent.match(/^\s*Port\s+(\d+)/mi);
         actualPort = portMatch ? portMatch[1] : "22(默认)";
         
-      } catch (error) {
-        console.log("[ssh] 无法读取sshd_config:", error);
+      } catch (error: unknown) {
+        logger.info("[ssh] 无法读取sshd_config:", error);
       }
 
       // 检查authorized_keys文件
@@ -1442,7 +1454,7 @@ ${keysContent}`;
       try {
         const keysContent = (await execAsync("wc -l /root/.ssh/authorized_keys 2>/dev/null || echo '0'")).stdout;
         keyCount = parseInt(keysContent.trim()) || 0;
-      } catch {
+      } catch (_e: unknown) {
         keyCount = 0;
       }
 
@@ -1452,7 +1464,7 @@ ${keysContent}`;
         const result = await execAsync("iptables -L INPUT -n | wc -l");
         const ruleCount = parseInt(result.stdout.trim()) - 2; // 减去标题行
         iptablesInfo = `\n防火墙规则: ${ruleCount > 0 ? ruleCount + " 条" : "无限制"}`;
-      } catch {
+      } catch (_e: unknown) {
         iptablesInfo = "";
       }
 
@@ -1463,15 +1475,15 @@ ${keysContent}`;
         const hostname = (await execAsync("hostname")).stdout.trim();
         const uptime = (await execAsync("uptime -p 2>/dev/null || echo '未知'")).stdout.trim();
         systemInfo = `\n\n<b>系统信息：</b>\n主机名: <code>${htmlEscape(hostname)}</code>\n运行时间: ${htmlEscape(uptime)}`;
-      } catch {
+      } catch (_e: unknown) {
         systemInfo = "";
       }
 
       await msg.edit({
         text: `📊 <b>SSH状态信息</b>\n\n<b>SSH服务状态：</b>\n服务状态: ${sshStatus}\n端口: <code>${htmlEscape(actualPort)}</code>\n\n<b>认证配置：</b>\n密码登录: ${actualPasswordAuth}\nRoot登录: ${rootLogin}\n密钥登录: ${actualPubkeyAuth}\n已授权密钥: ${keyCount} 个${iptablesInfo}\n\n<b>插件配置：</b>\n接收目标: <code>${htmlEscape(targetChat)}</code>\n${targetChat === "me" ? "(发送到收藏夹)" : "(发送到指定会话)"}\n\n<b>相关文件：</b>\n• SSH配置: /etc/ssh/sshd_config\n• 授权密钥: /root/.ssh/authorized_keys${systemInfo}`,
       });
-    } catch (error: any) {
-      throw new Error(`获取SSH状态信息失败: ${error.message}`);
+    } catch (error: unknown) {
+      throw new Error(`获取SSH状态信息失败: ${getErrorMessage(error)}`);
     }
   }
 
@@ -1484,7 +1496,7 @@ ${keysContent}`;
       });
 
       output.on('close', () => {
-        console.log(`[ssh] 压缩包创建成功: ${archive.pointer()} bytes`);
+        logger.info(`[ssh] 压缩包创建成功: ${archive.pointer()} bytes`);
         resolve();
       });
 

@@ -11,6 +11,9 @@ import dayjs from "dayjs";
 import relativeTime from "dayjs/plugin/relativeTime";
 import { safeGetReplyMessage } from "@utils/safeGetMessages";
 import "dayjs/locale/zh-cn";
+import { logger } from "@utils/logger";
+import { getErrorMessage, getErrorCode } from "@utils/errorHelpers";
+import { htmlEscape } from "@utils/htmlEscape";
 
 // 配置 dayjs
 dayjs.extend(relativeTime);
@@ -18,11 +21,6 @@ dayjs.locale('zh-cn');
 
 
 // 必需工具函数
-const htmlEscape = (text: string): string => 
-  text.replace(/[&<>"']/g, m => ({ 
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', 
-    '"': '&quot;', "'": '&#x27;' 
-  }[m] || m));
 
 // 解析 namebeta.com 的 SSE 流式响应，返回各事件对象
 function parseSSEResponse(raw: string): Array<{type: string; data: any}> {
@@ -33,7 +31,7 @@ function parseSSEResponse(raw: string): Array<{type: string; data: any}> {
     try {
       const json = JSON.parse(trimmed.slice(6));
       events.push(json);
-    } catch { /* skip malformed lines */ }
+    } catch (e: unknown) { logger.warn('解析行失败', e) }
   }
   return events;
 }
@@ -137,8 +135,8 @@ class WhoisPlugin extends Plugin {
     
     try {
       this.db = await JSONFilePreset<WhoisDB>(dbPath, defaultData);
-    } catch (error) {
-      console.error("[whois] 数据库初始化失败:", error);
+    } catch (error: unknown) {
+      logger.error("[whois] 数据库初始化失败:", error);
     }
   }
 
@@ -200,8 +198,8 @@ class WhoisPlugin extends Plugin {
               domain = matches[0].replace(/^https?:\/\//i, '').replace(/^www\./i, '').split('/')[0];
             }
           }
-        } catch (error) {
-          console.error('[whois] 获取回复消息失败:', error);
+        } catch (error: unknown) {
+          logger.error('[whois] 获取回复消息失败:', error);
         }
       }
       
@@ -311,23 +309,27 @@ class WhoisPlugin extends Plugin {
         });
       }
       
-    } catch (error: any) {
-      console.error("[whois] 插件执行失败:", error);
-      
+    } catch (error: unknown) {
+      logger.error("[whois] 插件执行失败:", error);
+
       let errorMessage = `❌ <b>查询失败</b>\n\n`;
-      
-      if (error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT') {
+
+      const errCode = getErrorCode(error);
+      const errResponse = (error as { response?: { status: number } }).response;
+      const errRequest = (error as { request?: unknown }).request;
+
+      if (errCode === 'ECONNABORTED' || errCode === 'ETIMEDOUT') {
         errorMessage += `<b>错误：</b> 请求超时\n\n💡 请检查网络连接后重试`;
-      } else if (error.response?.status === 429) {
+      } else if (errResponse?.status === 429) {
         errorMessage += `<b>错误：</b> 请求过于频繁\n\n💡 请稍后再试`;
-      } else if (error.response?.status === 403) {
+      } else if (errResponse?.status === 403) {
         errorMessage += `<b>错误：</b> API 访问被拒绝\n\n💡 可能需要更换 API 服务`;
-      } else if (error.response) {
-        errorMessage += `<b>错误代码：</b> ${error.response.status}\n<b>错误信息：</b> ${htmlEscape(error.message)}\n\n💡 请稍后重试`;
-      } else if (error.request) {
+      } else if (errResponse) {
+        errorMessage += `<b>错误代码：</b> ${errResponse.status}\n<b>错误信息：</b> ${htmlEscape(getErrorMessage(error))}\n\n💡 请稍后重试`;
+      } else if (errRequest) {
         errorMessage += `<b>错误：</b> 无法连接到 API 服务器\n\n💡 请检查网络连接`;
       } else {
-        errorMessage += `<b>错误信息：</b> ${htmlEscape(error.message || '未知错误')}\n\n💡 请稍后重试`;
+        errorMessage += `<b>错误信息：</b> ${htmlEscape(getErrorMessage(error) || '未知错误')}\n\n💡 请稍后重试`;
       }
       
       await msg.edit({
@@ -407,9 +409,7 @@ class WhoisPlugin extends Plugin {
         } else if (daysUntilExpiry < 90) {
           formattedOutput += ` <i>（${daysUntilExpiry} 天后过期）</i>`;
         }
-      } catch (e) {
-        // 日期解析失败，忽略
-      }
+      } catch (e: unknown) { logger.warn(`[whois] 日期解析失败，忽略:`, e) }
       formattedOutput += `\n`;
     }
     if (record.updatedDate) {
@@ -511,7 +511,7 @@ class WhoisPlugin extends Plugin {
           results.push(`❌ <code>${htmlEscape(domain)}</code> - 查询失败`);
           failCount++;
         }
-      } catch (error) {
+      } catch (_e: unknown) {
         results.push(`❌ <code>${htmlEscape(domain)}</code> - 查询失败`);
         failCount++;
       }
@@ -523,12 +523,12 @@ class WhoisPlugin extends Plugin {
     }
     
     // 显示结果
-    let output = `📊 <b>批量查询完成</b>\n\n`;
-    output += `<b>成功：</b> ${successCount}\n`;
-    output += `<b>失败：</b> ${failCount}\n\n`;
-    output += `<b>查询结果：</b>\n`;
-    output += results.join('\n');
-    output += `\n\n💡 使用 <code>${mainPrefix}whois history</code> 查看详细信息`;
+    let output = `📊 <b>批量查询完成</b><br><br>`;
+    output += `<b>成功：</b> ${successCount}<br>`;
+    output += `<b>失败：</b> ${failCount}<br><br>`;
+    output += `<b>查询结果：</b><br>`;
+    output += results.join('<br>');
+    output += `<br><br>💡 使用 <code>${mainPrefix}whois history</code> 查看详细信息`;
     
     await msg.edit({
       text: html(output)
@@ -569,9 +569,7 @@ class WhoisPlugin extends Plugin {
           } else if (daysUntilExpiry < 30) {
             output += `   ⚠️ <b>${daysUntilExpiry} 天后过期</b>\n`;
           }
-        } catch (e) {
-          // 忽略日期解析错误
-        }
+        } catch (e: unknown) { logger.warn(`[whois] 忽略日期解析错误:`, e) }
       }
       output += `\n`;
     });

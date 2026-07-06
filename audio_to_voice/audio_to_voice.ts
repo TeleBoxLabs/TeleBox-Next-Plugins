@@ -2,12 +2,15 @@ import { Plugin } from "@utils/pluginBase";
 import { getGlobalClient } from "@utils/globalClient";
 import { getPrefixes } from "@utils/pluginManager";
 import type { MessageContext } from "@mtcute/dispatcher";
+import type { Audio, Document, InputMediaVoice } from "@mtcute/core";
+import type { MtcuteFileLocation } from "@utils/mtcuteTypes";
 import fs from "fs";
 import path from "path";
 import { createDirectoryInTemp } from "@utils/pathHelpers";
 import { exec } from "child_process";
 import { promisify } from "util";
 import { safeGetMessages } from "@utils/safeGetMessages";
+import { logger } from "@utils/logger";
 
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
@@ -33,38 +36,32 @@ class AudioToVoicePlugin extends Plugin {
 
   private hasAudio(msg: MessageContext): boolean {
     if (!msg.media) return false;
-    
-    // Check if media is a document with audio
-    const raw = (msg as any).raw;
-    if (!raw?.media) return false;
-    
-    const media = raw.media;
-    if (media._ !== 'messageMediaDocument') return false;
-    
-    const document = media.document;
-    if (!document || document._ !== 'document') return false;
-    
-    return document.mimeType?.startsWith('audio/') || 
-           document.attributes?.some((attr: any) => 
-             attr._ === 'documentAttributeAudio' && !attr.voice
-           ) || false;
+
+    // Check if media is an Audio document (not a voice note)
+    const media = msg.media;
+    if (media.type === 'audio') {
+      return true;
+    }
+    // Also accept documents with audio mime type
+    if (media.type === 'document') {
+      const doc = media as Document;
+      return doc.mimeType?.startsWith('audio/') ?? false;
+    }
+    return false;
   }
 
   private getAudioDuration(msg: MessageContext): number {
-    const raw = (msg as any).raw;
-    if (!raw?.media) return 0;
-    
-    const media = raw.media;
-    if (media._ !== 'messageMediaDocument') return 0;
-    
-    const document = media.document;
-    if (!document || document._ !== 'document') return 0;
-    
-    const audioAttr = document.attributes?.find((attr: any) => 
-      attr._ === 'documentAttributeAudio'
-    );
-    
-    return audioAttr?.duration || 0;
+    const media = msg.media;
+    if (!media) return 0;
+
+    if (media.type === 'audio') {
+      return (media as Audio).duration;
+    }
+    if (media.type === 'document') {
+      // Document doesn't expose duration directly; return 0 as fallback
+      return 0;
+    }
+    return 0;
   }
 
   private async handleAudioToVoice(msg: MessageContext): Promise<void> {
@@ -84,14 +81,12 @@ class AudioToVoicePlugin extends Plugin {
           ids: [msg.replyToMessage.id!],
         });
         if (replyMessages && replyMessages.length > 0) {
-          // Check if the reply message has audio
-          const replyRaw = (replyMessages[0] as any).raw;
-          if (replyRaw?.media?._ === 'messageMediaDocument') {
-            const doc = replyRaw.media.document;
-            if (doc?._ === 'document' && (
-              doc.mimeType?.startsWith('audio/') ||
-              doc.attributes?.some((attr: any) => attr._ === 'documentAttributeAudio' && !attr.voice)
-            )) {
+          const replyMsg = replyMessages[0];
+          // Check if the reply message has audio (using high-level type)
+          if (replyMsg.media && (replyMsg.media.type === 'audio' || replyMsg.media.type === 'document')) {
+            const replyMedia = replyMsg.media;
+            if (replyMedia.type === 'audio' || 
+                (replyMedia.type === 'document' && (replyMedia as Document).mimeType?.startsWith('audio/'))) {
               isReplyAudio = true;
             }
           }
@@ -110,7 +105,7 @@ class AudioToVoicePlugin extends Plugin {
       // 先检测 ffmpeg 是否可用
       try {
         await execAsync(`ffmpeg -version`);
-      } catch {
+      } catch (_e: unknown) {
         await msg.edit({ text: "❌ 未检测到 ffmpeg，请先在系统安装 ffmpeg 后重试。macOS 可使用：brew install ffmpeg" });
         return;
       }
@@ -122,7 +117,9 @@ class AudioToVoicePlugin extends Plugin {
 
       try {
         // 下载音频文件
-        const buffer = await client.downloadAsBuffer(audioMsg.media as any);
+        const media = audioMsg.media!;
+        // Audio/Document extend RawDocument which extends FileLocation, compatible with downloadAsBuffer
+        const buffer = await client.downloadAsBuffer(media as MtcuteFileLocation);
         fs.writeFileSync(audioPath, buffer as Buffer);
 
         // 使用 FFmpeg 转码为 OGG/Opus（Telegram 语音格式）
@@ -130,7 +127,7 @@ class AudioToVoicePlugin extends Plugin {
         const cmd = `ffmpeg -y -i "${audioPath}" -vn -acodec libopus -b:a 64k -ar 48000 -ac 1 "${oggPath}"`;
         try {
           await execAsync(cmd, { timeout: 180000 });
-        } catch (e) {
+        } catch (_e: unknown) {
           throw new Error(`FFmpeg 转码失败，请确认系统已安装 FFmpeg（macOS: brew install ffmpeg）。`);
         }
 
@@ -144,11 +141,12 @@ class AudioToVoicePlugin extends Plugin {
         const replyToId: number | undefined = isReplyAudio ? (msg.replyToMessage?.id ?? undefined) : undefined;
         
         // 发送语音笔记
-        await client.sendMedia(msg.chat.id, {
+        const voiceMedia: InputMediaVoice = {
           type: "voice",
           file: oggPath,
           duration: duration || undefined,
-        } as any, {
+        };
+        await client.sendMedia(msg.chat.id, voiceMedia, {
           replyTo: replyToId,
         });
 
@@ -161,26 +159,26 @@ class AudioToVoicePlugin extends Plugin {
           // 如果是回复的音频，删除状态消息
           try {
             await msg.delete();
-          } catch (deleteError) {
-            console.warn("删除状态消息失败:", deleteError);
+          } catch (deleteError: unknown) {
+            logger.warn("删除状态消息失败:", deleteError);
           }
         } else {
           // 如果是消息本身的音频，清空消息内容
           try {
             await msg.edit({ text: "" });
-          } catch (editError) {
-            console.warn("清空消息失败:", editError);
+          } catch (editError: unknown) {
+            logger.warn("清空消息失败:", editError);
           }
         }
         
-      } catch (error) {
+      } catch (error: unknown) {
         this.safeRemove(audioPath);
         this.safeRemove(oggPath);
         await msg.edit({ text: `转换为语音消息失败：${error}` });
       }
       
-    } catch (error) {
-      console.error("AudioToVoice plugin error:", error);
+    } catch (error: unknown) {
+      logger.error("AudioToVoice plugin error:", error);
       await msg.edit({ text: `转换为语音消息失败：${error}` });
     }
   }
@@ -190,8 +188,8 @@ class AudioToVoicePlugin extends Plugin {
       if (fs.existsSync(filePath)) {
         fs.unlinkSync(filePath);
       }
-    } catch (error) {
-      console.warn(`删除文件失败 ${filePath}:`, error);
+    } catch (error: unknown) {
+      logger.warn(`删除文件失败 ${filePath}:`, error);
     }
   }
 }

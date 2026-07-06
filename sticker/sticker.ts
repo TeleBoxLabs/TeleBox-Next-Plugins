@@ -1,514 +1,467 @@
 import { Plugin } from "@utils/pluginBase";
-import { getGlobalClient, tryGetCurrentGenerationContext } from "@utils/globalClient";
+import { getGlobalClient } from "@utils/globalClient";
 import { getPrefixes } from "@utils/pluginManager";
-import { createDirectoryInAssets } from "@utils/pathHelpers";
-import { JSONFilePreset } from "lowdb/node";
-import * as path from "path";
-import { safeGetReplyMessage } from "@utils/safeGetMessages";
-
-import { safeGetMe } from "@utils/authGuards";
-import { html } from "@mtcute/html-parser";
+import type { Sticker, InputMediaDocument, InputMediaPhoto } from "@mtcute/core";
 import type { MessageContext } from "@mtcute/dispatcher";
-import type { TelegramClient, User, Message } from "@mtcute/node";
-
-// Inline sleep
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-// 配置键定义
-const CONFIG_KEYS = {
-  DEFAULT_PACK: "sticker_default_pack",
-};
-
-// 默认配置（扁平化结构）
-const DEFAULT_CONFIG: Record<string, string> = {
-  [CONFIG_KEYS.DEFAULT_PACK]: "",
-};
-
-// 配置管理器类
-class ConfigManager {
-  private static db: any = null;
-  private static initialized = false;
-  private static configPath: string;
-
-  private static async init(): Promise<void> {
-    if (this.initialized) return;
-
-    try {
-      // 使用插件专用目录
-      this.configPath = path.join(
-        createDirectoryInAssets("nsticker"),
-        "config.json"
-      );
-
-      // 以扁平结构初始化
-      this.db = await JSONFilePreset<Record<string, any>>(
-        this.configPath,
-        { ...DEFAULT_CONFIG }
-      );
-      this.initialized = true;
-    } catch (error) {
-      console.error("[nsticker] 初始化配置失败:", error);
-    }
-  }
-
-  static async get(key: string, defaultValue?: string): Promise<string> {
-    await this.init();
-    if (!this.db) return defaultValue || DEFAULT_CONFIG[key] || "";
-
-    // 直接从顶级键读取
-    const value = this.db.data[key];
-    return value ?? defaultValue ?? DEFAULT_CONFIG[key] ?? "";
-  }
-
-  static async set(key: string, value: string): Promise<boolean> {
-    await this.init();
-    if (!this.db) return false;
-
-    try {
-      this.db.data[key] = value;
-      await this.db.write();
-      return true;
-    } catch (error) {
-      console.error(`[nsticker] 设置配置失败 ${key}:`, error);
-      return false;
-    }
-  }
-
-  static async remove(key: string): Promise<boolean> {
-    await this.init();
-    if (!this.db) return false;
-
-    try {
-      delete this.db.data[key];
-      await this.db.write();
-      return true;
-    } catch (error) {
-      console.error(`[nsticker] 删除配置失败 ${key}:`, error);
-      return false;
-    }
-  }
-}
-
-
-// HTML转义（每个插件必须实现）
-const htmlEscape = (text: string): string => 
-  text.replace(/[&<>"']/g, m => ({ 
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', 
-    '"': '&quot;', "'": '&#x27;' 
-  }[m] || m));
+import type { TelegramClient } from "@mtcute/core/highlevel/client.js";
+import { html } from "@mtcute/html-parser";
+import * as fs from "fs";
+import * as path from "path";
+import { execSync } from "child_process";
+import * as os from "os";
+import { safeGetReplyMessage } from "@utils/safeGetMessages";
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
+import { htmlEscape } from "@utils/htmlEscape";
 
 // 获取命令前缀
 const prefixes = getPrefixes();
-const mainPrefix = prefixes[0] || ".";
+const mainPrefix = prefixes[0];
 
-// 基础表情池与随机函数（当贴纸不携带基础 emoji 时兜底）
-const BASE_EMOJIS = ["😀","😁","😂","🤣","😊","😇","🙂","😉","😋","😎","😍","😘","😜","🤗","🤔","😴","😌","😅","😆","😄"];
-const getRandomBaseEmoji = (): string => {
-  const idx = Math.floor(Math.random() * BASE_EMOJIS.length);
-  return BASE_EMOJIS[idx];
-};
-
-// Custom Error for better handling
-class StickerError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "StickerError";
-  }
-}
-
-const help_text = `⭐ <b>贴纸收藏插件</b>
-
-<b>📝 功能描述:</b>
-• 💾 <b>一键收藏</b>：回复任意贴纸即可快速保存到您的贴纸包。
-• 🤖 <b>全自动处理</b>：自动创建贴纸包，并在包满时自动创建新包。
-• 📁 <b>自定义包</b>：可设置一个默认的贴纸包，或临时保存到指定包。
-• ✨ <b>类型支持</b>：完美支持普通、动态（.tgs）和视频（.webm）贴纸。
-
-<b>🔧 使用方法:</b>
-• 回复一个贴纸，发送 <code>${mainPrefix}sticker</code> - 保存贴纸到默认或自动创建的包。
-• <code>${mainPrefix}sticker to &lt;包名&gt;</code> - (回复贴纸时) 临时保存到指定包。
-• <code>${mainPrefix}sticker cancel</code> - 取消设置的默认贴纸包。
-• <code>${mainPrefix}sticker</code> - (不回复贴纸) 查看当前配置。
-
-<b>💡 使用示例:</b>
-• 回复贴纸, 发送 <code>${mainPrefix}sticker</code>
-• <code>${mainPrefix}sticker MyStickers</code>
-• <code>${mainPrefix}sticker cancel</code>
-• 回复贴纸, 发送 <code>${mainPrefix}sticker to TempPack</code>
-
-<b>📌 注意事项:</b>
-• 首次使用前，请确保您已私聊过官方的 @Stickers 机器人。
-• 贴纸包名称只能包含字母、数字和下划线，且必须以字母开头。
-• 若被收藏贴纸未携带基础 emoji，将自动随机选择一个基础表情作为标签。
-`;
-
-async function lifecycleSleep(ms: number, label: string): Promise<void> {
-  const lifecycle = tryGetCurrentGenerationContext();
-  if (lifecycle) {
-    await lifecycle.delay(ms, { label });
-    return;
-  }
-  await sleep(ms);
-}
-
-class StickerPlugin extends Plugin {
-  description: string = help_text;
-
-  cmdHandlers: Record<string, (msg: MessageContext) => Promise<void>> = {
-    sticker: async (msg: MessageContext) => await this.handleSticker(msg),
-  };
-
-  private async handleSticker(msg: MessageContext): Promise<void> {
-    const client = await getGlobalClient();
-    if (!client) {
-      await msg.edit({ text: html`❌ <b>客户端未初始化</b>` });
-      return;
-    }
-
-    try {
-      // 标准参数解析
-      const lines = msg.text?.trim()?.split(/\r?\n/g) || [];
-      const parts = lines?.[0]?.split(/\s+/) || [];
-      const [, ...args] = parts; // 跳过命令本身
-      const sub = (args[0] || "").toLowerCase();
-      const repliedMsg = await safeGetReplyMessage(msg);
-
-      // 处理 help 在前的情况：.s help 或 .s h
-      if (sub === "help" || sub === "h") {
-        await msg.edit({ text: html(help_text), disableWebPreview: true });
-        return;
-      }
-
-      // Case 1: No reply, handle configuration
-      if (!repliedMsg || !repliedMsg.media || repliedMsg.media.type !== 'sticker') {
-        await this.handleConfiguration(msg, args, client);
-        return;
-      }
-
-      // Case 2: Replied to a sticker, handle saving
-      await msg.edit({ text: html`🤔 <b>正在处理贴纸...</b>` });
-
-      const stickerMedia = repliedMsg.media;
-      if (stickerMedia.type !== 'sticker') {
-        throw new StickerError("回复的消息不是有效的贴纸。");
-      }
-      
-      // mtcute Sticker 已自带类型检测
-      const mimeType = stickerMedia.mimeType || "";
-      const isAnimated = stickerMedia.sourceType === 'animated';
-      const isVideo = stickerMedia.sourceType === 'video';
-      const isStatic = stickerMedia.sourceType === 'static';
-      
-      const stickerInfo = {
-        isAnimated,
-        isVideo,
-        isStatic,
-        emoji: (() => {
-          const alt = stickerMedia.emoji?.trim();
-          return alt && alt.length > 0 ? alt : getRandomBaseEmoji();
-        })(),
-        inputDocument: stickerMedia.inputDocument,
-      };
-      
-      let targetPackName = "";
-      if (args.length === 2 && args[0].toLowerCase() === "to") {
-        targetPackName = args[1];
-      } else {
-        targetPackName = await ConfigManager.get(CONFIG_KEYS.DEFAULT_PACK) || "";
-      }
-
-      const me = await safeGetMe(client);
-      if (!me) {
-        throw new StickerError("无法获取您的用户信息。");
-      }
-      if (!me.username && !targetPackName) {
-        throw new StickerError(
-          "您没有设置用户名，无法自动创建贴纸包。\n" +
-          `请使用 <code>${htmlEscape(mainPrefix)}sticker &lt;您的贴纸包名&gt;</code> 设置一个默认包。`
-        );
-      }
-      
-      await msg.edit({ text: html`✅ <b>贴纸信息已解析，正在查找贴纸包...</b>` });
-
-      const { packName, shouldCreate } = await this.findOrCreatePack(
-        client,
-        targetPackName,
-        me.username || "user",
-        stickerInfo
-      );
-
-      if (shouldCreate) {
-        await msg.edit({ text: `➕ <b>正在创建新贴纸包:</b> <code>${htmlEscape(packName)}</code>...` });
-        await this.createStickerSet(client, me, packName, stickerInfo);
-      } else {
-        await msg.edit({ text: `📥 <b>正在添加到贴纸包:</b> <code>${htmlEscape(packName)}</code>...` });
-        await this.addToStickerSet(client, repliedMsg, packName, stickerInfo.emoji);
-      }
-      
-      const successMsg = await msg.edit({
-        text: `✅ <b>收藏成功！</b>\n\n贴纸已添加到 <a href="https://t.me/addstickers/${htmlEscape(packName)}">${htmlEscape(packName)}</a>`,
-        disableWebPreview: true,
-      });
-      
-      // 修复: 增加对 successMsg 的有效性检查
-      if (successMsg) {
-        await lifecycleSleep(5000, "sticker:success-delete-delay");
-        await client.deleteMessagesById(msg.chat.id, [successMsg.id]);
-      }
-
-    } catch (error: any) {
-      console.error("[nsticker] 插件执行失败:", error);
-      
-      // 处理特定错误类型
-      if (error.message?.includes("FLOOD_WAIT")) {
-        const waitTime = parseInt(error.message.match(/\d+/)?.[0] || "60");
-        await msg.edit({
-          text: `⏳ <b>请求过于频繁</b>\n\n需要等待 ${waitTime} 秒后重试`,
-        });
-        return;
-      }
-      
-      if (error.message?.includes("MESSAGE_TOO_LONG")) {
-        await msg.edit({
-          text: html`❌ <b>消息过长</b><br><br>请减少内容长度或使用文件发送`,
-        });
-        return;
-      }
-      
-      // 通用错误处理
-      const errorMessage = error instanceof StickerError ? error.message : `未知错误: ${htmlEscape(error.message || "发生未知错误")}`;
-      await msg.edit({
-        text: `❌ <b>操作失败:</b> ${errorMessage}`,
-      });
-    }
-  }
-
-  private async handleConfiguration(msg: MessageContext, args: string[], client: TelegramClient): Promise<void> {
-    if (args[0]?.toLowerCase() === "help") {
-      await msg.edit({ text: html(help_text), disableWebPreview: true });
-      return;
+// 自动安装ImageMagick（静默安装，无需用户干预）
+const ensureImageMagick = async (showProgress: boolean = false, msg?: MessageContext): Promise<boolean> => {
+  try {
+    // 检查是否已安装
+    execSync('which convert', { stdio: 'ignore' });
+    return true;
+  } catch (error: unknown) {
+    logger.info('[sticker_to_pic] ImageMagick未安装，正在自动安装...');
+    
+    if (showProgress && msg) {
+      await msg.edit({ text: html("⚙️ 正在自动安装ImageMagick依赖...") });
     }
     
-    if (args.length === 0) { // Show current config
-      const defaultPack = await ConfigManager.get(CONFIG_KEYS.DEFAULT_PACK);
-      let text = "⚙️ <b>贴纸收藏插件设置</b>\n\n";
-      if (defaultPack) {
-        text += `当前默认贴纸包: <a href="https://t.me/addstickers/${htmlEscape(defaultPack)}">${htmlEscape(defaultPack)}</a>`;
-      } else {
-        const me = await safeGetMe(client);
-        if (!me) return;
-        if (me.username) {
-            text += `未设置默认贴纸包，将自动使用 <code>${htmlEscape(me.username)}_...</code> 系列包。`;
-        } else {
-            text += `未设置默认贴纸包，且您没有用户名，收藏前必须先设置一个默认包。`;
+    try {
+      const platform = os.platform();
+      
+      if (platform === 'linux') {
+        // Ubuntu/Debian系统
+        try {
+          // 尝试使用sudo（如果可用）
+          try {
+            execSync('sudo -n true', { stdio: 'ignore' });
+            execSync('sudo apt-get update && sudo apt-get install -y imagemagick', { stdio: 'pipe' });
+          } catch (_e: unknown) {
+            // 无sudo权限，尝试直接安装
+            execSync('apt-get update && apt-get install -y imagemagick', { stdio: 'pipe' });
+          }
+          logger.info('[sticker_to_pic] ImageMagick自动安装成功 (apt)');
+          return true;
+        } catch (_e: unknown) {
+          // 尝试yum (CentOS/RHEL)
+          try {
+            try {
+              execSync('sudo -n true', { stdio: 'ignore' });
+              execSync('sudo yum install -y ImageMagick', { stdio: 'pipe' });
+            } catch (_e: unknown) {
+              execSync('yum install -y ImageMagick', { stdio: 'pipe' });
+            }
+            logger.info('[sticker_to_pic] ImageMagick自动安装成功 (yum)');
+            return true;
+          } catch (_e: unknown) {
+            // 尝试dnf (Fedora)
+            try {
+              try {
+                execSync('sudo -n true', { stdio: 'ignore' });
+                execSync('sudo dnf install -y ImageMagick', { stdio: 'pipe' });
+              } catch (_e: unknown) {
+                execSync('dnf install -y ImageMagick', { stdio: 'pipe' });
+              }
+              logger.info('[sticker_to_pic] ImageMagick自动安装成功 (dnf)');
+              return true;
+            } catch (_e: unknown) {
+              logger.error('[sticker_to_pic] Linux系统自动安装失败，可能需要手动安装');
+              return false;
+            }
+          }
         }
+      } else if (platform === 'darwin') {
+        // macOS系统
+        try {
+          // 检查是否有Homebrew
+          execSync('which brew', { stdio: 'ignore' });
+          execSync('brew install imagemagick', { stdio: 'pipe' });
+          logger.info('[sticker_to_pic] ImageMagick自动安装成功 (brew)');
+          return true;
+        } catch (_e: unknown) {
+          // 尝试安装Homebrew后再安装ImageMagick
+          try {
+            logger.info('[sticker_to_pic] 正在安装Homebrew...');
+            execSync('/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"', { stdio: 'pipe' });
+            execSync('brew install imagemagick', { stdio: 'pipe' });
+            logger.info('[sticker_to_pic] ImageMagick自动安装成功 (brew)');
+            return true;
+          } catch (e: unknown) {
+            logger.error('[sticker_to_pic] macOS自动安装失败:', e);
+            return false;
+          }
+        }
+      } else if (platform === 'win32') {
+        // Windows系统 - 尝试使用chocolatey或scoop
+        try {
+          execSync('where choco', { stdio: 'ignore' });
+          execSync('choco install imagemagick -y', { stdio: 'pipe' });
+          logger.info('[sticker_to_pic] ImageMagick自动安装成功 (chocolatey)');
+          return true;
+        } catch (e: unknown) {
+          try {
+            execSync('where scoop', { stdio: 'ignore' });
+            execSync('scoop install imagemagick', { stdio: 'pipe' });
+            logger.info('[sticker_to_pic] ImageMagick自动安装成功 (scoop)');
+            return true;
+          } catch (e: unknown) {
+            logger.error('[sticker_to_pic] Windows系统需要手动安装ImageMagick:', e);
+            return false;
+          }
+        }
+      } else {
+        logger.error('[sticker_to_pic] 不支持的操作系统');
+        return false;
       }
-      await msg.edit({ text: html(text), disableWebPreview: true });
+    } catch (installError: unknown) {
+      logger.error('[sticker_to_pic] ImageMagick自动安装出错:', installError);
+      return false;
+    }
+  }
+};
+
+// 帮助文档
+const help_text = `🖼️ <b>贴纸转图片插件</b>
+
+<b>📝 功能描述:</b>
+• 🔄 <b>格式转换</b>：将Telegram贴纸转换为JPG/PNG图片
+• 🎨 <b>透明处理</b>：支持保持或移除透明背景
+• 📄 <b>文档模式</b>：支持以文档形式发送原图
+• ⚡ <b>自动安装</b>：自动检测并安装ImageMagick依赖
+
+<b>🔧 使用方法:</b>
+• <code>${mainPrefix}sticker_to_pic</code> - 转换为JPG（回复贴纸）
+• <code>${mainPrefix}stp</code> - 快捷命令
+• <code>${mainPrefix}stp png</code> - 转换为PNG格式
+• <code>${mainPrefix}stp transparent</code> - PNG格式保持透明
+• <code>${mainPrefix}stp doc</code> - 以文档形式发送源文件
+
+<b>💡 示例:</b>
+• <code>${mainPrefix}stp</code> - 转换为JPG图片
+• <code>${mainPrefix}stp png</code> - 转换为PNG图片
+• <code>${mainPrefix}stp transparent</code> - PNG透明背景
+• <code>${mainPrefix}stp doc</code> - 文档模式发送
+
+<b>🔄 管理命令:</b>
+
+<b>📋 支持格式:</b>
+• 输入：WebP贴纸文件
+• 输出：JPG（默认）、PNG
+• 透明：仅PNG格式支持
+
+<b>⚙️ 系统要求:</b>
+• ImageMagick（自动安装）
+• 支持Linux/macOS自动安装`;
+
+class StickerToPicPlugin extends Plugin {
+
+  description: string = help_text;
+  
+  cmdHandlers: Record<string, (msg: MessageContext) => Promise<void>> = {
+    "sticker_to_pic": this.handleStickerToPic.bind(this),
+    "stp": this.handleStickerToPic.bind(this),
+  };
+
+  private async handleStickerToPic(msg: MessageContext): Promise<void> {
+    const client = await getGlobalClient();
+    if (!client) {
+      await msg.edit({ text: html("❌ 客户端未初始化") });
       return;
     }
 
-    if (args.length === 1) {
-      if (args[0].toLowerCase() === "cancel") {
-        await ConfigManager.remove(CONFIG_KEYS.DEFAULT_PACK);
-        await msg.edit({ text: html`✅ <b>已取消默认贴纸包。</b>` });
-      } else { // Set new default pack
-        const packName = args[0];
-        await msg.edit({ text: `🤔 <b>正在验证贴纸包</b> <code>${htmlEscape(packName)}</code>...` });
-        try {
-            await client.call({
-              _: 'messages.getStickerSet',
-              stickerset: { _: 'inputStickerSetShortName', shortName: packName } as any,
-              hash: 0,
-            });
-            await ConfigManager.set(CONFIG_KEYS.DEFAULT_PACK, packName);
-            await msg.edit({ text: `✅ <b>默认贴纸包已设置为:</b> <code>${htmlEscape(packName)}</code>` });
-        } catch (error) {
-            throw new StickerError(`无法访问贴纸包 <code>${htmlEscape(packName)}</code>。请确保它存在且您有权访问。`);
-        }
-      }
-    } else {
-        throw new StickerError("参数错误。");
-    }
-  }
-  
-  private async findOrCreatePack(
-    client: TelegramClient,
-    packName: string,
-    username: string,
-    stickerInfo: { isAnimated: boolean; isVideo: boolean; isStatic: boolean }
-  ): Promise<{ packName: string; shouldCreate: boolean }> {
-      if (packName) { // User specified a pack (default or temporary)
-          try {
-              const result = await client.call({
-                _: 'messages.getStickerSet',
-                stickerset: { _: 'inputStickerSetShortName', shortName: packName } as any,
-                hash: 0,
-              }) as any;
-              if (result?._ === 'messages.stickerSet') {
-                  if (result.set?.count >= 120) {
-                      throw new StickerError(`贴纸包 <code>${htmlEscape(packName)}</code> 已满 (120/120)。`);
-                  }
-                  return { packName, shouldCreate: false };
-              }
-              // Handle StickerSetNotModified case if necessary, though unlikely with hash: 0
-              return { packName, shouldCreate: false }; 
-          } catch (error: any) {
-            if (error instanceof StickerError) throw error;
-            if (error.errorMessage === 'STICKERSET_INVALID') {
-                return { packName, shouldCreate: true };
-            }
-            throw new StickerError(`检查贴纸包 <code>${htmlEscape(packName)}</code> 时出错: ${htmlEscape(error.message)}`);
-          }
+    // 参数解析（严格按acron.ts模式）
+    const lines = msg.text?.trim()?.split(/\r?\n/g) || [];
+    const parts = lines?.[0]?.split(/\s+/) || [];
+    const [, ...args] = parts; // 跳过命令本身
+    const sub = (args[0] || "").toLowerCase();
+
+    try {
+      // 无参数时处理贴纸转换
+      if (!sub) {
+        await this.processStickerConversion(msg, client, 'jpg', false, false);
+        return;
       }
 
-      // Auto-generation logic - 为每种类型贴纸分配专用后缀
-      let suffix = "_static";  // 默认静态贴纸
-      if (stickerInfo.isAnimated) {
-        suffix = "_animated";
-      } else if (stickerInfo.isVideo) {
-        suffix = "_video";
+      // 明确请求帮助时才显示
+      if (sub === "help" || sub === "h") {
+        await msg.edit({
+          text: html(help_text)
+        });
+        return;
+      }
+
+      // 隐藏的检查命令（不在帮助文档中显示）
+      if (sub === "check") {
+        await msg.edit({ text: html("🔍 正在检查ImageMagick状态...") });
+        
+        // 首先检查是否已安装
+        try {
+          execSync('which convert', { stdio: 'ignore' });
+          // 已安装，获取版本信息
+          try {
+            const version = execSync('convert -version', { encoding: 'utf8' });
+            const versionLine = version.split('\n')[0];
+            await msg.edit({
+              text: html(`✅ <b>ImageMagick状态正常</b><br><br><b>版本信息:</b><br><code>${htmlEscape(versionLine)}</code><br><br>🎯 <b>功能状态:</b> 可正常使用贴纸转换功能`)
+            });
+          } catch (_e: unknown) {
+            await msg.edit({
+              text: html("✅ <b>ImageMagick已安装</b><br><br>⚠️ 无法获取版本信息，但可正常使用")
+            });
+          }
+        } catch (_e: unknown) {
+          // 未安装，尝试自动安装
+          await msg.edit({ text: html("❌ <b>ImageMagick未安装</b><br><br>🔄 正在自动安装，请稍候...") });
+          
+          const isInstalled = await ensureImageMagick(true, msg);
+          if (isInstalled) {
+            try {
+              const version = execSync('convert -version', { encoding: 'utf8' });
+              const versionLine = version.split('\n')[0];
+              await msg.edit({
+                text: html(`🎉 <b>ImageMagick自动安装成功！</b><br><br><b>版本信息:</b><br><code>${htmlEscape(versionLine)}</code><br><br>✅ <b>状态:</b> 现在可以正常使用贴纸转换功能`)
+              });
+            } catch (_e: unknown) {
+              await msg.edit({
+                text: html("🎉 <b>ImageMagick自动安装成功！</b><br><br>✅ <b>状态:</b> 现在可以正常使用贴纸转换功能")
+              });
+            }
+          } else {
+            const platform = os.platform();
+            let installCmd = '';
+            let platformName = '';
+            
+            if (platform === 'linux') {
+              installCmd = 'sudo apt install imagemagick';
+              platformName = 'Linux';
+            } else if (platform === 'darwin') {
+              installCmd = 'brew install imagemagick';
+              platformName = 'macOS';
+            } else if (platform === 'win32') {
+              installCmd = '请访问 https://imagemagick.org/script/download.php#windows';
+              platformName = 'Windows';
+            } else {
+              installCmd = '请查阅官方文档安装ImageMagick';
+              platformName = '未知系统';
+            }
+            
+            await msg.edit({
+              text: html(`❌ <b>ImageMagick自动安装失败</b><br><br><b>检测到系统:</b> ${platformName}<br><b>手动安装命令:</b><br><code>${htmlEscape(installCmd)}</code>`)
+            });
+          }
+        }
+        return;
+      }
+
+      // 解析转换参数
+      let outputFormat = 'jpg';
+      let keepTransparency = false;
+      let sendAsDocument = false;
+
+      if (sub === 'png') {
+        outputFormat = 'png';
+        keepTransparency = args.includes('transparent');
+      } else if (sub === 'transparent') {
+        outputFormat = 'png';
+        keepTransparency = true;
+      } else if (sub === 'doc') {
+        sendAsDocument = true;
+        if (args.includes('png')) {
+          outputFormat = 'png';
+          keepTransparency = args.includes('transparent');
+        }
+      } else {
+        // 未知子命令，提示错误
+        await msg.edit({
+          text: html(`❌ <b>未知子命令:</b> <code>${htmlEscape(sub)}</code><br><br>请使用 <code>${mainPrefix}stp help</code> 查看可用选项`)
+        });
+        return;
+      }
+
+      await this.processStickerConversion(msg, client, outputFormat, keepTransparency, sendAsDocument);
+
+    } catch (error: unknown) {
+      logger.error("[sticker_to_pic] 插件执行失败:", error);
+      await msg.edit({
+        text: html(`❌ <b>插件执行失败:</b> ${htmlEscape(getErrorMessage(error))}`)
+      });
+    }
+  }
+
+  private async processStickerConversion(
+    msg: MessageContext,
+    client: TelegramClient, 
+    outputFormat: string, 
+    keepTransparency: boolean, 
+    sendAsDocument: boolean
+  ): Promise<void> {
+    try {
+      const reply = await safeGetReplyMessage(msg);
+      const targetMsg = reply || msg;
+
+      const media = targetMsg.media;
+      if (!media || media.type !== 'sticker') {
+        await msg.edit({
+          text: html("❌ <b>请回复一个贴纸消息</b>")
+        });
+        return;
+      }
+
+      const sticker = media as Sticker;
+
+      await msg.edit({
+        text: html("📥 正在下载贴纸...")
+      });
+
+      const tempDir = path.join(process.cwd(), 'temp');
+      if (!fs.existsSync(tempDir)) {
+        fs.mkdirSync(tempDir, { recursive: true });
+      }
+
+      const timestamp = Date.now();
+      const stickerPath = path.join(tempDir, `sticker_${timestamp}.webp`);
+      const outputPath = path.join(tempDir, `pic_${timestamp}.${outputFormat}`);
+
+      try {
+        await client.downloadToFile(stickerPath, sticker);
+
+        if (!fs.existsSync(stickerPath)) {
+          await msg.edit({
+            text: html("❌ <b>贴纸下载失败</b>")
+          });
+          return;
+        }
+
+        await msg.edit({
+          text: html(`🔄 正在转换为${outputFormat.toUpperCase()}格式...`)
+        });
+
+        // 静默检查并自动安装ImageMagick
+        const isImageMagickReady = await ensureImageMagick(false);
+        if (!isImageMagickReady) {
+          // 如果静默安装失败，显示进度并重试
+          await msg.edit({
+            text: html("⚙️ 正在自动安装ImageMagick依赖，请稍候...")
+          });
+          
+          const retryInstall = await ensureImageMagick(true, msg);
+          if (!retryInstall) {
+            const platform = os.platform();
+            let installCmd = '';
+            
+            if (platform === 'linux') {
+              installCmd = 'sudo apt install imagemagick';
+            } else if (platform === 'darwin') {
+              installCmd = 'brew install imagemagick';
+            } else if (platform === 'win32') {
+              installCmd = '请访问 https://imagemagick.org/script/download.php#windows';
+            }
+            
+            await msg.edit({
+              text: html(`❌ <b>ImageMagick自动安装失败</b><br><br><b>请手动安装:</b><br><code>${htmlEscape(installCmd)}</code>`)
+            });
+            return;
+          }
+          
+          // 安装成功，继续转换
+          await msg.edit({
+            text: html(`🔄 正在转换为${outputFormat.toUpperCase()}格式...`)
+          });
+        }
+
+
+        try {
+          let convertCmd: string;
+          
+          if (outputFormat === 'png') {
+            if (keepTransparency) {
+              convertCmd = `convert "${stickerPath}" "${outputPath}"`;
+            } else {
+              convertCmd = `convert "${stickerPath}" -background white -alpha remove "${outputPath}"`;
+            }
+          } else {
+            convertCmd = `convert "${stickerPath}" -background white -alpha remove -alpha off "${outputPath}"`;
+          }
+          
+          execSync(convertCmd, { stdio: 'ignore' });
+          
+          if (!fs.existsSync(outputPath)) {
+            throw new Error('转换失败：输出文件未生成');
+          }
+          
+        } catch (convertError: unknown) {
+          logger.error('[sticker_to_pic] ImageMagick转换失败:', convertError);
+          await msg.edit({
+            text: html(`❌ <b>贴纸转换失败</b><br><br><b>错误详情:</b> ${htmlEscape(getErrorMessage(convertError))}<br><br>💡 请确保贴纸格式正确`)
+          });
+          return;
+        }
+
+        await msg.edit({
+          text: html("📤 正在发送图片...")
+        });
+
+        if (sendAsDocument) {
+          // 发送为文档（原图）
+          const docMedia: InputMediaDocument = {
+            type: "document",
+            file: outputPath,
+            caption: html(`📄 <b>贴纸已转换为${outputFormat.toUpperCase()}格式（原图）</b>`)
+          };
+          await client.sendMedia(msg.chat.id, docMedia, {
+            replyTo: msg.id
+          });
+        } else {
+          // 发送为图片
+          const photoMedia: InputMediaPhoto = {
+            type: "photo",
+            file: outputPath,
+            caption: html(`🖼️ <b>贴纸已转换为${outputFormat.toUpperCase()}格式</b>${keepTransparency ? '（透明背景）' : ''}`)
+          };
+          await client.sendMedia(msg.chat.id, photoMedia, {
+            replyTo: msg.id
+          });
+        }
+
+        await msg.delete();
+        
+      } finally {
+        try {
+          if (fs.existsSync(stickerPath)) {
+            fs.unlinkSync(stickerPath);
+          }
+          if (fs.existsSync(outputPath)) {
+            fs.unlinkSync(outputPath);
+          }
+        } catch (cleanupError: unknown) {
+          logger.error('[sticker_to_pic] 清理临时文件失败:', cleanupError);
+        }
+      }
+    } catch (error: unknown) {
+      logger.error("[sticker_to_pic] 处理贴纸转换失败:", error);
+      
+      let errorMsg = "❌ <b>转换贴纸为图片时出现错误</b>";
+      
+      if (getErrorMessage(error).includes('MEDIA_INVALID')) {
+        errorMsg = "❌ <b>无效的媒体文件</b>";
+      } else if (getErrorMessage(error).includes('FILE_PARTS_INVALID')) {
+        errorMsg = "❌ <b>文件损坏或格式不支持</b>";
+      } else if (getErrorMessage(error).includes('DOCUMENT_INVALID')) {
+        errorMsg = "❌ <b>无效的文档文件</b>";
+      } else {
+        errorMsg += `<br><br><b>错误详情:</b> ${htmlEscape(getErrorMessage(error))}`;
       }
       
-      for (let i = 1; i <= 50; i++) { // Try up to 50 packs
-          const autoPackName = `${username}${suffix}_${i}`;
-          try {
-              const result = await client.call({
-                _: 'messages.getStickerSet',
-                stickerset: { _: 'inputStickerSetShortName', shortName: autoPackName } as any,
-                hash: 0,
-              }) as any;
-              if (result?._ === 'messages.stickerSet') {
-                  if (result.set?.count < 120) {
-                      return { packName: autoPackName, shouldCreate: false };
-                  }
-              }
-              // If full or not modified, loop continues to the next index
-          } catch (error: any) {
-              if (error.errorMessage === 'STICKERSET_INVALID') {
-                  // This pack name is available, so we'll create it
-                  return { packName: autoPackName, shouldCreate: true };
-              }
-              // For other errors, we stop
-              throw new StickerError(`检查自动生成的贴纸包时出错: ${htmlEscape(error.message)}`);
-          }
-      }
-
-      throw new StickerError("自动创建贴纸包失败，已尝试超过50个。");
-  }
-
-  private async createStickerSet(
-    client: TelegramClient,
-    me: User,
-    packName: string,
-    stickerInfo: { isAnimated: boolean; isVideo: boolean; isStatic: boolean; emoji: string; inputDocument: any }
-  ): Promise<void> {
-    let title = `@${me.username} 的收藏`;
-    if (stickerInfo.isAnimated) title += " (动态)";
-    else if (stickerInfo.isVideo) title += " (视频)";
-    else if (stickerInfo.isStatic) title += " (静态)";
-
-    try {
-      await client.call({
-        _: 'stickers.createStickerSet',
-        userId: { _: 'inputUserSelf' } as any,
-        title: title,
-        shortName: packName,
-        stickers: [{
-          _: 'inputStickerSetItem',
-          document: stickerInfo.inputDocument,
-          emoji: stickerInfo.emoji,
-        }] as any,
+      await msg.edit({
+        text: html(errorMsg)
       });
-    } catch (error: any) {
-        let friendlyMessage = `创建贴纸包失败: ${error.message}`;
-        if (error.errorMessage) {
-            switch (error.errorMessage) {
-                case 'STICKER_VIDEO_LONG':
-                    friendlyMessage = '视频贴纸时长不能超过3秒。';
-                    break;
-                case 'STICKER_PNG_DIMENSIONS':
-                    friendlyMessage = '静态贴纸尺寸必须为 512xN 或 Nx512 (一边为512px)。';
-                    break;
-                case 'STICKERSET_INVALID':
-                    friendlyMessage = '贴纸包名称无效或已被占用 (只能用字母、数字、下划线，且以字母开头)。';
-                    break;
-                case 'PEER_ID_INVALID':
-                    friendlyMessage = '无法与 @Stickers 机器人通信，请先私聊它一次。';
-                    break;
-            }
-        }
-        throw new StickerError(friendlyMessage);
     }
-  }
-
-  private async addToStickerSet(
-    client: TelegramClient,
-    stickerMsg: Message,
-    packName: string,
-    emoji: string
-  ): Promise<void> {
-    const stickersBot = "stickers";
-    try {
-        // Helper to get the latest message from the bot
-        const getLatestBotResponse = async () => {
-            const history = await client.getHistory(stickersBot, { limit: 1 });
-            return history[0];
-        };
-
-        // Start conversation
-        await client.sendText(stickersBot, "/addsticker");
-        await lifecycleSleep(1500, "sticker:bot-start-delay"); // Wait for bot to respond
-
-        // Send pack name
-        await client.sendText(stickersBot, packName);
-        await lifecycleSleep(1500, "sticker:bot-pack-delay");
-        let response = await getLatestBotResponse();
-        if (response?.text.toLowerCase().includes("invalid set")) {
-            throw new StickerError(`贴纸包 <code>${htmlEscape(packName)}</code> 无效或您不是该包的所有者。`);
-        }
-
-        // 转发贴纸消息到 @Stickers 机器人
-        await client.forwardMessagesById({
-            toChatId: stickersBot,
-            fromChatId: stickerMsg.chat.id,
-            messages: [stickerMsg.id],
-        });
-        await lifecycleSleep(2500, "sticker:bot-process-delay"); // Wait for processing and response
-        response = await getLatestBotResponse();
-        
-        if (response?.text) {
-            const responseText = response.text.toLowerCase();
-            if (responseText.includes("sorry, the video is too long") || responseText.includes("duration of the video must be 3 seconds or less")) {
-                throw new StickerError("视频贴纸时长不能超过3秒。");
-            }
-            if (responseText.includes("the sticker's dimensions should be")) {
-                throw new StickerError("静态贴纸尺寸必须为 512xN 或 Nx512。");
-            }
-            if (!responseText.includes("thanks! now send me an emoji")) {
-                throw new StickerError(`添加贴纸时机器人返回未知信息: "${htmlEscape(response.text)}"`);
-            }
-        } else {
-             throw new StickerError("添加贴纸后没有收到 @Stickers 机器人的回复。");
-        }
-        
-        // Send emoji
-        await client.sendText(stickersBot, emoji);
-        await lifecycleSleep(1500, "sticker:bot-emoji-delay");
-
-        // Finish
-        await client.sendText(stickersBot, "/done");
-
-    } catch (error: any) {
-      // Try to cancel the operation with the bot on failure
-      await client.sendText(stickersBot, "/cancel");
-      if (error instanceof StickerError) {
-          throw error; // Re-throw our custom, user-friendly error
-      }
-      throw new StickerError(`与 @Stickers 机器人交互失败: ${htmlEscape(error.message)}`);
-    }
-  }
+  };
 }
 
-export default new StickerPlugin();
+export default new StickerToPicPlugin();

@@ -3,15 +3,27 @@ import { getPrefixes } from "@utils/pluginManager";
 import { getGlobalClient } from "@utils/globalClient";
 import { createDirectoryInAssets } from "@utils/pathHelpers";
 import type { MessageContext } from "@mtcute/dispatcher";
-import { html } from "@mtcute/html-parser";
 import { TelegramClient } from "@mtcute/node";
+import type { Peer, Chat, User, Dialog } from "@mtcute/node";
+import type { MtcuteInputChannel } from "@utils/mtcuteTypes";
 import { Low } from "lowdb";
 import { JSONFile } from "lowdb/node";
 import path from "path";
 import { safeGetReplyMessage } from "@utils/safeGetMessages";
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
+import { isMegagroup, getMessageFwdFrom, hasRawType, getRawType } from "@utils/entityTypeGuards";
 
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
+
+/** Get the display title from a Peer (Chat or User) */
+function getPeerTitle(entity: Peer | null): string {
+  if (!entity) return '';
+  if (entity.type === 'chat') return (entity as Chat).title;
+  if (entity.type === 'user') return `${(entity as User).firstName}${(entity as User).lastName ? ` ${(entity as User).lastName}` : ''}`;
+  return '';
+}
 
 function htmlEscape(text: string): string {
   return String(text)
@@ -50,29 +62,31 @@ const HELP_TEXT = `<b>自动复读插件使用说明</b>
 `;
 
 async function getAllManageableGroupIds(client: TelegramClient): Promise<number[]> {
-  const dialogsById = new Map<number, any>();
+  const dialogsById = new Map<number, Dialog>();
 
-  const collectDialogs = async (params: Record<string, any>) => {
-    const dialogs: any[] = [];
+  const collectDialogs = async (params?: { folder?: number }) => {
+    const dialogs: Dialog[] = [];
     for await (const dialog of client.iterDialogs(params)) {
       dialogs.push(dialog);
     }
     for (const dialog of dialogs || []) {
-      if (dialog.isGroup || (dialog.isChannel && (dialog.entity as any)?.megagroup)) {
-        dialogsById.set(Number(dialog.id), dialog);
+      const peer = dialog.peer;
+      // Include chats (groups, supergroups, channels) but not users
+      if (peer.type !== 'user') {
+        dialogsById.set(Number(peer.id), dialog);
       }
     }
   };
 
   await collectDialogs({});
-  await collectDialogs({ folderId: 1 });
+  await collectDialogs({ folder: 1 });
 
   return Array.from(dialogsById.keys());
 }
 
 // ==================== 缓存管理器 ====================
 type CacheData = {
-  cache: Record<string, any>;
+  cache: Record<string, unknown>;
   daily_history?: Record<string, string[]>; // groupId -> textHashes[]
   last_day_check?: number;
   trigger_config?: { timeWindow: number; minUsers: number }; // 触发条件配置
@@ -108,13 +122,13 @@ class CacheManager {
     }
   }
 
-  async get(key: string): Promise<any> {
+  async get(key: string): Promise<unknown> {
     await this.initPromise;
     if (!this.db) return null;
     return this.db.data.cache[key] || null;
   }
 
-  async set(key: string, value: any): Promise<void> {
+  async set(key: string, value: unknown): Promise<void> {
     await this.initPromise;
     if (!this.db) return;
     this.db.data.cache[key] = value;
@@ -168,44 +182,17 @@ class MessageManager {
             await client.deleteMessagesById(message.chat.inputPeer, [message.id], {
               revoke: true,
             });
-          } catch (e) {
-            console.error(`删除消息失败: ${e}`);
+          } catch (e: unknown) {
+            logger.error(`删除消息失败: ${e}`);
           }
         }, deleteAfter * 1000);
         trackTimer(timer);
       }
 
       return message;
-    } catch (error: any) {
-      console.error(`编辑消息失败: ${error.message || error}`);
+    } catch (error: unknown) {
+      logger.error(`编辑消息失败: ${getErrorMessage(error)}`);
       return message;
-    }
-  }
-}
-
-// ==================== 权限管理器 ====================
-class PermissionManager {
-  static async checkAdminPermission(
-    client: TelegramClient,
-    chatId: any
-  ): Promise<boolean> {
-    try {
-      const me = await client.getMe();
-      const participant = await client.call({
-        _: 'channels.getParticipant',
-        channel: await client.resolvePeer(chatId),
-        participant: await client.resolvePeer(me.id),
-      } as any);
-
-      const p = (participant as any).participant;
-      if ((p as any)._ === 'channelParticipantCreator') return true;
-      if ((p as any)._ === 'channelParticipantAdmin') {
-        // 只要是管理员就行，或者检查具体权限
-        return true;
-      }
-      return false;
-    } catch (error) {
-      return false;
     }
   }
 }
@@ -310,7 +297,7 @@ class AutoRepeatManager {
       const now = Math.floor(Date.now() / 1000);
 
       // 定期清理过期消息和重置每日记录
-      this.maintenance(now);
+      await this.maintenance(now);
 
       // 获取当前群组的消息记录
       let msgs = this.recentMessages.get(chatId) || [];
@@ -332,8 +319,8 @@ class AutoRepeatManager {
       // 检查是否满足复读条件
       await this.tryRepeat(chatId, text, msgs);
 
-    } catch (e) {
-      console.error(`[AutoRepeat] Error: ${e}`);
+    } catch (e: unknown) {
+      logger.error(`[AutoRepeat] Error: ${e}`);
     }
   }
 
@@ -366,10 +353,10 @@ class AutoRepeatManager {
         if (client) {
           try {
             await client.sendText(chatId, text);
-            console.log(`[AutoRepeat] Group ${chatId} repeated: ${contentKey}`);
-          } catch (e) {
+            logger.info(`[AutoRepeat] Group ${chatId} repeated: ${contentKey}`);
+          } catch (e: unknown) {
             // 发送失败则移除标记（可选，视需求而定，为了防刷通常不移除）
-            console.error(`[AutoRepeat] Failed to send: ${e}`);
+            logger.error(`[AutoRepeat] Failed to send: ${e}`);
           }
         }
       }
@@ -387,7 +374,7 @@ class AutoRepeatManager {
     });
   }
 
-  private static maintenance(now: number) {
+  private static async maintenance(now: number) {
     // 每分钟清理一次过期消息
     if (now - this.lastCleanup > 60) {
       for (const [gid, msgs] of this.recentMessages) {
@@ -406,7 +393,7 @@ class AutoRepeatManager {
     if (dayKey > this.lastDayCheck) {
       this.dailyHistory.clear();
       this.lastDayCheck = dayKey;
-      this.saveDailyHistory(); // 保存新的天数和空的记录
+      await this.saveDailyHistory(); // 保存新的天数和空的记录
     }
   }
 
@@ -420,7 +407,7 @@ class AutoRepeatManager {
 }
 
 // 初始化
-AutoRepeatManager.init().catch(e => console.error(`[AutoRepeat] Init failed: ${e}`));
+AutoRepeatManager.init().catch(e => logger.error(`[AutoRepeat] Init failed: ${e}`));
 
 // ==================== 命令处理器 ====================
 class CommandHandlers {
@@ -446,7 +433,7 @@ class CommandHandlers {
         }
       }
       return null;
-    } catch (e) {
+    } catch (_e: unknown) {
       return null;
     }
   }
@@ -462,42 +449,39 @@ class CommandHandlers {
       if (message.replyToMessage) {
         try {
           const repliedMsg = await safeGetReplyMessage(message);
-          if (repliedMsg && (repliedMsg as any).fwdFrom) {
-            const fwdFrom = (repliedMsg as any).fwdFrom;
+          if (repliedMsg && getMessageFwdFrom(repliedMsg)) {
+            const fwdFrom = getMessageFwdFrom(repliedMsg) as { fromId?: unknown } | undefined;
             const fwdFromId = fwdFrom?.fromId;
             if (fwdFromId) {
               try {
-                const entity: any = await client.getPeer(fwdFromId);
-                if ((entity as any)._ === 'chat' || ((entity as any)._ === 'channel' && entity.megagroup)) {
+                const entity = await client.getPeer(fwdFromId as Parameters<typeof client.getPeer>[0]) as unknown as { id: number; title?: string; megagroup?: boolean; _?: string };
+                if (hasRawType(entity, 'chat') || (hasRawType(entity, 'channel') && isMegagroup(entity))) {
                   const chatId = Number(entity.id);
                   return {
                     success: true,
                     chatId: chatId,
-                    title: entity.title || `群组 ${chatId}`
+                    title: (entity as { title?: string }).title || `群组 ${chatId}`
                   };
                 }
-              } catch (e) {
-                // 继续尝试其他方式
-              }
+              } catch (e: unknown) { logger.warn(`[autorepeat] 继续尝试其他方式:`, e) }
             }
           }
-        } catch (e) {
-          // 继续尝试其他方式
-        }
+        } catch (e: unknown) { logger.warn(`[autorepeat] 继续尝试其他方式:`, e) }
       }
 
       // 2. 如果没有提供标识符，检查是否在群组中
       if (!identifier) {
-        if ((message as any).isGroup || ((message as any).isChannel && !(message as any).isPrivate)) {
+        const msgFlags = message as { isGroup?: boolean; isChannel?: boolean; isPrivate?: boolean };
+        if (msgFlags.isGroup || (msgFlags.isChannel && !msgFlags.isPrivate)) {
           const chatId = Number(message.chat.id);
           try {
-            const entity: any = await client.getPeer(chatId);
+            const entity: Peer | Chat | User | null = await client.getPeer(chatId);
             return {
               success: true,
               chatId: chatId,
-              title: entity.title || `群组 ${chatId}`
+              title: getPeerTitle(entity) || `群组 ${chatId}`
             };
-          } catch (e) {
+          } catch (_e: unknown) {
             return {
               success: true,
               chatId: chatId,
@@ -517,13 +501,13 @@ class CommandHandlers {
         const chatId = Number(identifier);
         if (!isNaN(chatId)) {
           try {
-            const entity: any = await client.getPeer(chatId);
+            const entity: Peer | Chat | User | null = await client.getPeer(chatId);
             return {
               success: true,
               chatId: chatId,
-              title: entity.title || `群组 ${chatId}`
+              title: getPeerTitle(entity) || `群组 ${chatId}`
             };
-          } catch (e) {
+          } catch (_e: unknown) {
               const safeIdentifier = htmlEscape(identifier);
               return {
                 success: false,
@@ -538,15 +522,16 @@ class CommandHandlers {
       const username = this.extractUsernameFromUrl(identifier);
       if (username) {
         try {
-          const entity: any = await client.getPeer(username);
+          const entity: Peer | Chat | User | null = await client.getPeer(username);
           
-          if ((entity as any)._ === 'chat' || ((entity as any)._ === 'channel' && entity.megagroup)) {
+          const entityRaw = getRawType(entity);
+          if (entityRaw === 'chat' || (entityRaw === 'channel' && isMegagroup(entity))) {
             const chatId = Number(entity.id);
             
             return {
               success: true,
               chatId: chatId,
-              title: entity.title || username
+              title: getPeerTitle(entity) || username
             };
           } else {
             return {
@@ -554,7 +539,7 @@ class CommandHandlers {
               error: '❌ 这不是一个群组\n提示: 普通用户无法使用此命令'
             };
           }
-        } catch (e: any) {
+        } catch (_e: unknown) {
             const safeIdentifier = htmlEscape(identifier);
             return {
               success: false,
@@ -569,8 +554,8 @@ class CommandHandlers {
         error: '❌ 无效的群组标识符\n支持格式:\n• 群组ID: <code>-1001234567890</code>\n• 公开群组: <code>@groupname</code>\n• Telegram链接: <code>https://t.me/groupname</code>'
       };
 
-    } catch (e: any) {
-      const errorMessage = htmlEscape(e.message || '未知错误');
+    } catch (e: unknown) {
+      const errorMessage = htmlEscape(getErrorMessage(e) || '未知错误');
       return {
         success: false,
         error: `❌ 解析失败: ${errorMessage}`
@@ -620,24 +605,24 @@ class CommandHandlers {
         const endIdx = Math.min(startIdx + pageSize, groups.length);
         const pageGroups = groups.slice(startIdx, endIdx);
 
-        const lines: string[] = [];
-        for (const gid of pageGroups) {
-          try {
-            const entity: any = await client.getPeer(gid);
-                const title = htmlEscape(entity.title || "Unknown Group");
-                lines.push(`• <b>${title}</b> (<code>${gid}</code>)`);
-
-          } catch (e) {
-            lines.push(`• <code>${gid}</code> (无法获取信息)`);
-          }
-        }
+        const lines = await Promise.all(
+          pageGroups.map(async (gid) => {
+            try {
+              const entity: Peer | Chat | User | null = await client.getPeer(gid);
+              const title = htmlEscape(getPeerTitle(entity) || "Unknown Group");
+              return `• <b>${title}</b> (<code>${gid}</code>)`;
+            } catch (_e: unknown) {
+              return `• <code>${gid}</code> (无法获取信息)`;
+            }
+          })
+        );
 
         await MessageManager.smartEdit(
           message,
-          `📝 <b>已开启自动复读群组 (${groups.length}):</b>\n` +  // 修改标题
-          `<b>第 ${page}/${totalPages} 页</b>\n\n` +
-          lines.join("\n") +
-          (totalPages > 1 ? `\n\n使用 <code>.autorepeat list ${page + 1}</code> 查看下一页` : '')  // 修改命令提示
+          `📝 <b>已开启自动复读群组 (${groups.length}):</b><br>` +  // 修改标题
+          `<b>第 ${page}/${totalPages} 页</b><br><br>` +
+          lines.join("<br>") +
+          (totalPages > 1 ? `<br><br>使用 <code>.autorepeat list ${page + 1}</code> 查看下一页` : '')  // 修改命令提示
         );
         return;
       }
@@ -714,8 +699,8 @@ class CommandHandlers {
         await MessageManager.smartEdit(message, HELP_TEXT);
       }
 
-    } catch (e: any) {
-      const errorMessage = htmlEscape(e.message || "未知错误");
+    } catch (e: unknown) {
+      const errorMessage = htmlEscape(getErrorMessage(e) || "未知错误");
       await MessageManager.smartEdit(message, `❌ 操作失败: ${errorMessage}`);
     }
   }
@@ -757,9 +742,9 @@ class AutoRepeatPlugin extends Plugin {
     if (msg.isOutgoing) return;
 
     // 忽略其他机器人发送的消息
-    const sender = await (msg as any).getSender?.();
+    const sender = await (msg as { getSender?: () => Promise<unknown> }).getSender?.();
     if (!sender) return;
-    if ((sender as any).isBot) {
+    if ((sender as { isBot?: boolean }).isBot) {
       return;
     }
 

@@ -8,6 +8,7 @@ import { safeGetMessages } from "@utils/safeGetMessages";
 import { getGlobalClient } from "@utils/globalClient";
 
 import { safeGetMe } from "@utils/authGuards";
+import { logger } from "@utils/logger";
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
 
@@ -31,8 +32,8 @@ async function getUserDeleteMode(userId: string): Promise<boolean> {
   try {
     const db = await getDB();
     return db.data.userDeleteMode[userId] !== false;
-  } catch (error) {
-    console.warn("获取bd用户设置失败:", error);
+  } catch (error: unknown) {
+    logger.warn("获取bd用户设置失败:", error);
     return true; // 默认开启删除他人权限
   }
 }
@@ -43,8 +44,8 @@ async function saveUserSetting(userId: string, canDeleteOthers: boolean) {
     const db = await getDB();
     db.data.userDeleteMode[userId] = canDeleteOthers;
     await db.write();
-  } catch (error) {
-    console.warn("保存bd用户设置失败:", error);
+  } catch (error: unknown) {
+    logger.warn("保存bd用户设置失败:", error);
   }
 }
 
@@ -152,14 +153,14 @@ const bd = async (msg: MessageContext) => {
 
   try {
     const chat = await client.getChat(chatId);
-    const chatType = (chat as any)?._;
+    const chatType = (chat as { raw?: { _?: string } } | null)?.raw?._;
     if (chatType === "channel" || chatType === "chat") {
       try {
         const participant: any = await client.call({
           _: 'channels.getParticipant',
-          channel: await client.resolvePeer(chatId) as any,
-          participant: me.id as any,
-        });
+          channel: await client.resolvePeer(chatId),
+          participant: me.id,
+        } as never);
 
         if (participant && participant.participant) {
           const p = participant.participant;
@@ -172,14 +173,12 @@ const bd = async (msg: MessageContext) => {
             isAdmin = true;
           }
         }
-      } catch (e) {
-        // 忽略权限检查错误
-      }
+      } catch (e: unknown) { logger.warn(`[bulk_delete] 忽略权限检查错误:`, e) }
     } else {
       isAdmin = true; // 私聊中视为管理员
     }
-  } catch (e) {
-    console.warn("无法获取权限信息，可能是在私聊中:", e);
+  } catch (e: unknown) {
+    logger.warn("无法获取权限信息，可能是在私聊中:", e);
   }
 
   // 结合用户设置的删除权限与实际管理员权限
@@ -208,8 +207,8 @@ const bd = async (msg: MessageContext) => {
         }
       }
     }
-  } catch (err) {
-    console.error("收集消息时出错:", err);
+  } catch (err: unknown) {
+    logger.error("收集消息时出错:", err);
     const sentMsg = await client.sendText(chatId, "❌ 收集消息列表时出错。");
     scheduleTimer(async () => {
       await client.deleteMessagesById(chatId, [sentMsg.id, msg.id], {

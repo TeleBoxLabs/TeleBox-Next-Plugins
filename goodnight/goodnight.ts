@@ -2,6 +2,7 @@ import { Plugin } from "@utils/pluginBase";
 import { getPrefixes } from "@utils/pluginManager";
 import type { MessageContext } from "@mtcute/dispatcher";
 import { html } from "@mtcute/html-parser";
+import type { Peer, User } from "@mtcute/core";
 import { JSONFilePreset } from "lowdb/node";
 import { createDirectoryInAssets } from "@utils/pathHelpers";
 import * as path from "path";
@@ -9,7 +10,7 @@ import dayjs from "dayjs";
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
 
-import { getGlobalClient } from "@utils/globalClient";
+import { logger } from "@utils/logger";
 
 // 定义数据库结构
 interface GroupData {
@@ -27,17 +28,17 @@ interface DBData {
 class GreetingPlugin extends Plugin {
     // 动态生成描述，包含帮助信息
     description = () => {
-        const help = `🌙 <b>早晚安统计插件</b>\n\n` +
-                     `自动回复早晚安并统计排名。默认关闭，需手动开启。\n\n` +
-                     `<b>指令:</b>\n` +
-                     `• <code>${mainPrefix}goodnight on/off</code> - 开启或关闭统计\n` +
-                     `• <code>${mainPrefix}goodnight utc+8</code> - 设置时区 (支持 utc+8, utc-5 格式)\n` +
+        const help = `🌙 <b>早晚安统计插件</b><br><br>` +
+                     `自动回复早晚安并统计排名。默认关闭，需手动开启。<br><br>` +
+                     `<b>指令:</b><br>` +
+                     `• <code>${mainPrefix}goodnight on/off</code> - 开启或关闭统计<br>` +
+                     `• <code>${mainPrefix}goodnight utc+8</code> - 设置时区 (支持 utc+8, utc-5 格式)<br>` +
                      `• <code>${mainPrefix}goodnight</code> - 查看状态`;
         return help;
     };
     
     // 数据库实例
-    private db: any;
+    private db!: Awaited<ReturnType<typeof JSONFilePreset<DBData>>>;
     
     // 关键词配置
     private readonly sleepKeywords = ["晚安", "晚", "睡觉", "睡了", "去睡了", "晚安喵"];
@@ -48,8 +49,7 @@ class GreetingPlugin extends Plugin {
     }
 
   cleanup(): void {
-    // 引用重置：清空实例级 db / cache / manager 引用，便于 reload 后重新初始化。
-    this.db = null;
+    // 引用重置：db 由 reload 后重新初始化自动覆盖，无需显式清空。
   }
 
   async setup(): Promise<void> {
@@ -79,8 +79,8 @@ class GreetingPlugin extends Plugin {
 
     // 统一处理指令逻辑
     private async handleCommand(msg: MessageContext) {
-        if (!this.db) await this.initDB();
-        
+        if (!this.db) { await this.initDB(); }
+
         const chatId = msg.chat.id.toString();
         if (!chatId) return;
 
@@ -164,13 +164,13 @@ class GreetingPlugin extends Plugin {
             const tzSign = groupData.timezone >= 0 ? "+" : "";
             const currentTzTime = dayjs(this.getDateByTimezone(groupData.timezone)).format("YYYY-MM-DD HH:mm:ss");
             
-            const help = `🌙 <b>早晚安统计插件</b>\n\n` +
-                         `当前状态: ${status}\n` +
-                         `当前时区: UTC${tzSign}${groupData.timezone}\n` +
-                         `当前时间: ${currentTzTime}\n\n` +
-                         `<b>指令:</b>\n` +
-                         `• <code>${mainPrefix}goodnight on/off</code> - 开启或关闭统计\n` +
-                         `• <code>${mainPrefix}goodnight utc+8</code> - 设置时区\n` +
+            const help = `🌙 <b>早晚安统计插件</b><br><br>` +
+                         `当前状态: ${status}<br>` +
+                         `当前时区: UTC${tzSign}${groupData.timezone}<br>` +
+                         `当前时间: ${currentTzTime}<br><br>` +
+                         `<b>指令:</b><br>` +
+                         `• <code>${mainPrefix}goodnight on/off</code> - 开启或关闭统计<br>` +
+                         `• <code>${mainPrefix}goodnight utc+8</code> - 设置时区<br>` +
                          `• <code>${mainPrefix}goodnight</code> - 查看状态`;
             await msg.edit({ text: html(help) });
         }
@@ -188,7 +188,7 @@ class GreetingPlugin extends Plugin {
         if (!chatId || !userId) return;
 
         // 3. 检查功能开关
-        if (!this.db) await this.initDB();
+        if (!this.db) { await this.initDB(); }
         const groupData = this.db.data.groups[chatId];
         
         // 关键逻辑：如果数据不存在（从未设置过），或者 enabled 为 false，直接忽略
@@ -222,7 +222,7 @@ class GreetingPlugin extends Plugin {
     // 核心处理逻辑
     private async processGreeting(msg: MessageContext, chatId: string, userId: string, type: "sleep" | "wake") {
         // 确保数据库已加载
-        if (!this.db) await this.initDB();
+        if (!this.db) { await this.initDB(); }
 
         // 获取群组数据（listener 已确保数据存在且 enabled=true）
         let groupData = this.db.data.groups[chatId];
@@ -264,12 +264,13 @@ class GreetingPlugin extends Plugin {
         // 获取用户显示名称
         let senderName = "神秘人";
         try {
-            const sender = msg.sender as any;
+            const sender: Peer = msg.sender;
             if (sender) {
-                senderName = sender.firstName || sender.username || "群友";
+                const userSender = sender.type === 'user' ? sender as User : null;
+                senderName = userSender?.firstName || userSender?.username || "群友";
             }
-        } catch (e) {
-            console.error("获取用户信息失败", e);
+        } catch (e: unknown) {
+            logger.error("获取用户信息失败", e);
         }
 
         // 构建回复内容
@@ -282,8 +283,8 @@ class GreetingPlugin extends Plugin {
         // 发送回复
         try {
             await msg.replyText(replyText);
-        } catch (e) {
-            console.error("回复消息失败", e);
+        } catch (e: unknown) {
+            logger.error("回复消息失败", e);
         }
     }
 }

@@ -13,6 +13,8 @@ import { createDirectoryInAssets, createDirectoryInTemp } from "@utils/pathHelpe
 import { getGlobalClient } from "@utils/globalClient";
 import * as fs from "fs";
 import { safeGetMessages } from "@utils/safeGetMessages";
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
 
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
@@ -27,7 +29,9 @@ async function deleteCommandMessage(msg: MessageContext) {
         } else {
             await msg.delete(); // 普通删除
         }
-    } catch { }
+    } catch (e: unknown) {
+        logger.debug("tts: message delete failed, may lack permission or already deleted", e);
+    }
 }
 
 /** 清理文本（emoji/不在白名单的符号；合并连续标点） */
@@ -240,7 +244,7 @@ class TTSPlugin extends Plugin {
 
                     // 过滤
                     if (filter.toLowerCase() !== "all") {
-                        voices = voices.filter((v: any) => v.Locale.toLowerCase().includes(filter.toLowerCase()) || v.ShortName.toLowerCase().includes(filter.toLowerCase()));
+                        voices = voices.filter((v: { Locale?: string; ShortName?: string }) => (v.Locale ?? "").toLowerCase().includes(filter.toLowerCase()) || (v.ShortName ?? "").toLowerCase().includes(filter.toLowerCase()));
                     }
 
                     if (voices.length === 0) {
@@ -249,12 +253,12 @@ class TTSPlugin extends Plugin {
                     }
 
                     // 格式化输出
-                    const lines = voices.map((v: any) => {
+                    const lines = voices.map((v: { ShortName?: string; LocalName?: string; Gender?: string }) => {
                         const gender = v.Gender === "Female" ? "👩" : (v.Gender === "Male" ? "👨" : "👤");
                         return `${gender} ${codeTag(v.ShortName)} (${htmlEscape(v.LocalName)})`;
                     });
 
-                    const resultText = `📋 <b>可用音色列表</b> (${htmlEscape(filter)})\n\n${lines.join("\n")}\n\n使用 <code>${mainPrefix}tts voice &lt;Name&gt;</code> 设置`;
+                    const resultText = `📋 <b>可用音色列表</b> (${htmlEscape(filter)})<br><br>${lines.join("<br>")}<br><br>使用 <code>${mainPrefix}tts voice &lt;Name&gt;</code> 设置`;
 
                     // 如果太长，发送文件
                     if (resultText.length > 4000) {
@@ -275,9 +279,9 @@ class TTSPlugin extends Plugin {
                         await msg.edit({ text: html(resultText) });
                     }
 
-                } catch (error: any) {
-                    console.error("[TTS Plugin] Voices Error:", error);
-                    await msg.edit({ text: html`❌ 获取列表失败: ${htmlEscape(error.message)}` });
+                } catch (error: unknown) {
+                    logger.error("[TTS Plugin] Voices Error:", error);
+                    await msg.edit({ text: html`❌ 获取列表失败: ${htmlEscape(getErrorMessage(error))}` });
                 }
                 return;
             }
@@ -391,9 +395,11 @@ class TTSPlugin extends Plugin {
                     throw new Error(`API returned status ${response.status}`);
                 }
 
-            } catch (error: any) {
-                console.error("[TTS Plugin] Error:", error);
-                const errMsg = error.response ? `API Error: ${error.response.status} ${error.response.statusText}` : (error.message || "Unknown error");
+            } catch (error: unknown) {
+                logger.error("[TTS Plugin] Error:", error);
+                const errMsg = error !== null && error !== undefined && typeof error === "object" && "response" in error
+                    ? `API Error: ${(error as { response: { status: number; statusText: string } }).response.status} ${(error as { response: { status: number; statusText: string } }).response.statusText}`
+                    : getErrorMessage(error);
                 await msg.edit({ text: html`❌ 合成失败: ${htmlEscape(errMsg)}` });
             }
         }

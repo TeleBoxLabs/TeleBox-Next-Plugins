@@ -1,16 +1,16 @@
 import { Plugin } from "@utils/pluginBase";
 import type { MessageContext } from "@mtcute/dispatcher";
+import type { MtcuteFileLocation } from "@utils/mtcuteTypes";
 import { html } from "@mtcute/html-parser";
 import { getPrefixes } from "@utils/pluginManager";
 import { getGlobalClient } from "@utils/globalClient";
 import axios from "axios";
 import { safeGetReplyMessage } from "@utils/safeGetMessages";
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
+import { htmlEscape } from "@utils/htmlEscape";
 
 // HTML转义函数
-const htmlEscape = (text: string): string =>
-  text.replace(/[&<>"']/g, (m) => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#x27;'
-  }[m] || m));
 
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
@@ -63,9 +63,9 @@ class SoutuPlugin extends Plugin {
         // 默认行为：执行搜图
         await this.handleSearch(msg);
 
-      } catch (error: any) {
-        console.error('[soutu] 插件执行失败:', error);
-        await msg.edit({ text: html`❌ <b>操作失败:</b> ${htmlEscape(error.message)} (${htmlEscape(pluginName)})` });
+      } catch (error: unknown) {
+        logger.error('[soutu] 插件执行失败:', error);
+        await msg.edit({ text: html`❌ <b>操作失败:</b> ${htmlEscape(getErrorMessage(error))} (${htmlEscape(pluginName)})` });
       }
     },
   };
@@ -77,7 +77,7 @@ class SoutuPlugin extends Plugin {
     }
 
     const replied = await safeGetReplyMessage(msg);
-    if (!replied?.media || (replied.media as any)?.type !== 'photo') {
+    if (!replied?.media || replied.media?.type !== 'photo') {
       await msg.edit({ text: html`❌ <b>错误:</b> 回复的消息不包含图片` });
       return;
     }
@@ -86,7 +86,7 @@ class SoutuPlugin extends Plugin {
     
     try {
       const client = await getGlobalClient();
-      const downloaded = await client.downloadAsBuffer(replied.media as any);
+      const downloaded = await client.downloadAsBuffer(replied.media as MtcuteFileLocation);
       const buffer = Buffer.isBuffer(downloaded) ? downloaded : Buffer.from(downloaded);
       if (buffer.length === 0) {
         await msg.edit({ text: html`❌ <b>错误:</b> 图片下载失败或为空` });
@@ -125,9 +125,9 @@ class SoutuPlugin extends Plugin {
 • <a href="${yandexUrl}">Yandex Images</a>` 
       });
 
-    } catch (error: any) {
-      console.error("[soutu] 处理图片失败:", error);
-      const errorText = `❌ 搜图失败: ${htmlEscape(error.message)}`;
+    } catch (error: unknown) {
+      logger.error("[soutu] 处理图片失败:", error);
+      const errorText = `❌ 搜图失败: ${htmlEscape(getErrorMessage(error))}`;
       await msg.edit({ text: html`${errorText}` });
     }
   }

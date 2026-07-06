@@ -1,4 +1,9 @@
-import { getPrefixes } from "@utils/pluginManager";
+import {
+  getPrefixes
+} from "@utils/pluginManager";
+import { logger } from "@utils/logger";
+import type { MtcuteMessageContext } from "@utils/mtcuteTypes";
+import { getErrorMessage } from "@utils/errorHelpers";
 import { Plugin } from "@utils/pluginBase";
 import type { MessageContext } from "@mtcute/dispatcher";
 import { html } from "@mtcute/html-parser";
@@ -10,6 +15,9 @@ import * as path from "path";
 import { getGlobalClient } from "@utils/globalClient";
 import { safeGetMessages, safeGetReplyMessage } from "@utils/safeGetMessages";
 import { reviveEntities } from "@utils/tlRevive";
+import { isUser } from "@utils/entityTypeGuards";
+import type { Chat, User } from "@mtcute/node";
+import { htmlEscape } from "@utils/htmlEscape";
 import {
   dealCommandPluginWithMessage,
   getCommandFromMessage,
@@ -28,6 +36,7 @@ function getRemarkFromMsg(msg: MessageContext | string, n: number): string {
     .replace(new RegExp(`^\\S+${Array(n).fill("\\s+\\S+").join("")}`), "")
     .trim();
 }
+
 // DB schema and helpers
 type AcronType =
   | "send"
@@ -125,12 +134,12 @@ async function getDB() {
 }
 
 // 转换辅助：在使用时将字符串转 number，写入时存字符串
-function toInt(value: any): number | undefined {
+function toInt(value: unknown): number | undefined {
   const n = Number(value);
   return Number.isFinite(n) ? Math.trunc(n) : undefined;
 }
 
-function toStrInt(value: any): string | undefined {
+function toStrInt(value: unknown): string | undefined {
   const n = Number(value);
   return Number.isFinite(n) ? String(Math.trunc(n)) : undefined;
 }
@@ -142,46 +151,48 @@ function formatDate(date: Date): string {
 }
 
 async function formatEntity(
-  target: any,
+  target: unknown,
   mention?: boolean,
   throwErrorIfFailed?: boolean,
 ) {
   const client = await getGlobalClient();
   if (!client) throw new Error("Telegram 客户端未初始化");
   if (!target) throw new Error("无效的目标");
-  let id: any;
-  let entity: any;
+  let id: number | undefined;
+  let entity: Chat | User | { id?: number; title?: string; firstName?: string; lastName?: string; username?: string } | undefined;
   try {
-    entity = (target as any)?._
-      ? target
-      : ((await client?.getChat(target)) as any);
+    entity = (target && typeof target === 'object' && '_' in target)
+      ? target as unknown as Chat | User
+      : (await client?.getChat(target as string | number) as Chat | User);
     if (!entity) throw new Error("无法获取 entity");
     id = entity.id;
     if (!id) throw new Error("无法获取 entity id");
-  } catch (e: any) {
-    console.error(e);
+  } catch (e: unknown) {
+    logger.error(e);
     if (throwErrorIfFailed)
       throw new Error(
-        `无法获取 ${target} 的 entity: ${e?.message || "未知错误"}`,
+        `无法获取 ${target} 的 entity: ${getErrorMessage(e)}`,
       );
   }
   const displayParts: string[] = [];
 
-  if (entity?.title) displayParts.push(entity.title);
-  if (entity?.firstName) displayParts.push(entity.firstName);
-  if (entity?.lastName) displayParts.push(entity.lastName);
-  if (entity?.username)
-    displayParts.push(
-      mention ? `@${entity.username}` : `<code>@${entity.username}</code>`,
-    );
+  if (entity) {
+    if ('title' in entity && entity.title) displayParts.push(entity.title);
+    if ('firstName' in entity && entity.firstName) displayParts.push(entity.firstName);
+    if ('lastName' in entity && entity.lastName) displayParts.push(entity.lastName);
+    if ('username' in entity && entity.username)
+      displayParts.push(
+        mention ? `@${entity.username}` : `<code>@${entity.username}</code>`,
+      );
+  }
 
-  if (id) {
+  if (id && entity) {
     displayParts.push(
-      (entity as any)?._ === "user"
+      isUser(entity)
         ? `<a href="tg://user?id=${id}">${id}</a>`
         : `<a href="https://t.me/c/${id}">${id}</a>`,
     );
-  } else if (!(target as any)?._) {
+  } else if (!(target && typeof target === 'object' && '_' in target)) {
     displayParts.push(`<code>${target}</code>`);
   }
 
@@ -203,8 +214,8 @@ function parseCronFromArgs(
   const n6 = 6;
   if (args.length >= n6) {
     const maybeCron = args.slice(0, n6).join(" ");
-    const validation = (cron as any).validateCronExpression
-      ? (cron as any).validateCronExpression(maybeCron)
+    const validation = cron.validateCronExpression
+      ? cron.validateCronExpression(maybeCron)
       : { valid: true };
     if (validation.valid) {
       return { cron: maybeCron, rest: args.slice(n6) };
@@ -288,8 +299,8 @@ async function scheduleTask(task: AcronTask) {
     try {
       const client = await getGlobalClient();
       // NOTE: mtcute 自动解析 peer，无需预加载对话
-      const chatIdNum = toInt((task as any).chatId);
-      const entityLike = (chatIdNum as any) ?? task.chat;
+      const chatIdNum = toInt(task.chatId);
+      const entityLike = chatIdNum ?? task.chat;
 
       if (task.type === "send") {
         const t = task as SendTask;
@@ -314,9 +325,9 @@ async function scheduleTask(task: AcronTask) {
           entityLike,
           t.message,
           replyTo ? { replyTo } : undefined,
-        );
+        ) as MtcuteMessageContext;
         if (cmd && sudoMsg)
-          await dealCommandPluginWithMessage({ cmd, msg: sudoMsg as any });
+          await dealCommandPluginWithMessage({ cmd, msg: sudoMsg });
         if (idx >= 0) {
           db.data.tasks[idx].lastRunAt = String(now);
           db.data.tasks[idx].lastResult = `已执行命令`;
@@ -329,11 +340,11 @@ async function scheduleTask(task: AcronTask) {
         const fromMsgIdNum = toInt(t.fromMsgId);
         try {
           // 获取源消息（尽量使用完整实体以避免 hash 失效）
-          const fromEntityLike = (fromChatIdNum as any) ?? t.fromChatId;
-          const messages = await safeGetMessages(client, fromEntityLike as any, {
+          const fromEntityLike = fromChatIdNum ?? t.fromChatId;
+          const messages = await safeGetMessages(client, fromEntityLike, {
             ids: fromMsgIdNum,
           });
-          const realtimeMsg = messages?.[0] as any;
+          const realtimeMsg = messages?.[0];
           if (!realtimeMsg) throw new Error("未能获取源消息");
 
           // 复制发送（不带转发头，保留文本/实体/媒体）
@@ -344,7 +355,7 @@ async function scheduleTask(task: AcronTask) {
             messages: [fromMsgIdNum!],
             noAuthor: true,
             ...(replyTo ? { replyTo } : {}),
-          } as any);
+          });
 
           if (idx >= 0) {
             db.data.tasks[idx].lastRunAt = String(now);
@@ -352,26 +363,22 @@ async function scheduleTask(task: AcronTask) {
             db.data.tasks[idx].lastError = undefined;
             await db.write();
           }
-        } catch (e: any) {
+        } catch (e: unknown) {
           throw e;
         }
       } else if (task.type === "forward") {
         const t = task as ForwardTask;
         const fromChatIdNum = toInt(t.fromChatId);
         const fromMsgIdNum = toInt(t.fromMsgId);
-        const fromEntityLike = (fromChatIdNum as any) ?? t.fromChatId;
+        const fromEntityLike = fromChatIdNum ?? t.fromChatId;
 
-        // await client.forwardMessages(entityLike, {
-        //   messages: fromMsgIdNum!,
-        //   fromPeer: fromEntityLike as any,
-        // });
         await client.forwardMessagesById({
           fromChatId: fromEntityLike,
           messages: [fromMsgIdNum!],
           toChatId: entityLike,
           // 如果在论坛话题中，指定话题的顶层消息 ID
           ...(t.replyTo ? { replyTo: toInt(t.replyTo) } : {}),
-        } as any);
+        });
         if (idx >= 0) {
           db.data.tasks[idx].lastRunAt = String(now);
           db.data.tasks[idx].lastResult = `已转发 1 条消息`;
@@ -399,10 +406,9 @@ async function scheduleTask(task: AcronTask) {
         const re = tryParseRegex(t.regex);
         const ids: number[] = [];
         for (const m of messages || []) {
-          const mm = m as any;
-          const text: string | undefined = mm.text ?? mm.message;
+          const text: string | undefined = m.text;
           if (typeof text === "string" && re.test(text)) {
-            if (typeof mm.id === "number") ids.push(mm.id);
+            if (typeof m.id === "number") ids.push(m.id);
           }
         }
         if (ids.length > 0) {
@@ -422,8 +428,7 @@ async function scheduleTask(task: AcronTask) {
           chatId: entityLike,
           message: msgIdNum,
           notify: !!t.notify,
-          pmOneSide: !!t.pmOneSide,
-        } as any);
+        });
         if (idx >= 0) {
           db.data.tasks[idx].lastRunAt = String(now);
           db.data.tasks[idx].lastResult = `已置顶消息 ${t.msgId}`;
@@ -434,7 +439,7 @@ async function scheduleTask(task: AcronTask) {
         const t = task as UnpinTask;
         const msgIdNum = toInt(t.msgId);
         if (msgIdNum === undefined) throw new Error("无效的消息ID");
-        await client.unpinMessage({ chatId: entityLike, message: msgIdNum } as any);
+        await client.unpinMessage({ chatId: entityLike, message: msgIdNum });
         if (idx >= 0) {
           db.data.tasks[idx].lastRunAt = String(now);
           db.data.tasks[idx].lastResult = `已取消置顶消息 ${t.msgId}`;
@@ -442,11 +447,11 @@ async function scheduleTask(task: AcronTask) {
           await db.write();
         }
       }
-    } catch (e: any) {
-      console.error(`[acron] 任务 ${task.id} 执行失败:`, e);
+    } catch (e: unknown) {
+      logger.error(`[acron] 任务 ${task.id} 执行失败:`, e);
       if (idx >= 0) {
         db.data.tasks[idx].lastRunAt = String(now);
-        db.data.tasks[idx].lastError = String(e?.message || e);
+        db.data.tasks[idx].lastError = getErrorMessage(e);
         await db.write();
       }
     }
@@ -456,14 +461,13 @@ async function scheduleTask(task: AcronTask) {
 async function bootstrapTasks() {
   try {
     const db = await getDB();
-    for (const t of db.data.tasks) {
-      // 跳过无效表达式
-      if (!cron.validateCronExpression(t.cron).valid) continue;
-      if (t.disabled) continue;
-      await scheduleTask(t);
-    }
-  } catch (e) {
-    console.error("[acron] bootstrap 失败:", e);
+    // 并行调度所有有效任务
+    const validTasks = db.data.tasks.filter(
+      (t) => cron.validateCronExpression(t.cron).valid && !t.disabled,
+    );
+    await Promise.all(validTasks.map((t) => scheduleTask(t)));
+  } catch (e: unknown) {
+    logger.error("[acron] bootstrap 失败:", e);
   }
 }
 
@@ -587,7 +591,7 @@ class AcronPlugin extends Plugin {
             "del_re",
             "pin",
             "unpin",
-          ].includes(maybeType as any)
+          ].includes(maybeType as string)
             ? (maybeType as AcronType)
             : undefined;
 
@@ -615,7 +619,7 @@ class AcronPlugin extends Plugin {
           const tasks = db.data.tasks
             .filter(
               (t) =>
-                (scopeAll ? true : Number((t as any).chatId) === chatId) &&
+                (scopeAll ? true : Number(t.chatId) === chatId) &&
                 (!typeFilter || t.type === typeFilter),
             )
             // 先展示已启用的，再展示已禁用的
@@ -655,28 +659,36 @@ class AcronPlugin extends Plugin {
           if (enabledTasks.length > 0) {
             lines.push("🔛 已启用:");
             lines.push("");
-            for (const t of enabledTasks) {
+            const enabledEntities = await Promise.all(
+              enabledTasks.map((t) => formatEntity(t.chatId ?? t.chat))
+            );
+            for (let i = 0; i < enabledTasks.length; i++) {
+              const t = enabledTasks[i];
+              const entityInfo = enabledEntities[i];
               const nextDt = cron.sendAt(t.cron);
-              const entityInfo = await formatEntity(
-                (t as any).chatId ?? t.chat,
-              );
+              const escapedRemark = htmlEscape(t.remark);
               const title = `<code>${t.id}</code> • <code>${typeLabel(
                 t.type,
-              )}</code>${t.remark ? ` • ${t.remark}` : ""}`;
+              )}</code>${escapedRemark ? ` • ${escapedRemark}` : ""}`;
               lines.push(title);
+              const chatDisplay = entityInfo?.entity ? entityInfo?.display : t.display;
               lines.push(
                 `对话: ${
-                  (entityInfo?.entity ? entityInfo?.display : t.display) ||
-                  `<code>${t.chat}</code>`
+                  chatDisplay
+                    ? (typeof chatDisplay === 'string' ? htmlEscape(chatDisplay) : chatDisplay)
+                    : `<code>${htmlEscape(t.chat)}</code>`
                 }`,
               );
-              const msgId = (t as any)?.msgId;
-              const fromChatId = (t as any)?.fromChatId;
-              const fromMsgId = (t as any)?.fromMsgId;
+              const msgId = (t.type === "del" || t.type === "pin" || t.type === "unpin")
+                ? (t as DelTask | PinTask | UnpinTask).msgId : undefined;
+              const fromChatId = (t.type === "copy" || t.type === "forward")
+                ? (t as CopyTask | ForwardTask).fromChatId : undefined;
+              const fromMsgId = (t.type === "copy" || t.type === "forward")
+                ? (t as CopyTask | ForwardTask).fromMsgId : undefined;
               if (msgId) {
                 lines.push(
                   `消息: <a href="https://t.me/c/${String(
-                    (t as any).chatId ?? t.chat,
+                    t.chatId ?? t.chat,
                   ).replace("-100", "")}/${msgId}">${msgId}</a>`,
                 );
               }
@@ -693,18 +705,18 @@ class AcronPlugin extends Plugin {
                 (t.type === "copy" && (t as CopyTask).replyTo) ||
                 (t.type === "forward" && (t as ForwardTask).replyTo)
               ) {
-                const replyId = (t as any).replyTo as string | undefined;
+                const replyId = (t as SendTask | CmdTask | CopyTask | ForwardTask).replyTo as string | undefined;
                 if (replyId)
                   lines.push(
                     `回复: <a href="https://t.me/c/${String(
-                      (t as any).chatId ?? t.chat,
+                      t.chatId ?? t.chat,
                     ).replace("-100", "")}/${replyId}">${replyId}</a>`,
                   );
               }
               if (nextDt) {
                 const dt: Date =
-                  typeof (nextDt as any)?.toJSDate === "function"
-                    ? (nextDt as any).toJSDate()
+                  typeof (nextDt as unknown as { toJSDate?: () => Date })?.toJSDate === "function"
+                    ? (nextDt as unknown as { toJSDate: () => Date }).toJSDate()
                     : nextDt instanceof Date
                       ? nextDt
                       : new Date(Number(nextDt));
@@ -725,16 +737,23 @@ class AcronPlugin extends Plugin {
           if (disabledTasks.length > 0) {
             lines.push("⏹ 已禁用:");
             lines.push("");
-            for (const t of disabledTasks) {
-              const entityInfo = await formatEntity(
-                (t as any).chatId ?? t.chat,
-              );
+            const disabledEntities = await Promise.all(
+              disabledTasks.map((t) => formatEntity(t.chatId ?? t.chat))
+            );
+            for (let i = 0; i < disabledTasks.length; i++) {
+              const t = disabledTasks[i];
+              const entityInfo = disabledEntities[i];
+              const escapedRemark = htmlEscape(t.remark);
               const title = `<code>${t.id}</code> • <code>${typeLabel(
                 t.type,
-              )}</code>${t.remark ? ` • ${t.remark}` : ""}`;
+              )}</code>${escapedRemark ? ` • ${escapedRemark}` : ""}`;
               lines.push(title);
+              const disabledChatDisplay = entityInfo?.entity ? entityInfo?.display : t.display;
               lines.push(
-                `对话: ${entityInfo?.display || `<code>${t.chat}</code>`}`,
+                `对话: ${
+                  (typeof disabledChatDisplay === 'string' ? htmlEscape(disabledChatDisplay) : disabledChatDisplay) ||
+                  `<code>${htmlEscape(t.chat)}</code>`
+                }`,
               );
               // 禁用状态不显示下次执行
               if (t.lastRunAt) {
@@ -758,6 +777,7 @@ class AcronPlugin extends Plugin {
           }
           if (chunks.length > 0) {
             await msg.edit({ text: html(chunks[0]) });
+            // Sequential: each chunk replies to the previous one to maintain order
             for (let i = 1; i < chunks.length; i++) {
               await msg.replyText(html(chunks[i]));
             }
@@ -766,27 +786,28 @@ class AcronPlugin extends Plugin {
         }
 
         if (sub === "rm") {
-          const id = args[1];
-          if (!id) {
+          const rawId = args[1];
+          if (!rawId) {
             await msg.edit({
               text: html(`请提供定时任务ID: <code>${mainPrefix}acron rm ID</code>`),
             });
             return;
           }
+          const escapedId = htmlEscape(rawId);
           const db = await getDB();
-          const idx = db.data.tasks.findIndex((t) => t.id === id);
+          const idx = db.data.tasks.findIndex((t) => t.id === rawId);
           if (idx < 0) {
             await msg.edit({
-              text: html(`未找到任务: <code>${id}</code>`),
+              text: html(`未找到任务: <code>${escapedId}</code>`),
             });
             return;
           }
-          const key = makeCronKey(id);
+          const key = makeCronKey(rawId);
           cronManager.del(key);
           db.data.tasks.splice(idx, 1);
           await db.write();
           await msg.edit({
-            text: html(`✅ 已删除任务 <code>${id}</code>`),
+            text: html(`✅ 已删除任务 <code>${escapedId}</code>`),
           });
           return;
         }
@@ -797,8 +818,8 @@ class AcronPlugin extends Plugin {
           sub === "off" ||
           sub === "on"
         ) {
-          const id = args[1];
-          if (!id) {
+          const rawId = args[1];
+          if (!rawId) {
             await msg.edit({
               text: html(
                 sub === "disable"
@@ -808,11 +829,12 @@ class AcronPlugin extends Plugin {
             });
             return;
           }
+          const escapedId = htmlEscape(rawId);
           const db = await getDB();
-          const idx = db.data.tasks.findIndex((t) => t.id === id);
+          const idx = db.data.tasks.findIndex((t) => t.id === rawId);
           if (idx < 0) {
             await msg.edit({
-              text: html(`未找到任务: <code>${id}</code>`),
+              text: html(`未找到任务: <code>${escapedId}</code>`),
             });
             return;
           }
@@ -820,31 +842,30 @@ class AcronPlugin extends Plugin {
           if (sub === "disable" || sub === "off") {
             if (t.disabled) {
               await msg.edit({
-                text: html(`任务 <code>${id}</code> 已处于禁用状态`),
+                text: html(`任务 <code>${escapedId}</code> 已处于禁用状态`),
               });
               return;
             }
-            const key = makeCronKey(id);
+            const key = makeCronKey(rawId);
             cronManager.del(key);
             t.disabled = true;
             await db.write();
             await msg.edit({
-              text: html(`⏸️ 已禁用任务 <code>${id}</code>`),
+              text: html(`⏸️ 已禁用任务 <code>${escapedId}</code>`),
             });
           } else {
             if (!cron.validateCronExpression(t.cron).valid) {
               await msg.edit({
-                text: html(`任务 <code>${id}</code> 的 Cron 表达式无效，无法启用`),
+                text: html(`任务 <code>${escapedId}</code> 的 Cron 表达式无效，无法启用`),
               });
               return;
             }
             t.disabled = false;
             await db.write();
             await scheduleTask(t as AcronTask);
-            const nextAt = cron.sendAt(t.cron);
             await msg.edit({
-              text: html(`▶️ 已启用任务 <code>${id}</code><br>下次执行: ${formatDate(
-                nextAt.toJSDate(),
+              text: html(`▶️ 已启用任务 <code>${escapedId}</code><br>下次执行: ${formatDate(
+                cron.sendAt(t.cron).toJSDate(),
               )}`),
             });
           }
@@ -868,8 +889,8 @@ class AcronPlugin extends Plugin {
             return;
           }
           const { cron: cronExpr, rest } = parsed;
-          const validation = (cron as any).validateCronExpression
-            ? (cron as any).validateCronExpression(cronExpr)
+          const validation = cron.validateCronExpression
+            ? cron.validateCronExpression(cronExpr)
             : { valid: true };
           if (!validation.valid) {
             await msg.edit({
@@ -909,23 +930,21 @@ class AcronPlugin extends Plugin {
               return;
             }
             const replied = await safeGetReplyMessage(msg);
-            const mm: any = replied || {};
             // 不支持多媒体或按钮
-            if (mm.media || mm.replyMarkup) {
+            if (replied?.media || (replied as unknown as { replyMarkup?: unknown }).replyMarkup) {
               await msg.edit({
                 text: html("不支持带多媒体或 replyMarkup 的消息 可考虑使用本插件的定时复制/转发功能"),
               });
               return;
             }
-            const text: string = (mm.text ?? mm.message ?? "").toString();
+            const text: string = (replied?.text ?? (replied as unknown as { message?: string }).message ?? "").toString();
             if (!text || !text.trim()) {
               await msg.edit({ text: html("请回复一条包含文本的消息") });
               return;
             }
-            const entities: any = mm.entities
-              ? JSON.parse(JSON.stringify(mm.entities))
+            const entities: ReturnType<typeof JSON.parse> | undefined = (replied as unknown as { entities?: unknown })?.entities
+              ? JSON.parse(JSON.stringify((replied as unknown as { entities: unknown }).entities))
               : undefined;
-            // const remark = rest.slice(1).join(" ").trim();
             const remark = getRemarkFromMsg(lines[0], 8);
             const replyTo = restChatArg[0];
 
@@ -934,7 +953,7 @@ class AcronPlugin extends Plugin {
               type: "send",
               cron: cronExpr,
               chat: chatArg,
-              chatId: hasChatId as any,
+              chatId: hasChatId,
               message: text,
               entities,
               createdAt: String(Date.now()),
@@ -947,7 +966,7 @@ class AcronPlugin extends Plugin {
             await db.write();
             await scheduleTask(task);
 
-            const nextAt = (cron as any).sendAt(cronExpr);
+            const nextAt = cron.sendAt(cronExpr);
             const tip = [
               "✅ 已添加定时发送任务",
               `ID: <code>${id}</code>`,
@@ -963,7 +982,6 @@ class AcronPlugin extends Plugin {
             return;
           } else if (sub === "cmd") {
             // 备注与回复ID
-            // const remark = rest.slice(1).join(" ").trim();
             const remark = getRemarkFromMsg(lines[0], 8);
             const replyTo = restChatArg[0];
             const message = lines?.[1]?.trim(); // 第二行
@@ -977,7 +995,7 @@ class AcronPlugin extends Plugin {
               type: "cmd",
               cron: cronExpr,
               chat: chatArg,
-              chatId: hasChatId as any,
+              chatId: hasChatId,
               message,
               replyTo: replyTo || undefined,
               createdAt: String(Date.now()),
@@ -989,7 +1007,7 @@ class AcronPlugin extends Plugin {
             await db.write();
             await scheduleTask(task);
 
-            const nextAt = (cron as any).sendAt(cronExpr);
+            const nextAt = cron.sendAt(cronExpr);
             const tip = [
               "✅ 已添加定时命令任务",
               `ID: <code>${id}</code>`,
@@ -1010,7 +1028,7 @@ class AcronPlugin extends Plugin {
               return;
             }
             const replied = await safeGetReplyMessage(msg);
-            const mm: any = replied || {};
+            const mm: { id?: number; chat?: { id?: number | string } } = replied || {};
             const fromMsgId = toInt(mm.id);
             const fromChatId = toInt(mm.chat?.id);
             if (!fromMsgId || !fromChatId) {
@@ -1019,7 +1037,6 @@ class AcronPlugin extends Plugin {
             }
 
             // 备注与回复ID
-            // const remark = rest.slice(1).join(" ").trim();
             const remark = getRemarkFromMsg(lines[0], 8);
             const replyTo = restChatArg[0];
 
@@ -1029,7 +1046,7 @@ class AcronPlugin extends Plugin {
                 type: "copy",
                 cron: cronExpr,
                 chat: chatArg,
-                chatId: hasChatId as any,
+                chatId: hasChatId,
                 fromChatId: String(Math.trunc(fromChatId)),
                 fromMsgId: String(Math.trunc(fromMsgId)),
                 replyTo: replyTo || undefined,
@@ -1041,7 +1058,7 @@ class AcronPlugin extends Plugin {
               await db.write();
               await scheduleTask(task);
 
-              const nextAt = (cron as any).sendAt(cronExpr);
+              const nextAt = cron.sendAt(cronExpr);
               const tip = [
                 "✅ 已添加定时复制任务",
                 `ID: <code>${id}</code>`,
@@ -1061,7 +1078,7 @@ class AcronPlugin extends Plugin {
                 type: "forward",
                 cron: cronExpr,
                 chat: chatArg,
-                chatId: hasChatId as any,
+                chatId: hasChatId,
                 fromChatId: String(Math.trunc(fromChatId)),
                 fromMsgId: String(Math.trunc(fromMsgId)),
                 replyTo: replyTo || undefined,
@@ -1073,7 +1090,7 @@ class AcronPlugin extends Plugin {
               await db.write();
               await scheduleTask(task);
 
-              const nextAt = (cron as any).sendAt(cronExpr);
+              const nextAt = cron.sendAt(cronExpr);
               const tip = [
                 "✅ 已添加定时转发任务",
                 `ID: <code>${id}</code>`,
@@ -1095,7 +1112,6 @@ class AcronPlugin extends Plugin {
               await msg.edit({ text: "请提供消息 ID" });
               return;
             }
-            // const remark = rest.slice(2).join(" ").trim();
             const remark = getRemarkFromMsg(lines[0], 9);
 
             const task: DelTask = {
@@ -1103,7 +1119,7 @@ class AcronPlugin extends Plugin {
               type: "del",
               cron: cronExpr,
               chat: chatArg,
-              chatId: hasChatId as any,
+              chatId: hasChatId,
               msgId: msgIdStr,
               createdAt: String(Date.now()),
               remark: remark || undefined,
@@ -1114,7 +1130,7 @@ class AcronPlugin extends Plugin {
             await db.write();
             await scheduleTask(task);
 
-            const nextAt = (cron as any).sendAt(cronExpr);
+            const nextAt = cron.sendAt(cronExpr);
             const tip = [
               "✅ 已添加删除消息的定时任务",
               `ID: <code>${id}</code>`,
@@ -1145,7 +1161,6 @@ class AcronPlugin extends Plugin {
               v === "1" || v === "true" || v === "yes" || v === "y";
             const notify = parseBool(notifyRaw);
             const pmOneSide = parseBool(pmOneSideRaw);
-            // const remark = rest.slice(4).join(" ").trim();
             const remark = getRemarkFromMsg(lines[0], 11);
 
             const task: PinTask = {
@@ -1153,7 +1168,7 @@ class AcronPlugin extends Plugin {
               type: "pin",
               cron: cronExpr,
               chat: chatArg,
-              chatId: hasChatId as any,
+              chatId: hasChatId,
               msgId: msgIdStr,
               notify,
               pmOneSide,
@@ -1166,7 +1181,7 @@ class AcronPlugin extends Plugin {
             await db.write();
             await scheduleTask(task);
 
-            const nextAt = (cron as any).sendAt(cronExpr);
+            const nextAt = cron.sendAt(cronExpr);
             const tip = [
               "✅ 已添加置顶消息的定时任务",
               `ID: <code>${id}</code>`,
@@ -1188,7 +1203,6 @@ class AcronPlugin extends Plugin {
               await msg.edit({ text: "请提供消息 ID" });
               return;
             }
-            // const remark = rest.slice(2).join(" ").trim();
             const remark = getRemarkFromMsg(lines[0], 9);
 
             const task: UnpinTask = {
@@ -1196,7 +1210,7 @@ class AcronPlugin extends Plugin {
               type: "unpin",
               cron: cronExpr,
               chat: chatArg,
-              chatId: hasChatId as any,
+              chatId: hasChatId,
               msgId: msgIdStr,
               createdAt: String(Date.now()),
               remark: remark || undefined,
@@ -1207,7 +1221,7 @@ class AcronPlugin extends Plugin {
             await db.write();
             await scheduleTask(task);
 
-            const nextAt = (cron as any).sendAt(cronExpr);
+            const nextAt = cron.sendAt(cronExpr);
             const tip = [
               "✅ 已添加取消置顶的定时任务",
               `ID: <code>${id}</code>`,
@@ -1233,7 +1247,6 @@ class AcronPlugin extends Plugin {
             }
             // 新增备注支持：从第三段起第一个参数为正则，其余合并为备注
             const regexRaw = String(rest[2]).trim();
-            // const remark = rest.slice(3).join(" ").trim();
             const remark = getRemarkFromMsg(lines[0], 10);
             if (!regexRaw) {
               await msg.edit({ text: "请提供消息正则表达式" });
@@ -1242,8 +1255,8 @@ class AcronPlugin extends Plugin {
             // 校验正则
             try {
               void tryParseRegex(regexRaw);
-            } catch (e: any) {
-              await msg.edit({ text: `无效的正则表达式: ${e?.message || e}` });
+            } catch (e: unknown) {
+              await msg.edit({ text: `无效的正则表达式: ${e instanceof Error ? e.message : String(e)}` });
               return;
             }
 
@@ -1252,7 +1265,7 @@ class AcronPlugin extends Plugin {
               type: "del_re",
               cron: cronExpr,
               chat: chatArg,
-              chatId: hasChatId as any,
+              chatId: hasChatId,
               limit: String(Math.trunc(limit)),
               regex: regexRaw,
               createdAt: String(Date.now()),
@@ -1263,7 +1276,7 @@ class AcronPlugin extends Plugin {
             await db.write();
             await scheduleTask(task);
 
-            const nextAt = (cron as any).sendAt(cronExpr);
+            const nextAt = cron.sendAt(cronExpr);
             const tip = [
               "✅ 已添加正则删除的定时任务",
               `ID: <code>${id}</code>`,
@@ -1280,8 +1293,8 @@ class AcronPlugin extends Plugin {
         }
 
         await msg.edit({ text: `未知子命令: ${sub}` });
-      } catch (error: any) {
-        await msg.edit({ text: `处理出错: ${error?.message || error}` });
+      } catch (error: unknown) {
+        await msg.edit({ text: `处理出错: ${getErrorMessage(error)}` });
       }
     },
   };

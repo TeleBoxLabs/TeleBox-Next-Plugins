@@ -5,15 +5,8 @@ import type { MessageContext } from "@mtcute/dispatcher";
 import { html } from "@mtcute/html-parser";
 import { getGlobalClient } from "@utils/globalClient";
 import { safeGetReplyMessage } from "@utils/safeGetMessages";
-
-const htmlEscape = (text: string): string =>
-  text.replace(/[&<>"']/g, (m) => ({
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    '"': "&quot;",
-    "'": "&#x27;",
-  }[m] || m));
+import { logger } from "@utils/logger";
+import { htmlEscape } from "@utils/htmlEscape";
 
 const timeout = 60000;
 const prefixes = getPrefixes();
@@ -87,12 +80,12 @@ class JuPaiPlugin extends Plugin {
           });
           
           await msg.delete();
-        } catch (error) {
+        } catch (error: unknown) {
           const errorMsg = error instanceof Error ? error.message : String(error);
           await msg.edit({ text: html(`获取失败: ${htmlEscape(errorMsg)}`) });
         }
-      } catch (error) {
-        console.error("JuPai Plugin Error:", error);
+      } catch (error: unknown) {
+        logger.error("JuPai Plugin Error:", error);
         const errorMsg = error instanceof Error ? error.message : String(error);
         await msg.edit({ text: html(`插件执行失败: ${htmlEscape(errorMsg)}`) });
       }

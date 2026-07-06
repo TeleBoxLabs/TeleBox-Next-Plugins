@@ -3,6 +3,9 @@ import { getPrefixes } from "@utils/pluginManager";
 import { getGlobalClient } from "@utils/globalClient";
 import type { MessageContext } from "@mtcute/dispatcher";
 import { html } from "@mtcute/html-parser";
+import { logger } from "@utils/logger";
+import { isUser, isDocumentAttribute, hasRawType, getUsername as getEntityUsername } from "@utils/entityTypeGuards";
+import type { TelegramClient } from "@mtcute/node";
 
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
@@ -13,6 +16,27 @@ const MAX_MESSAGE_COUNT = 200;
 const MAX_SCAN_LIMIT = 3000;
 const MAX_TEXT_LENGTH = 240;
 const MAX_CHUNK_LENGTH = 3500;
+
+/** Biko message structure for history scan results */
+type BikoMessage = {
+  date?: number;
+  id?: number;
+  text?: string;
+  photo?: unknown;
+  video?: unknown;
+  voice?: unknown;
+  audio?: unknown;
+  sticker?: unknown;
+  document?: { attributes?: unknown[] };
+  poll?: unknown;
+  contact?: unknown;
+  location?: unknown;
+  venue?: unknown;
+  media?: unknown;
+  action?: { className?: string };
+  className?: string;
+  sender?: { username?: string };
+};
 
 type ResolvedChat = {
   raw: string;
@@ -140,10 +164,10 @@ function buildEntityDisplay(entity: any, fallbackRaw: string): string {
 }
 
 async function resolveEntityWithFallback(
-  client: any,
+  client: { resolvePeer: (peerId: string | number) => Promise<unknown> },
   raw: string,
-): Promise<any> {
-  const attempts: any[] = [raw];
+): Promise<unknown> {
+  const attempts: (string | number)[] = [raw];
   if (/^-?\d+$/.test(raw)) {
     const numeric = Number(raw);
     if (Number.isSafeInteger(numeric)) attempts.push(numeric);
@@ -152,8 +176,8 @@ async function resolveEntityWithFallback(
   let lastError: unknown;
   for (const attempt of attempts) {
     try {
-      return await (client as any).resolvePeer(attempt);
-    } catch (error) {
+      return await client.resolvePeer(attempt);
+    } catch (error: unknown) {
       lastError = error;
     }
   }
@@ -162,7 +186,7 @@ async function resolveEntityWithFallback(
 }
 
 async function resolveChatTarget(
-  client: any,
+  client: TelegramClient,
   raw: string,
   label: string,
 ): Promise<ResolvedChat> {
@@ -173,7 +197,7 @@ async function resolveChatTarget(
       entity,
       display: buildEntityDisplay(entity, raw),
     };
-  } catch (error) {
+  } catch (error: unknown) {
     throw new Error(
       `${label}解析失败: ${raw}\n原因: ${extractErrorMessage(error)}`,
     );
@@ -181,12 +205,12 @@ async function resolveChatTarget(
 }
 
 async function resolveSourceUser(
-  client: any,
+  client: TelegramClient,
   raw: string,
 ): Promise<ResolvedSourceUser> {
   try {
     const entity = await resolveEntityWithFallback(client, raw);
-    if (!((entity as any)._ === 'user')) {
+    if (!isUser(entity)) {
       throw new Error("解析结果不是用户实体");
     }
     return {
@@ -195,7 +219,7 @@ async function resolveSourceUser(
       manualMode: false,
       entity,
     };
-  } catch (error) {
+  } catch (error: unknown) {
     const errorMessage = extractErrorMessage(error);
     if (errorMessage === "解析结果不是用户实体") {
       throw new Error(`源用户解析失败: ${raw}\n原因: 解析结果不是用户实体`);
@@ -242,7 +266,7 @@ function buildChatMessageLink(
     return `https://t.me/${chatEntity.username}/${messageId}`;
   }
 
-  if ((chatEntity as any)._ === 'channel' && chatEntity?.id) {
+  if (hasRawType(chatEntity, 'channel') && chatEntity?.id) {
     return `https://t.me/c/${chatEntity.id}/${messageId}`;
   }
 
@@ -262,31 +286,31 @@ function describeDocumentMessage(message: any): string {
     : [];
 
   if (
-    attributes.some((attr: any) => (attr as any)._ === 'documentAttributeSticker')
+    attributes.some((attr: any) => isDocumentAttribute(attr, 'documentAttributeSticker'))
   ) {
     return "[贴纸]";
   }
   if (
     attributes.some(
       (attr: any) =>
-        (attr as any)._ === 'documentAttributeAudio' && Boolean(attr.voice),
+        isDocumentAttribute(attr, 'documentAttributeAudio') && Boolean(attr.voice),
     )
   ) {
     return "[语音]";
   }
   if (
-    attributes.some((attr: any) => (attr as any)._ === 'documentAttributeAudio')
+    attributes.some((attr: any) => isDocumentAttribute(attr, 'documentAttributeAudio'))
   ) {
     return "[音频]";
   }
   if (
-    attributes.some((attr: any) => (attr as any)._ === 'documentAttributeVideo')
+    attributes.some((attr: any) => isDocumentAttribute(attr, 'documentAttributeVideo'))
   ) {
     return "[视频]";
   }
   if (
     attributes.some(
-      (attr: any) => (attr as any)._ === 'documentAttributeAnimated',
+      (attr: any) => isDocumentAttribute(attr, 'documentAttributeAnimated'),
     )
   ) {
     return "[动图]";
@@ -344,7 +368,9 @@ async function matchesManualSelector(
   selector: Extract<ResolvedSourceUser, { manualMode: true }>,
 ): Promise<boolean> {
   if (selector.manualUserId) {
-    return normalizeId((message as any).sender?.id ?? (message as any).senderId) === selector.manualUserId;
+    const msgSender = (message as { sender?: { id?: number } }).sender;
+    const msgSenderId = (message as { senderId?: number }).senderId;
+    return normalizeId(msgSender?.id ?? msgSenderId) === selector.manualUserId;
   }
 
   const expectedUsername = selector.manualUsername;
@@ -361,10 +387,10 @@ async function matchesManualSelector(
     try {
       const sender = await message.getSender();
       const senderUsername = normalizeUsername(
-        String((sender as any)?.username || ""),
+        String(getEntityUsername(sender) || ""),
       );
       return Boolean(senderUsername) && senderUsername === expectedUsername;
-    } catch {
+    } catch (_e: unknown) {
       return false;
     }
   }
@@ -373,14 +399,17 @@ async function matchesManualSelector(
 }
 
 async function collectMessagesOnce(
-  client: any,
+  client: TelegramClient,
   sourceChat: ResolvedChat,
   sourceUser: ResolvedSourceUser,
   requestedCount: number,
   manualScanLimit?: number,
 ): Promise<DigestRecord[]> {
   const records: DigestRecord[] = [];
-  const iterParams: Record<string, any> = {
+  const historyParams: {
+    limit: number;
+    fromUser?: unknown;
+  } = {
     limit: sourceUser.manualMode
       ? (manualScanLimit ??
         Math.min(
@@ -391,13 +420,13 @@ async function collectMessagesOnce(
   };
 
   if (!sourceUser.manualMode) {
-    iterParams.fromUser = sourceUser.entity;
+    historyParams.fromUser = sourceUser.entity;
   }
 
-  const messages = await client.getMessages(sourceChat.entity, iterParams);
+  const messages = await client.getHistory(sourceChat.entity, historyParams);
 
   for (const message of messages) {
-    const current = message as any;
+    const current = message as unknown as BikoMessage;
 
     if (sourceUser.manualMode) {
       const matched = await matchesManualSelector(current, sourceUser);
@@ -419,7 +448,7 @@ async function collectMessagesOnce(
 }
 
 async function collectMessages(
-  client: any,
+  client: TelegramClient,
   sourceChat: ResolvedChat,
   sourceUser: ResolvedSourceUser,
   requestedCount: number,
@@ -445,9 +474,7 @@ async function collectMessages(
         requestedCount,
       );
     }
-  } catch {
-    // ignore and continue to deep manual scan fallback
-  }
+  } catch (e: unknown) { logger.warn(`[biko] ignore and continue to deep manual scan fallback:`, e) }
 
   return await collectMessagesOnce(
     client,
@@ -485,12 +512,12 @@ function buildDigestLines(records: DigestRecord[]): string[] {
 }
 
 function splitDigest(header: string, lines: string[]): string[] {
-  const continuationHeader = "📦 <b>Biko 消息整理</b>（续）\n\n";
+  const continuationHeader = "📦 <b>Biko 消息整理</b>（续）<br><br>";
   const parts: string[] = [];
   let current = header;
 
   for (const line of lines) {
-    const separator = current.endsWith("\n\n") ? "" : "\n";
+    const separator = current.endsWith("<br><br>") ? "" : "<br>";
     if ((current + separator + line).length > MAX_CHUNK_LENGTH) {
       parts.push(current);
       current = continuationHeader + line;
@@ -544,17 +571,11 @@ class BikoPlugin extends Plugin {
           text: html`🔄 正在解析对话和用户...`,
         });
 
-        const sourceChat = await resolveChatTarget(
-          client,
-          sourceChatRaw,
-          "来源对话",
-        );
-        const targetChat = await resolveChatTarget(
-          client,
-          targetChatRaw,
-          "目标对话",
-        );
-        const sourceUser = await resolveSourceUser(client, sourceUserRaw);
+        const [sourceChat, targetChat, sourceUser] = await Promise.all([
+          resolveChatTarget(client, sourceChatRaw, "来源对话"),
+          resolveChatTarget(client, targetChatRaw, "目标对话"),
+          resolveSourceUser(client, sourceUserRaw),
+        ]);
 
         const statusLines = [
           `🔄 正在整理消息...`,
@@ -569,7 +590,7 @@ class BikoPlugin extends Plugin {
         }
 
         await msg.edit({
-          text: html(statusLines.join("\n")),
+          text: html(statusLines.join("<br>")),
           disableWebPreview: true,
         });
 
@@ -583,8 +604,8 @@ class BikoPlugin extends Plugin {
         if (records.length === 0) {
           await msg.edit({
             text: html(
-              `❌ 未找到匹配消息\n\n` +
-              `<b>来源对话:</b> ${htmlEscape(sourceChat.display)}\n` +
+              `❌ 未找到匹配消息<br><br>` +
+              `<b>来源对话:</b> ${htmlEscape(sourceChat.display)}<br>` +
               `<b>来源用户:</b> ${htmlEscape(sourceUser.display)}`
             ),
           });
@@ -604,10 +625,11 @@ class BikoPlugin extends Plugin {
           headerLines.push("<b>过滤模式:</b> 手动过滤");
         }
 
-        const header = `${headerLines.join("\n")}\n\n`;
+        const header = `${headerLines.join("<br>")}<br><br>`;
         const lines = buildDigestLines(records);
         const chunks = splitDigest(header, lines);
 
+        // 注意：摘要分片必须按顺序逐条发送，不能并行（保持消息顺序）
         for (const chunk of chunks) {
           await client.sendText(targetChat.entity, html(chunk), {
             disableWebPreview: true,
@@ -632,10 +654,10 @@ class BikoPlugin extends Plugin {
         }
 
         await msg.edit({
-          text: html(summaryLines.join("\n")),
+          text: html(summaryLines.join("<br>")),
           disableWebPreview: true,
         });
-      } catch (error) {
+      } catch (error: unknown) {
         await msg.edit({
           text: html(`❌ <b>Biko 执行失败</b><br><br>${htmlEscape(
             extractErrorMessage(error),

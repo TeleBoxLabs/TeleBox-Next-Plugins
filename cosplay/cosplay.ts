@@ -10,6 +10,11 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import { pipeline } from "stream/promises";
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
+
+const __htmlEscape = (s: string): string =>
+  s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 
 let cheerio: typeof import("cheerio");
 let pLimit: typeof import("p-limit").default;
@@ -68,7 +73,7 @@ async function withRetry<T>(
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
       return await fn();
-    } catch (error) {
+    } catch (error: unknown) {
       lastError = error;
       if (classifyError(error) === "permanent" || attempt === retries) {
         throw error;
@@ -95,23 +100,22 @@ class CosplayScraper {
 
   async fetchImageUrls(count: number): Promise<ImageResult> {
     const maxAttempts = CONFIG.MAX_RETRIES * 2;
-    let lastError: Error | null = null;
+    let lastError: unknown = null;
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       try {
         const photoSet = await this.getRandomPhotoSet();
-        const html = await withRetry(() =>
-          this.client.get(photoSet.url).then((r) => r.data)
-        );
+        const photoSetResponse = await this.client.get(photoSet.url);
+        const html = await withRetry(() => Promise.resolve(photoSetResponse.data as string));
         const images = this.extractGalleryImages(html);
 
         if (images.length === 0) {
-          console.warn(`套图 ${photoSet.title} 未找到图片，重试`);
+          logger.warn(`套图 ${photoSet.title} 未找到图片，重试`);
           continue;
         }
 
         if (images.length < count) {
-          console.warn(
+          logger.warn(
             `套图 ${photoSet.title} 只有${images.length}张，需要${count}张，重试`
           );
           continue;
@@ -119,9 +123,9 @@ class CosplayScraper {
 
         const selected = this.pickRandom(images, count);
         return { imageUrls: selected, photoSet };
-      } catch (error) {
-        lastError = error as Error;
-        const errorMessage = error instanceof Error ? error.message : "";
+      } catch (error: unknown) {
+        lastError = error;
+        const errorMessage = getErrorMessage(error);
         if (
           attempt < maxAttempts - 1 &&
           !errorMessage.includes("只有") &&
@@ -132,7 +136,7 @@ class CosplayScraper {
       }
     }
     throw new Error(
-      `获取图片失败，已尝试${maxAttempts}次: ${lastError?.message || "未知错误"}`
+      `获取图片失败，已尝试${maxAttempts}次: ${lastError instanceof Error ? lastError.message : "未知错误"}`
     );
   }
 
@@ -141,8 +145,8 @@ class CosplayScraper {
       this.limit(async () => {
         try {
           return await this.downloadImage(url);
-        } catch (error) {
-          console.warn(`下载失败: ${url}`, error);
+        } catch (error: unknown) {
+          logger.warn(`下载失败: ${url}`, error);
           return null;
         }
       })
@@ -169,7 +173,8 @@ class CosplayScraper {
       const pageUrl =
         randomPage === 1 ? CONFIG.BASE_URL : `${CONFIG.BASE_URL}page/${randomPage}/`;
 
-      const html = await this.client.get(pageUrl).then((r) => r.data);
+      const response = await this.client.get(pageUrl);
+      const html = response.data as string;
       const links = this.extractLinks(html);
 
       if (!links.length) {
@@ -224,15 +229,13 @@ class CosplayScraper {
           if (CONFIG.SUPPORTED_EXTENSIONS.some((ext) => pathname.endsWith(ext))) {
             images.push(src);
           }
-        } catch {
-          // 无效 URL，跳过
-        }
+        } catch (e: unknown) { logger.warn(`[cosplay] 无效 URL，跳过:`, e) }
       }
     });
 
     if (images.length === 0) {
       const hasVideo = /<video[^>]*>|<iframe[^>]*>|<embed[^>]*>/.test(html);
-      console.warn(hasVideo ? "套图只包含视频" : "套图无 gallery-item 图片");
+      logger.warn(hasVideo ? "套图只包含视频" : "套图无 gallery-item 图片");
     }
 
     return images;
@@ -250,10 +253,10 @@ class CosplayScraper {
       try {
         await pipeline(response.data, writer);
         return tempFile;
-      } catch (error) {
+      } catch (error: unknown) {
         try {
           await fs.promises.unlink(tempFile);
-        } catch {}
+        } catch (e: unknown) { logger.warn('操作失败', e) }
         throw error;
       }
     });
@@ -280,8 +283,8 @@ async function cleanup(files: string[]): Promise<void> {
     files.map(async (filePath) => {
       try {
         await fs.promises.unlink(filePath);
-      } catch (error) {
-        console.warn(`清理临时文件失败: ${filePath}`);
+      } catch (_e: unknown) {
+        logger.warn(`清理临时文件失败: ${filePath}`);
       }
     })
   );
@@ -299,7 +302,7 @@ function parseImageCount(text: string | undefined): number {
 
 async function sendSingleImage(
   client: any,
-  chatId: any,
+  chatId: string | number,
   filePath: string,
   photoSetUrl?: string
 ): Promise<void> {
@@ -307,8 +310,8 @@ async function sendSingleImage(
     type: "photo",
     file: filePath,
     spoiler: true,
-    caption: photoSetUrl ? html(`套图链接: ${photoSetUrl}`) : undefined,
-  } as any);
+    caption: photoSetUrl ? html(`套图链接: ${__htmlEscape(photoSetUrl)}`) : undefined,
+  });
 }
 
 async function sendImageAlbum(
@@ -322,19 +325,17 @@ async function sendImageAlbum(
       type: "photo",
       file: filePath,
       spoiler: true,
-      caption: i === 0 && photoSetUrl ? html(`套图链接: ${photoSetUrl}`) : undefined,
+      caption: i === 0 && photoSetUrl ? html(`套图链接: ${__htmlEscape(photoSetUrl)}`) : undefined,
     }));
 
     if (!media.length) {
       throw new Error("无可发送的媒体");
     }
 
-    await client.sendMediaGroup(chatId, media as any);
-  } catch (err: any) {
-    console.warn("剧透相册发送失败，尝试逐条发送", err?.message || err);
-    for (const filePath of filePaths) {
-      await sendSingleImage(client, chatId, filePath, photoSetUrl);
-    }
+    await client.sendMediaGroup(chatId, media as readonly unknown[]);
+  } catch (err: unknown) {
+    logger.warn("剧透相册发送失败，尝试逐条发送", getErrorMessage(err) || String(err));
+    await Promise.all(filePaths.map(filePath => sendSingleImage(client, chatId, filePath, photoSetUrl)));
   }
 }
 
@@ -389,7 +390,7 @@ class CosplayPlugin extends Plugin {
         const result = await this.scraper.fetchImageUrls(count);
 
         await msg.edit({
-          text: html(`从套图"${result.photoSet.title}"中找到 ${result.imageUrls.length} 张图片，正在下载...`),
+          text: html(`从套图"${__htmlEscape(result.photoSet.title)}"中找到 ${result.imageUrls.length} 张图片，正在下载...`),
         });
 
         tempFiles = await this.scraper.downloadImages(result.imageUrls);
@@ -399,10 +400,10 @@ class CosplayPlugin extends Plugin {
         await sendImages(client, msg.chat.id, tempFiles, result.photoSet.url);
 
         await msg.delete();
-      } catch (err: any) {
-        console.error("cosplay插件错误:", err);
+      } catch (err: unknown) {
+        logger.error("cosplay插件错误:", err);
         await msg.edit({
-          text: html(`❌ 出错: ${err?.message || "未知错误"}`),
+          text: html(`❌ 出错: ${getErrorMessage(err) || "未知错误"}`),
         });
       } finally {
         if (tempFiles.length) {

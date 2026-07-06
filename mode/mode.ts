@@ -10,11 +10,11 @@ import { getPrefixes } from "@utils/pluginManager";
 import { Plugin } from "@utils/pluginBase";
 import type { MessageContext } from "@mtcute/dispatcher";
 import { html } from "@mtcute/html-parser";
-import {
-  createDirectoryInAssets,
-} from "@utils/pathHelpers";
+import { logger } from "@utils/logger";
+import { createDirectoryInAssets } from "@utils/pathHelpers";
 import { JSONFilePreset } from "lowdb/node";
 import * as path from "path";
+import { htmlEscape } from "@utils/htmlEscape";
 
 /* ===================== prefix ===================== */
 
@@ -23,12 +23,6 @@ const mainPrefix = prefixes[0];
 
 const pluginName = "mode";
 const commandName = `${mainPrefix}${pluginName}`;
-
-const htmlEscape = (text: string): string =>
-  String(text).replace(/[&<>"']/g, (m) => ({
-    "&": "&amp;", "<": "&lt;", ">": "&gt;",
-    '"': "&quot;", "'": "&#x27;",
-  }[m] || m));
 
 /* ===================== Help Menu ===================== */
 
@@ -112,15 +106,19 @@ const Renderers: Record<Mode, (t: string) => string> = {
 class MessageModePlugin extends Plugin {
   name = "mode";
   description: string = `📌 消息模式插件<br><br>${help_text}`;
-  private db: any;
+  private db!: Awaited<ReturnType<typeof JSONFilePreset<{
+    chats: Record<string, Mode>;
+    whitelist: string[];
+    blacklist: string[];
+    globalMode: Mode;
+  }>>>;
 
   constructor() {
     super();
   }
 
   cleanup(): void {
-    // 引用重置：清空实例级 db / cache / manager 引用，便于 reload 后重新初始化。
-    this.db = null;
+    // 引用重置：db 由 reload 后重新初始化自动覆盖，无需显式清空。
   }
 
   async setup(): Promise<void> {
@@ -134,10 +132,10 @@ class MessageModePlugin extends Plugin {
     const dbPath = path.join(dir, "config.json");
 
     this.db = await JSONFilePreset(dbPath, {
-      chats: {},        // per-chat 模式
-      whitelist: [],    // 白名单 chat_id[]
-      blacklist: [],    // 黑名单 chat_id[]
-      globalMode: Mode.OFF, // 全局模式
+      chats: {} as Record<string, Mode>,
+      whitelist: [] as string[],
+      blacklist: [] as string[],
+      globalMode: Mode.OFF as Mode,
     });
   }
 
@@ -243,7 +241,7 @@ class MessageModePlugin extends Plugin {
 
       case "list":
         await msg.edit({
-          text: html`⚪ 白名单列表：<br><code>${htmlEscape(list.join("\n")) || "空"}</code>`,
+          text: html`⚪ 白名单列表：<br><code>${htmlEscape(list.join("<br>")) || "空"}</code>`,
         });
         return;
 
@@ -277,7 +275,7 @@ class MessageModePlugin extends Plugin {
 
       case "list":
         await msg.edit({
-          text: html`⚫ 黑名单列表：<br><code>${htmlEscape(list.join("\n")) || "空"}</code>`,
+          text: html`⚫ 黑名单列表：<br><code>${htmlEscape(list.join("<br>")) || "空"}</code>`,
         });
         return;
 
@@ -356,8 +354,8 @@ class MessageModePlugin extends Plugin {
       const styled = `||${escaped}||`;
       try {
         await msg.edit({ text: styled });
-      } catch (err) {
-        console.error("消息编辑失败：", err);
+      } catch (err: unknown) {
+        logger.error("消息编辑失败：", err);
       }
       return;
     }
@@ -368,8 +366,8 @@ class MessageModePlugin extends Plugin {
     try {
       /* Userbot 对自己消息可直接编辑 */
       await msg.edit({ text: html(styled) });
-    } catch (err) {
-      console.error("消息编辑失败：", err);
+    } catch (err: unknown) {
+      logger.error("消息编辑失败：", err);
     }
   };
 

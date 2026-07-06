@@ -4,12 +4,16 @@ import { getGlobalClient, getCurrentGeneration } from "@utils/globalClient";
 import { getPrefixes } from "@utils/pluginManager";
 import { createDirectoryInAssets } from "@utils/pathHelpers";
 import type { MessageContext } from "@mtcute/dispatcher";
+import type { Message, TelegramClient, MessageMedia, Video, Document, InputMediaSticker } from "@mtcute/node";
+import type { FileLocation } from "@mtcute/core";
 import { html } from "@mtcute/html-parser";
 import fs from "fs";
 import path from "path";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { safeGetReplyMessage } from "@utils/safeGetMessages";
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
 
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
@@ -29,7 +33,7 @@ interface GifConverterConfig {
 }
 
 class GifConverter {
-  private client: any;
+  private client: TelegramClient;
   private tempDir: string;
   private config: GifConverterConfig = {
     maxFileSize: 50,    // 50MB 限制
@@ -56,7 +60,7 @@ class GifConverter {
     "🔥", "✨", "🌟", "💫", "💥", "💢", "💦", "💨", "👈", "👉"
   ];
 
-  constructor(client: any) {
+  constructor(client: TelegramClient) {
     this.client = client;
     this.tempDir = path.join(process.cwd(), "temp", "gif_converter");
   }
@@ -88,7 +92,7 @@ class GifConverter {
     const repliedMsg = await safeGetReplyMessage(msg);
     if (!repliedMsg) {
       await msg.edit({
-        text: html("❌ 请回复一个包含 GIF 或视频的消息后使用此命令。\n\n💡 请回复 GIF 或视频后再试。")
+        text: html("❌ 请回复一个包含 GIF 或视频的消息后使用此命令。<br><br>💡 请回复 GIF 或视频后再试。")
       });
       return;
     }
@@ -96,17 +100,18 @@ class GifConverter {
     // 检查消息类型
     if (!this.isValidMedia(repliedMsg)) {
       await msg.edit({
-        text: html("❌ 回复的消息不包含 GIF 或视频文件。\n\n支持的格式：GIF、MP4、AVI、MOV、WEBM 等视频格式。")
+        text: html("❌ 回复的消息不包含 GIF 或视频文件。<br><br>支持的格式：GIF、MP4、AVI、MOV、WEBM 等视频格式。")
       });
       return;
     }
 
     try {
       await this.convertToSticker(msg, repliedMsg);
-    } catch (error: any) {
-      console.error("GIF转贴纸失败:", error);
+    } catch (error: unknown) {
+      const errorMessage = getErrorMessage(error);
+      logger.error("GIF转贴纸失败:", error);
       await msg.edit({
-        text: html(`❌ 转换失败：${error.message}<br><br>💡 请检查支持的格式和限制。`)
+        text: html(`❌ 转换失败：${errorMessage}<br><br>💡 请检查支持的格式和限制。`)
       });
     }
   }
@@ -151,58 +156,57 @@ class GifConverter {
         try {
           fs.unlinkSync(filePath);
           deletedCount++;
-        } catch (e) {
-          // 忽略删除失败的文件
-        }
+        } catch (e: unknown) { logger.warn(`[gif] 忽略删除失败的文件:`, e) }
       }
 
       await msg.edit({
         text: html(`✅ 已清理 ${deletedCount} 个临时文件。`)
       });
-    } catch (error: any) {
+    } catch (error: unknown) {
+      const errorMessage = getErrorMessage(error);
       await msg.edit({
-        text: html(`⚠️ 清理临时文件时出错：${error.message}`)
+        text: html(`⚠️ 清理临时文件时出错：${errorMessage}`)
       });
     }
   }
 
-  private isValidMedia(msg: any): boolean {
+  private isValidMedia(msg: Message): boolean {
     const media = msg.media;
     if (!media) return false;
 
-    const mediaType = (media as any).type;
+    // 使用类型收窄访问 media 属性
+    if (media.type === "video") {
+      const video = media as Video;
+      // 检查是否为 GIF 动图
+      if (video.isAnimation) return true;
 
-    // 检查是否为 GIF / 动图
-    if (mediaType === "video" && (media as any).isAnimated) return true;
-
-    // 检查是否为视频
-    if (mediaType === "video") {
+      // 检查视频 MIME 类型
       const videoMimeTypes = [
         "video/mp4", "video/avi", "video/mov", "video/webm", 
         "video/mkv", "video/flv", "video/wmv", "video/3gp"
       ];
-      return videoMimeTypes.includes((media as any).mimeType || "");
+      return videoMimeTypes.includes(video.mimeType || "");
     }
 
     // 检查文档类型（可能是 GIF 文档）
-    if (mediaType === "document") {
-      const mime = (media as any).mimeType;
-      if (mime === "image/gif") return true;
+    if (media.type === "document") {
+      const doc = media as Document;
+      if (doc.mimeType === "image/gif") return true;
 
-      const filename = ((media as any).fileName || "").toLowerCase();
-      if (filename) {
-        return filename.endsWith(".gif") || 
-               filename.endsWith(".mp4") || 
-               filename.endsWith(".webm") ||
-               filename.endsWith(".mov") ||
-               filename.endsWith(".avi");
+      const fileName = (doc.fileName || "").toLowerCase();
+      if (fileName) {
+        return fileName.endsWith(".gif") || 
+               fileName.endsWith(".mp4") || 
+               fileName.endsWith(".webm") ||
+               fileName.endsWith(".mov") ||
+               fileName.endsWith(".avi");
       }
     }
 
     return false;
   }
 
-  private async convertToSticker(msg: MessageContext, sourceMsg: any) {
+  private async convertToSticker(msg: MessageContext, sourceMsg: Message) {
     await msg.edit({ text: html("🔄 正在分析媒体文件...") });
     const statusMsg = msg;
 
@@ -213,7 +217,7 @@ class GifConverter {
     }
 
     // 检查视频时长（如果是视频）
-    const mediaType = (sourceMsg.media as any)?.type;
+    const mediaType = sourceMsg.media?.type;
     if (mediaType === "video") {
       const duration = this.getVideoDuration(sourceMsg);
       if (duration > this.config.maxDuration) {
@@ -229,7 +233,9 @@ class GifConverter {
     const outputFile = path.join(this.tempDir, `sticker_${timestamp}.webm`);
 
     try {
-      await this.client.downloadToFile(inputFile, (sourceMsg as any).media);
+      const downloadTarget = sourceMsg.media as Video | Document | null;
+      if (!downloadTarget) throw new Error("无法获取媒体文件");
+      await this.client.downloadToFile(inputFile, downloadTarget);
 
       await statusMsg?.edit({ text: html("🎬 正在转换为贴纸格式...") });
 
@@ -245,7 +251,7 @@ class GifConverter {
       const t1 = setTimeout(() => {
         pendingTimers.delete(t1);
         if (getCurrentGeneration() !== gen1) return;
-        statusMsg?.delete().catch(() => {});
+        statusMsg?.delete().catch(() => { /* msg may already be deleted or bot lacks permission */ });
       }, 2000);
       pendingTimers.add(t1);
 
@@ -255,16 +261,20 @@ class GifConverter {
     }
   }
 
-  private getFileSize(msg: any): number {
-    const media = msg.media as any;
+  private getFileSize(msg: Message): number {
+    const media = msg.media;
     if (!media) return 0;
-    return Number(media.fileSize) || 0;
+    // fileSize is on the raw TL object; use type-safe access via FileLocation
+    const fileLoc = media as Video | Document | null;
+    const rawSize = fileLoc && 'raw' in fileLoc ? (fileLoc.raw as { size?: number })?.size : undefined;
+    return Number(rawSize) || 0;
   }
 
-  private getVideoDuration(msg: any): number {
-    const media = msg.media as any;
+  private getVideoDuration(msg: Message): number {
+    const media = msg.media;
     if (!media || media.type !== "video") return 0;
-    return Number(media.duration) || 0;
+    const video = media as Video;
+    return Number(video.duration) || 0;
   }
 
   private async convertWithFFmpeg(inputFile: string, outputFile: string): Promise<void> {
@@ -294,8 +304,9 @@ class GifConverter {
         await this.convertWithLowerQuality(inputFile, outputFile);
       }
 
-    } catch (error: any) {
-      console.error("FFmpeg转换失败:", error);
+    } catch (error: unknown) {
+      const errorMessage = getErrorMessage(error);
+      logger.error("FFmpeg转换失败:", error);
       throw new Error(`视频转换失败，请检查 FFmpeg 是否已安装`);
     }
   }
@@ -319,19 +330,21 @@ class GifConverter {
   private async sendAsSticker(originalMsg: MessageContext, stickerFile: string): Promise<void> {
     try {
       // 使用正确的贴纸属性发送
-      await this.client.sendMedia(originalMsg.chat.id, {
+      const media: InputMediaSticker = {
         type: "sticker",
         file: stickerFile,
         fileMime: "video/webm",
-        emoji: this.getRandomEmoji(),
-      } as any);
+        alt: this.getRandomEmoji(),
+      };
+      await this.client.sendMedia(originalMsg.chat.id, media);
 
-    } catch (error: any) {
-      throw new Error(`发送贴纸失败: ${error.message}`);
+    } catch (error: unknown) {
+      const errorMessage = getErrorMessage(error);
+      throw new Error(`发送贴纸失败: ${errorMessage}`);
     }
   }
 
-  private async autoAddToStickerPack(originalMsg: MessageContext, stickerFile: string, statusMsg: any): Promise<void> {
+  private async autoAddToStickerPack(originalMsg: MessageContext, stickerFile: string, statusMsg: MessageContext): Promise<void> {
     try {
       // 获取 @Stickers 机器人
       const stickersBot = await this.client.getChat("@Stickers");
@@ -343,7 +356,7 @@ class GifConverter {
         type: "document",
         file: stickerFile,
         caption: html("🎉 新贴纸"),
-      } as any);
+      });
       
       // 等待机器人回复
       await this.sleep(2000);
@@ -365,14 +378,15 @@ class GifConverter {
       const t2 = setTimeout(() => {
         pendingTimers.delete(t2);
         if (getCurrentGeneration() !== gen2) return;
-        statusMsg.delete().catch(() => {});
+        statusMsg.delete().catch(() => { /* msg may already be deleted or bot lacks permission */ });
       }, 3000);
       pendingTimers.add(t2);
       
-    } catch (error: any) {
-      console.error("自动添加贴纸包失败:", error);
+    } catch (error: unknown) {
+      const errorMessage = getErrorMessage(error);
+      logger.error("自动添加贴纸包失败:", error);
       await statusMsg.edit({ 
-        text: html(`⚠️ 自动添加失败，正在直接发送贴纸...<br><br>错误: ${error.message}`) 
+        text: html(`⚠️ 自动添加失败，正在直接发送贴纸...<br><br>错误: ${errorMessage}`) 
       });
       
       // 失败后直接发送贴纸
@@ -381,13 +395,13 @@ class GifConverter {
       const t3 = setTimeout(() => {
         pendingTimers.delete(t3);
         if (getCurrentGeneration() !== gen3) return;
-        statusMsg.delete().catch(() => {});
+        statusMsg.delete().catch(() => { /* msg may already be deleted or bot lacks permission */ });
       }, 5000);
       pendingTimers.add(t3);
     }
   }
   
-  private async handleStickerBotInteraction(stickersBot: any, statusMsg: any): Promise<void> {
+  private async handleStickerBotInteraction(stickersBot: { id: number }, statusMsg: MessageContext): Promise<void> {
     // 等待机器人的回复
     await this.sleep(3000);
     
@@ -425,8 +439,8 @@ class GifConverter {
         if (fs.existsSync(file)) {
           fs.unlinkSync(file);
         }
-      } catch (e) {
-        console.warn(`清理文件失败: ${file}`, e);
+      } catch (e: unknown) {
+        logger.warn(`清理文件失败: ${file}`, e);
       }
     });
   }
@@ -500,4 +514,4 @@ class GifStickerPlugin extends Plugin {
   }
 }
 
-export default new GifStickerPlugin();
+export default GifStickerPlugin;

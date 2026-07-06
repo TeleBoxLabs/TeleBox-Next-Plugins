@@ -5,17 +5,11 @@ import { html } from "@mtcute/html-parser";
 import * as dgram from "dgram";
 import { execFile } from "child_process";
 import { promisify } from "util";
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
+import { htmlEscape } from "@utils/htmlEscape";
 
 const execFileAsync = promisify(execFile);
-
-const htmlEscape = (text: string): string =>
-  text.replace(/[&<>"']/g, (m) => ({
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    '"': "&quot;",
-    "'": "&#x27;",
-  }[m] || m));
 
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
@@ -83,7 +77,7 @@ async function queryOnce(host: string, timeoutMs = 2500): Promise<NtpResult> {
     function cleanup() {
       try {
         socket.close();
-      } catch {}
+      } catch (e: unknown) { logger.warn('[ntp] socket close failed:', e) }
       if (timeoutTimer) clearTimeout(timeoutTimer);
     }
 
@@ -128,7 +122,7 @@ async function queryOnce(host: string, timeoutMs = 2500): Promise<NtpResult> {
           serverTimeMs,
           raw: msg,
         });
-      } catch (e) {
+      } catch (e: unknown) {
         cleanup();
         reject(e);
       }
@@ -159,7 +153,7 @@ async function queryBest(servers = NTP_SERVERS, timeoutMs = 2500): Promise<NtpRe
     value: NtpResult;
   }>;
   if (fulfilled.length === 0) {
-    const firstErr = (results.find((r) => r.status === "rejected") as any)?.reason;
+    const firstErr = (results.find((r) => r.status === "rejected") as { status: "rejected"; reason?: unknown } | undefined)?.reason;
     throw firstErr || new Error("All NTP queries failed");
   }
   // Prefer the one with smallest delay
@@ -219,8 +213,8 @@ async function setSystemTimeBestEffort(serverTimeMs: number): Promise<{
       };
     }
     return { ok: false, hint: `暂不支持的平台：${platform}` };
-  } catch (error: any) {
-    const msg = String(error?.message || error);
+  } catch (error: unknown) {
+    const msg = getErrorMessage(error);
     const needRoot = /not permitted|Operation not permitted|must be root|permission/i.test(
       msg
     );
@@ -248,7 +242,7 @@ class NtpPlugin extends Plugin {
       if (args.length === 0) {
         try {
           await msg.edit({ text: "⏳ 正在查询 NTP..." });
-        } catch {}
+        } catch (e: unknown) { logger.warn('[ntp] edit msg failed:', e) }
         try {
           const result = await queryBest();
           const now = Date.now();
@@ -265,9 +259,9 @@ class NtpPlugin extends Plugin {
                 )}</code>`
               : undefined,
           ].filter(Boolean);
-          await msg.edit({ text: html(lines.join("\n")) });
-        } catch (e: any) {
-          await msg.edit({ text: html(`❌ 查询失败：${htmlEscape(String(e?.message || e))}`) });
+          await msg.edit({ text: html(lines.join("<br>")) });
+        } catch (e: unknown) {
+          await msg.edit({ text: html(`❌ 查询失败：${htmlEscape(getErrorMessage(e))}`) });
         }
         return;
       }
@@ -276,7 +270,7 @@ class NtpPlugin extends Plugin {
       if (args[0].toLowerCase() === "s") {
         try {
           await msg.edit({ text: "🔧 正在对时（NTP 查询）..." });
-        } catch {}
+        } catch (e: unknown) { logger.warn('[ntp] edit sync msg failed:', e) }
         try {
           const result = await queryBest();
           if (!result.serverTimeMs) throw new Error("无法获取服务器时间");
@@ -296,8 +290,8 @@ class NtpPlugin extends Plugin {
             await msg.edit({
               text: html(
                 header +
-                `\n• 已尝试设置系统时间：<code>${htmlEscape(setRes.command || "")}</code>` +
-                (setRes.stdout ? `\n<pre>${htmlEscape((setRes.stdout || "").trim())}</pre>` : "")
+                `<br>• 已尝试设置系统时间：<code>${htmlEscape(setRes.command || "")}</code>` +
+                (setRes.stdout ? `<br><pre>${htmlEscape((setRes.stdout || "").trim())}</pre>` : "")
               ),
             });
           } else {
@@ -305,15 +299,15 @@ class NtpPlugin extends Plugin {
             await msg.edit({
               text: html(
                 header +
-                `\n• 未能自动设置系统时间。` +
-                `\n▫︎ 原因/提示：${hint}` +
-                `\n▫︎ 请以管理员权限运行，或手动设置系统时间为：` +
-                `\n<code>${formatDateCN(new Date(result.serverTimeMs))}</code>`
+                `<br>• 未能自动设置系统时间。` +
+                `<br>▫︎ 原因/提示：${hint}` +
+                `<br>▫︎ 请以管理员权限运行，或手动设置系统时间为：` +
+                `<br><code>${formatDateCN(new Date(result.serverTimeMs))}</code>`
               ),
             });
           }
-        } catch (e: any) {
-          await msg.edit({ text: html(`❌ 对时失败：${htmlEscape(String(e?.message || e))}`) });
+        } catch (e: unknown) {
+          await msg.edit({ text: html(`❌ 对时失败：${htmlEscape(getErrorMessage(e))}`) });
         }
         return;
       }

@@ -1,6 +1,7 @@
 import { Plugin } from "@utils/pluginBase";
 import { getPrefixes } from "@utils/pluginManager";
 import type { MessageContext } from "@mtcute/dispatcher";
+import type { MtcuteFileDownloadLocation, MtcuteMessageContext } from "@utils/mtcuteTypes";
 import { html } from "@mtcute/html-parser";
 import { getGlobalClient } from "@utils/globalClient";
 import { createDirectoryInAssets, createDirectoryInTemp } from "@utils/pathHelpers";
@@ -8,6 +9,11 @@ import { JSONFilePreset } from "lowdb/node";
 import * as path from "path";
 import * as fs from "fs/promises";
 import { statSync, existsSync } from "fs";
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
+import type { MessageMedia, Photo, Video, Audio, Voice, Sticker, Document, User, Chat, Peer, Message } from "@mtcute/core";
+import type { TelegramClient } from "@mtcute/node";
+import type { InputPeerLike } from "@mtcute/core";
 
 
 const prefixes = getPrefixes();
@@ -109,7 +115,7 @@ class PrometheusPlugin extends Plugin {
     this.chatDisplayNameCache.clear();
     this.db = null;
     for (const filePath of this.activeTempFiles) {
-      void fs.unlink(filePath).catch(() => {});
+      void fs.unlink(filePath).catch(() => { /* temp file cleanup failed, non-critical */ });
     }
     this.activeTempFiles.clear();
     void this.cleanupTempDirectory();
@@ -123,7 +129,7 @@ class PrometheusPlugin extends Plugin {
   description = help_text;
   
   private tempDir = createDirectoryInTemp("prometheus");
-  private db: any = null;
+  private db: Awaited<ReturnType<typeof JSONFilePreset<PrometheusDB>>> | null = null;
   private lastEditText: Map<string, string> = new Map();
   private chatDisplayNameCache: Map<string, string> = new Map();
   private activeTempFiles: Set<string> = new Set();
@@ -260,15 +266,12 @@ class PrometheusPlugin extends Plugin {
 
     try {
       const client = await getGlobalClient();
-      const entity = await (client as any).resolvePeer(chatId);
+      const peer: Peer = await client.getPeer(chatId);
 
       const title =
-        (entity as any)?.title ||
-        [
-          (entity as any)?.firstName,
-          (entity as any)?.lastName,
-        ].filter(Boolean).join(' ').trim() ||
-        (entity as any)?.username;
+        peer.type === 'chat'
+          ? (peer as Chat).title
+          : [(peer as User).firstName, (peer as User).lastName].filter(Boolean).join(' ').trim() || (peer as User).username;
 
       const resolvedName = title ? String(title) : chatId;
       this.chatDisplayNameCache.set(chatId, resolvedName);
@@ -280,7 +283,7 @@ class PrometheusPlugin extends Plugin {
   }
 
   private async sendSingleSourceMessage(
-    targetPeer: any,
+    targetPeer: InputPeerLike,
     sourceChatId: string,
     sourceMessageId: number,
     forwardedMsg: MessageContext,
@@ -290,21 +293,18 @@ class PrometheusPlugin extends Plugin {
       const client = await getGlobalClient();
       const sourceLink = this.generateMessageLink(sourceChatId, sourceMessageId);
       const displayName = await this.getChatDisplayName(sourceChatId);
-      const sourceText = `🔗 <b>消息来源</b>\n\n` +
+      const sourceText = `📎 <b>消息来源</b>\n\n` +
         `📝 <a href="${htmlEscape(sourceLink)}">查看原消息</a>\n` +
         `👤 来源对话: <b>${htmlEscape(displayName)}</b>\n` +
         `#️⃣ 消息ID: <code>${sourceMessageId}</code>`;
 
-      await (client as any).sendMessage(targetPeer, {
-        message: sourceText,
-        replyTo: forwardedMsg.id
-      });
+      await client.sendText(targetPeer, sourceText, { replyTo: forwardedMsg.id });
 
       if (replyMsg) {
         await this.safeEditMessage(replyMsg, `✅ 已转发并添加来源链接`, true);
       }
-    } catch (error) {
-      console.error(`发送来源消息失败:`, error);
+    } catch (error: unknown) {
+      logger.error(`发送来源消息失败:`, error);
     }
   }
 
@@ -351,17 +351,14 @@ class PrometheusPlugin extends Plugin {
         : summaryBody;
       const sourceText = `🔗 <b>批量保存来源</b>\n\n${wrappedBody}`;
 
-      await (client as any).sendMessage(targetPeer, {
-        message: sourceText,
-        replyTo: forwardedMsg.id
-      });
-    } catch (error) {
-      console.error(`发送批量来源消息失败:`, error);
+      await client.sendText(targetPeer, sourceText, { replyTo: forwardedMsg.id });
+    } catch (error: unknown) {
+      logger.error(`发送批量来源消息失败:`, error);
     }
   }
 
   private async sendRangeSourceSummary(
-    targetPeer: any,
+    targetPeer: InputPeerLike,
     forwardedMsg: MessageContext,
     startSource: { chatId: string; messageId: number } | null,
     endSource: { chatId: string; messageId: number } | null
@@ -374,20 +371,17 @@ class PrometheusPlugin extends Plugin {
 
       if (startSource) {
         const startTitle = await this.getChatDisplayName(startSource.chatId);
-        blocks.push(`▶️ <b>起始消息</b>\n${this.formatSourceLine(startTitle, startSource.chatId, startSource.messageId)}`);
+        blocks.push(`▶️ <b>起始消息</b><br>${this.formatSourceLine(startTitle, startSource.chatId, startSource.messageId)}`);
       }
 
       if (endSource) {
         const endTitle = await this.getChatDisplayName(endSource.chatId);
-        blocks.push(`⏹ <b>结尾消息</b>\n${this.formatSourceLine(endTitle, endSource.chatId, endSource.messageId)}`);
+        blocks.push(`⏹ <b>结尾消息</b><br>${this.formatSourceLine(endTitle, endSource.chatId, endSource.messageId)}`);
       }
 
-      await (client as any).sendMessage(targetPeer, {
-        message: `🔗 <b>范围保存来源</b>\n\n${blocks.join('\n\n')}`,
-        replyTo: forwardedMsg.id
-      });
-    } catch (error) {
-      console.error(`发送范围来源消息失败:`, error);
+      await client.sendText(targetPeer, `🔗 <b>范围保存来源</b><br><br>${blocks.join('<br><br>')}`, { replyTo: forwardedMsg.id });
+    } catch (error: unknown) {
+      logger.error(`发送范围来源消息失败:`, error);
     }
   }
   
@@ -411,8 +405,9 @@ class PrometheusPlugin extends Plugin {
     try {
       await msg.edit({ text: html(safeText) });
       this.lastEditText.set(msgId, safeText);
-    } catch (err: any) {
-      if (err.message?.includes('MESSAGE_NOT_MODIFIED')) {
+    } catch (err: unknown) {
+      const errMsg = getErrorMessage(err);
+      if (errMsg.includes('MESSAGE_NOT_MODIFIED')) {
         this.lastEditText.set(msgId, safeText);
         return;
       }
@@ -424,33 +419,33 @@ class PrometheusPlugin extends Plugin {
     try {
       const dbPath = path.join(createDirectoryInAssets("prometheus"), "config.json");
       this.db = await JSONFilePreset<PrometheusDB>(dbPath, { users: {} });
-    } catch (error) {
-      console.error(`初始化数据库失败:`, error);
+    } catch (error: unknown) {
+      logger.error(`初始化数据库失败:`, error);
     }
   }
   
   private async getUserConfig(userId: string): Promise<UserConfig> {
     await this.initDB();
-    if (!this.db.data.users[userId]) {
-      this.db.data.users[userId] = { 
+    if (!this.db!.data.users[userId]) {
+      this.db!.data.users[userId] = {
         target: "me",
         showSource: false  // 默认关闭来源显示
       };
-      await this.db.write();
+      await this.db!.write();
     }
-    return this.db.data.users[userId];
+    return this.db!.data.users[userId];
   }
-  
+
   private async setUserConfig(userId: string, config: Partial<UserConfig>): Promise<void> {
     await this.initDB();
-    if (!this.db.data.users[userId]) {
-      this.db.data.users[userId] = { 
+    if (!this.db!.data.users[userId]) {
+      this.db!.data.users[userId] = {
         target: "me",
         showSource: false
       };
     }
-    Object.assign(this.db.data.users[userId], config);
-    await this.db.write();
+    Object.assign(this.db!.data.users[userId], config);
+    await this.db!.write();
   }
   
   // 生成消息跳转链接
@@ -511,24 +506,39 @@ class PrometheusPlugin extends Plugin {
   private async getMessage(chatId: string, messageId: number): Promise<MessageContext | null> {
     try {
       const client = await getGlobalClient();
-      const peer = await (client as any).getInputEntity(chatId);
-      const messages = await (client as any).getMessages(peer, { ids: [messageId] });
-      return messages[0] || null;
-    } catch (error) {
-      console.error(`获取消息失败:`, error);
+      const messages = await client.getMessages(chatId, [messageId]);
+      return messages[0] as MessageContext | null;
+    } catch (error: unknown) {
+      logger.error(`获取消息失败:`, error);
       return null;
     }
   }
   
-  private getFileExtension(media: any): string {
+  private getFileExtension(media: MessageMedia): string {
     try {
-      if ((media as any)?.type === 'photo') {
+      if (!media) return '.bin';
+
+      if (media.type === 'photo') {
         return '.jpg';
-      } else if (['document', 'video', 'sticker', 'audio', 'voice'].includes((media as any)?.type)) {
-        const document = media as any;
-        
-        if (document.mimeType) {
-          const mimeType = document.mimeType.toLowerCase();
+      }
+
+      if (media.type === 'video') {
+        if (media.mimeType?.includes('video/webm')) return '.webm';
+        if (media.mimeType?.includes('video/quicktime')) return '.mov';
+        return '.mp4';
+      }
+
+      if (media.type === 'audio') {
+        if (media.mimeType?.includes('audio/ogg')) return '.ogg';
+        return '.mp3';
+      }
+
+      if (media.type === 'voice') return '.ogg';
+      if (media.type === 'sticker') return media.mimeType?.includes('image/gif') ? '.gif' : '.webp';
+
+      if (media.type === 'document') {
+        if (media.mimeType) {
+          const mimeType = media.mimeType.toLowerCase();
           if (mimeType.includes('video/mp4')) return '.mp4';
           if (mimeType.includes('video/webm')) return '.webm';
           if (mimeType.includes('video/quicktime')) return '.mov';
@@ -539,50 +549,35 @@ class PrometheusPlugin extends Plugin {
           if (mimeType.includes('image/gif')) return '.gif';
           if (mimeType.includes('image/webp')) return '.webp';
         }
-        
-        for (const attr of document.attributes) {
-          if ((attr as any)?._ === "documentAttributeFilename") {
-            const ext = path.extname(attr.fileName).toLowerCase();
-            if (ext) return ext;
-          }
-        }
-        
-        for (const attr of document.attributes) {
-          if ((attr as any)?._ === "documentAttributeVideo") return '.mp4';
-          if ((attr as any)?._ === "documentAttributeAudio") return attr.voice ? '.ogg' : '.mp3';
-          if ((attr as any)?._ === "documentAttributeSticker") return '.webp';
-          if ((attr as any)?._ === "documentAttributeAnimated") return '.gif';
-        }
+        const ext = media.fileName ? path.extname(media.fileName).toLowerCase() : '';
+        if (ext) return ext;
       }
-    } catch (error) {
-      console.error(`获取文件扩展名失败:`, error);
+    } catch (error: unknown) {
+      logger.error(`获取文件扩展名失败:`, error);
     }
-    
+
     return '.bin';
   }
-  
-  private getMediaType(media: any): string {
+
+  private getMediaType(media: MessageMedia): string {
     try {
-      if ((media as any)?.type === 'photo') {
-        return 'photo';
-      } else if (['document', 'video', 'sticker', 'audio', 'voice'].includes((media as any)?.type)) {
-        const document = media as any;
-        
-        for (const attr of document.attributes) {
-          if ((attr as any)?._ === "documentAttributeVideo") return 'video';
-          if ((attr as any)?._ === "documentAttributeAudio") return attr.voice ? 'voice' : 'audio';
-          if ((attr as any)?._ === "documentAttributeSticker") return 'sticker';
-          if ((attr as any)?._ === "documentAttributeAnimated") return 'gif';
-        }
-        
-        if (document.mimeType?.includes('video/')) return 'video';
-        if (document.mimeType?.includes('audio/')) return 'audio';
-        if (document.mimeType?.includes('image/')) return 'photo';
+      if (!media) return 'document';
+
+      if (media.type === 'photo') return 'photo';
+      if (media.type === 'video') return 'video';
+      if (media.type === 'audio') return 'audio';
+      if (media.type === 'voice') return 'voice';
+      if (media.type === 'sticker') return 'sticker';
+      if (media.type === 'document') {
+        if (media.mimeType?.includes('video/')) return 'video';
+        if (media.mimeType?.includes('audio/')) return 'audio';
+        if (media.mimeType?.includes('image/')) return 'photo';
+        if (media.mimeType?.includes('image/gif')) return 'gif';
       }
-    } catch (error) {
-      console.error(`获取媒体类型失败:`, error);
+    } catch (error: unknown) {
+      logger.error(`获取媒体类型失败:`, error);
     }
-    
+
     return 'document';
   }
   
@@ -602,16 +597,11 @@ class PrometheusPlugin extends Plugin {
       
       const timestamp = Date.now();
       let fileName = `${mediaType}_${timestamp}_${index}`;
-      
-      if (['document', 'video', 'sticker', 'audio', 'voice'].includes((message.media as any)?.type)) {
-        const document = message.media as any;
-        for (const attr of document.attributes) {
-          if ((attr as any)?._ === "documentAttributeFilename") {
-            const baseName = path.parse(attr.fileName).name;
-            if (baseName) fileName = baseName;
-            break;
-          }
-        }
+
+      const mediaWithFileName = message.media as unknown as { fileName?: string } | null;
+      if (mediaWithFileName?.fileName) {
+        const baseName = path.parse(mediaWithFileName.fileName).name;
+        if (baseName) fileName = baseName;
       }
       
       const safeName = fileName.replace(/[^a-zA-Z0-9_\-\.]/g, '_');
@@ -630,7 +620,9 @@ class PrometheusPlugin extends Plugin {
         await this.safeEditMessage(replyMsg, `⏬ 下载媒体文件 (${index + 1})...`);
       }
       
-      const buffer = await (client as any).downloadMedia(message.media, {});
+      const mediaLocation = message.media as unknown as { raw?: { _?: string } };
+      if (!mediaLocation) return null;
+      const buffer = await client.downloadAsBuffer(mediaLocation as MtcuteFileDownloadLocation);
       if (buffer && buffer.length > 0) {
         await fs.writeFile(finalFilePath, buffer);
         this.activeTempFiles.add(finalFilePath);
@@ -654,8 +646,8 @@ class PrometheusPlugin extends Plugin {
         fileName: path.basename(finalFilePath),
       };
       
-    } catch (error: any) {
-      console.error(`下载媒体失败:`, error);
+    } catch (error: unknown) {
+      logger.error(`下载媒体失败:`, error);
       return null;
     }
   }
@@ -664,8 +656,8 @@ class PrometheusPlugin extends Plugin {
     if (filePath && existsSync(filePath)) {
       try {
         await fs.unlink(filePath);
-      } catch (error) {
-        console.error(`清理临时文件失败:`, error);
+      } catch (error: unknown) {
+        logger.error(`清理临时文件失败:`, error);
       }
     }
     if (filePath) {
@@ -681,10 +673,10 @@ class PrometheusPlugin extends Plugin {
           const filePath = path.join(this.tempDir, entry);
           try {
             await fs.unlink(filePath);
-          } catch {}
+          } catch (e: unknown) { logger.warn('操作失败', e) }
         })
       );
-    } catch {}
+    } catch (e: unknown) { logger.warn('操作失败', e) }
   }
 
   private async saveMediaToLocal(
@@ -755,10 +747,10 @@ class PrometheusPlugin extends Plugin {
         sourceMessageId,
         sourceLink: this.generateMessageLink(sourceChatId, sourceMessageId),
         mediaType: sourceMsg.media ? this.getMediaType(sourceMsg.media) : "unknown",
-        groupedId: (sourceMsg as any).groupedId?.toString(),
+        groupedId: sourceMsg.groupedId?.toString(),
       };
-    } catch (error) {
-      console.error(`保存媒体到本地失败:`, error);
+    } catch (error: unknown) {
+      logger.error(`保存媒体到本地失败:`, error);
       if (tempFileInfo?.path) {
         await this.cleanupTempFile(tempFileInfo.path);
       }
@@ -767,8 +759,8 @@ class PrometheusPlugin extends Plugin {
   }
   
   private async sendSingleMedia(
-    client: any,
-    targetPeer: any,
+    client: TelegramClient,
+    targetPeer: InputPeerLike,
     mediaInfo: { 
       path: string; 
       type: string; 
@@ -783,7 +775,12 @@ class PrometheusPlugin extends Plugin {
       throw new Error(`文件不存在: ${filePath}`);
     }
     
-    const sendOptions: any = {
+    const sendOptions: {
+      file: string;
+      forceDocument: boolean;
+      caption?: string;
+      parseMode?: string;
+    } = {
       file: filePath,
       forceDocument: false
     };
@@ -797,19 +794,28 @@ class PrometheusPlugin extends Plugin {
       await this.safeEditMessage(replyMsg, `📤 上传 ${type}...`);
     }
     
-    return await client.sendFile(targetPeer, sendOptions) as any;
+    const sentMsg = await client.sendMedia(targetPeer, filePath, {
+      caption: sendOptions.caption,
+      replyTo: replyMsg?.id,
+    });
+    return sentMsg as MtcuteMessageContext;
   }
   
   private async processMessage(
-    sourceMsg: MessageContext, 
-    targetPeer: any, 
+    sourceMsg: MessageContext,
+    targetPeer: InputPeerLike,
     replyMsg: MessageContext,
     sourceChatId: string,
     sourceMessageId: number,
     progress: string = ""
   ): Promise<ProcessMessageResult> {
     const client = await getGlobalClient();
-    let tempFileInfo: any = null;
+    let tempFileInfo: {
+      path: string;
+      type: string;
+      caption?: string;
+      fileName?: string;
+    } | null = null;
     let forwardedMessage: MessageContext | undefined;
     
     try {
@@ -817,11 +823,12 @@ class PrometheusPlugin extends Plugin {
       
       try {
         // 直接转发，获取转发的消息
-        const result = await (client as any).forwardMessages(targetPeer, {
-          messages: [sourceMsg.id],
-          fromPeer: sourceMsg.chat.id
+        const result = await client.forwardMessagesById({
+          toChatId: targetPeer,
+          fromChatId: sourceMsg.chat.id,
+          messages: [sourceMsg.id]
         });
-        forwardedMessage = result[0];
+        forwardedMessage = result[0] as MtcuteMessageContext;
         
         await this.safeEditMessage(replyMsg, `${progress}✅ 转发成功`, true);
         
@@ -831,10 +838,10 @@ class PrometheusPlugin extends Plugin {
           forwardedMsg: forwardedMessage,
           source: { chatId: sourceChatId, messageId: sourceMessageId }
         };
-      } catch (forwardError: any) {
-        const errorMsg = forwardError.message || '';
-        const isRestricted = errorMsg.includes('SAVE') || 
-                           errorMsg.includes('FORWARD') || 
+      } catch (forwardError: unknown) {
+        const errorMsg = getErrorMessage(forwardError);
+        const isRestricted = errorMsg.includes('SAVE') ||
+                           errorMsg.includes('FORWARD') ||
                            errorMsg.includes('CHAT_FORWARDS_RESTRICTED');
         
         if (!isRestricted) throw forwardError;
@@ -843,10 +850,7 @@ class PrometheusPlugin extends Plugin {
           const text = sourceMsg.text || '';
           if (text) {
             // 发送文本消息，获取发送的消息
-            forwardedMessage = await (client as any).sendMessage(targetPeer, {
-              message: text,
-              parseMode: sourceMsg.text?.includes('<') ? 'html' : undefined
-            });
+            forwardedMessage = await client.sendText(targetPeer, text) as MtcuteMessageContext;
             
             await this.safeEditMessage(replyMsg, `${progress}✅ 文本内容已发送`, true);
             
@@ -879,9 +883,9 @@ class PrometheusPlugin extends Plugin {
           source: { chatId: sourceChatId, messageId: sourceMessageId }
         };
       }
-    } catch (error: any) {
-      console.error(`处理消息失败:`, error);
-      await this.safeEditMessage(replyMsg, `${progress}❌ 处理失败: ${htmlEscape(error.message || "未知错误")}`, true);
+    } catch (error: unknown) {
+      logger.error(`处理消息失败:`, error);
+      await this.safeEditMessage(replyMsg, `${progress}❌ 处理失败: ${htmlEscape(getErrorMessage(error) || "未知错误")}`, true);
       return { success: false };
     } finally {
       if (tempFileInfo?.path) {
@@ -921,9 +925,9 @@ class PrometheusPlugin extends Plugin {
         savedFile,
         source: { chatId: sourceChatId, messageId: sourceMessageId },
       };
-    } catch (error: any) {
-      console.error(`处理本地保存失败:`, error);
-      await this.safeEditMessage(replyMsg, `${progress}❌ 本地保存失败: ${htmlEscape(error.message || "未知错误")}`, true);
+    } catch (error: unknown) {
+      logger.error(`处理本地保存失败:`, error);
+      await this.safeEditMessage(replyMsg, `${progress}❌ 本地保存失败: ${htmlEscape(getErrorMessage(error) || "未知错误")}`, true);
       return { success: false };
     }
   }
@@ -988,8 +992,8 @@ class PrometheusPlugin extends Plugin {
         } else {
           await this.safeEditMessage(replyMsg, `${progress}❌ 消息 ${msgId} 处理失败`, true);
         }
-      } catch (error: any) {
-        await this.safeEditMessage(replyMsg, `${progress}❌ 消息 ${msgId} 处理出错: ${htmlEscape(error.message || "未知错误")}`, true);
+      } catch (error: unknown) {
+        await this.safeEditMessage(replyMsg, `${progress}❌ 消息 ${msgId} 处理出错: ${htmlEscape(getErrorMessage(error) || "未知错误")}`, true);
       }
       
       // 延迟以避免触发限制
@@ -1046,9 +1050,9 @@ class PrometheusPlugin extends Plugin {
         } else {
           failedCount++;
         }
-      } catch (error: any) {
+      } catch (error: unknown) {
         failedCount++;
-        await this.safeEditMessage(replyMsg, `${progress}❌ 消息 ${msgId} 本地保存出错: ${htmlEscape(error.message || "未知错误")}`, true);
+        await this.safeEditMessage(replyMsg, `${progress}❌ 消息 ${msgId} 本地保存出错: ${htmlEscape(getErrorMessage(error) || "未知错误")}`, true);
       }
 
       if (msgId < actualEnd) {
@@ -1117,12 +1121,15 @@ class PrometheusPlugin extends Plugin {
         return;
       }
       
-      const userId = (msg as any).senderId?.toString() || (msg as any).sender?.id?.toString() || "unknown";
+      const userId = String(msg.sender.id);
       const text = msg.text || "";
       const parts = text.trim().split(/\s+/);
-      
+
       // 检查是否有回复消息
-      const replyMsg = (msg as any).replyToMsgId ? await (msg as any).getReplyMessage?.() : null;
+      const replyToInfo = msg.replyToMessage;
+      const replyMsg = replyToInfo?.id
+        ? await this.getMessage(String(replyToInfo.chat?.id || msg.chat.id), replyToInfo.id)
+        : null;
       
       // 处理source子命令
       if (parts.length >= 2 && parts[1].toLowerCase() === "source") {
@@ -1221,11 +1228,11 @@ class PrometheusPlugin extends Plugin {
       }
       
       // 获取目标对话实体
-      let targetPeer: any;
+      let targetPeer: InputPeerLike = target;
       if (!localTarget) {
         try {
-          targetPeer = await (client as any).getInputEntity(target);
-        } catch (error) {
+          targetPeer = await client.resolvePeer(target);
+        } catch {
           await this.safeEditMessage(msg, `❌ 无法访问目标对话: <code>${htmlEscape(target)}</code>`, true);
           return;
         }
@@ -1285,13 +1292,13 @@ class PrometheusPlugin extends Plugin {
           if (sourceMsg) {
             if (sourceMsg.groupedId) {
               const existingGroup = messagesToProcess.find(m => 
-                m.groupedId === (sourceMsg as any).groupedId?.toString()
+                m.groupedId === sourceMsg.groupedId?.toString()
               );
               if (!existingGroup) {
                 messagesToProcess.push({
                   chatId: linkInfo.chatId,
                   messageId: linkInfo.messageId,
-                  groupedId: (sourceMsg as any).groupedId?.toString(),
+                  groupedId: sourceMsg.groupedId?.toString(),
                   isMediaGroup: true
                 });
               }
@@ -1312,7 +1319,7 @@ class PrometheusPlugin extends Plugin {
         messagesToProcess.push({
           chatId: replyMsg.chat.id?.toString() || "",
           messageId: replyMsg.id,
-          groupedId: (replyMsg as any).groupedId?.toString()
+          groupedId: replyMsg.groupedId?.toString()
         });
       }
       
@@ -1342,24 +1349,21 @@ class PrometheusPlugin extends Plugin {
           
           // 简化处理：对于媒体组，逐个消息处理
           const client = await getGlobalClient();
-          const peer = await (client as any).getInputEntity(messageInfo.chatId);
           const searchIds: number[] = [];
-          
+
           for (let j = 0; j <= 60; j++) {
             const id = messageInfo.messageId - 30 + j;
             if (id > 0) searchIds.push(id);
           }
-          
-          const messages = await (client as any).getMessages(peer, { ids: searchIds });
-          const groupMessages = messages.filter(
-            (msg: any) => !!msg && (msg as MessageContext).groupedId?.toString() === messageInfo.groupedId
-          );
-          
-          groupMessages.sort((a: any, b: any) => a.id - b.id);
+
+          const messages = await client.getMessages(messageInfo.chatId, searchIds);
+          const groupMessages = messages
+            .filter((msg): msg is Message => !!msg && msg.groupedId?.toString() === messageInfo.groupedId)
+            .sort((a, b) => a.id - b.id);
           const localGroupDirName = localTarget ? `group_${messageInfo.groupedId}` : undefined;
            
           for (let j = 0; j < groupMessages.length; j++) {
-            const groupMsg = groupMessages[j];
+            const groupMsg = groupMessages[j] as MtcuteMessageContext;
             const groupProgress = `[${i + 1}/${total}] [${j + 1}/${groupMessages.length}] `;
             const result = localTarget
               ? await this.processMessageToLocal(groupMsg, msg, messageInfo.chatId, groupMsg.id, groupProgress, {
@@ -1451,9 +1455,9 @@ class PrometheusPlugin extends Plugin {
         await this.safeEditMessage(msg, `✅ 批量处理完成\n成功处理 ${successCount}/${total} 个消息/媒体组`, true);
       }
       
-    } catch (error: any) {
-      console.error(`save命令执行失败:`, error);
-      await this.safeEditMessage(msg, `❌ 执行失败: ${htmlEscape(error.message || "未知错误")}`, true);
+    } catch (error: unknown) {
+      logger.error(`save命令执行失败:`, error);
+      await this.safeEditMessage(msg, `❌ 执行失败: ${htmlEscape(getErrorMessage(error) || "未知错误")}`, true);
     }
   }
   

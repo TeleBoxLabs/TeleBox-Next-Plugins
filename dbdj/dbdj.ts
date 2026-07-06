@@ -1,22 +1,23 @@
 import { Plugin } from "@utils/pluginBase";
-import type { MessageContext } from "@mtcute/dispatcher";
-import { html } from "@mtcute/html-parser";
+import { sleep } from "@utils/asyncHelpers";
+import { htmlEscape } from "@utils/htmlEscape";
 import { getGlobalClient } from "@utils/globalClient";
 import { getPrefixes } from "@utils/pluginManager";
 import { safeGetMessages } from "@utils/safeGetMessages";
-
-const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
+import type { ClientInternals } from "@utils/clientInternals";
 
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
 
-function toInt(value: any): number | undefined {
-  const n = Number(value);
+function toInt(value: unknown): number | undefined {
+  const n = typeof value === 'number' ? value : Number(value);
   return Number.isFinite(n) ? Math.trunc(n) : undefined;
 }
 
-function toStrInt(value: any): string | undefined {
-  const n = Number(value);
+function toStrInt(value: unknown): string | undefined {
+  const n = typeof value === 'number' ? value : Number(value);
   return Number.isFinite(n) ? String(Math.trunc(n)) : undefined;
 }
 
@@ -27,27 +28,27 @@ function formatDate(date: Date): string {
 }
 
 async function formatEntity(
-  target: any,
+  target: string | number | { className?: string; id?: number },
   mention?: boolean,
   throwErrorIfFailed?: boolean,
 ) {
   const client = await getGlobalClient();
   if (!client) throw new Error("Telegram 客户端未初始化");
   if (!target) throw new Error("无效的目标");
-  let id: any;
-  let entity: any;
+  let id: number | undefined;
+  let entity: { id?: number; title?: string; firstName?: string; lastName?: string; username?: string; className?: string; bot?: boolean; deleted?: boolean; fake?: boolean; scam?: boolean; botBusiness?: boolean } | undefined;
   try {
-    entity = target?._
-      ? target
-      : ((await client.getChat(target)) as any);
+    entity = typeof target === 'object' && target.className
+      ? target as { id?: number; title?: string; firstName?: string; lastName?: string; username?: string; className?: string; bot?: boolean; deleted?: boolean; fake?: boolean; scam?: boolean; botBusiness?: boolean }
+      : (await (client as unknown as ClientInternals)?.resolvePeer(target as string | number)) as { id?: number; className?: string } | undefined;
     if (!entity) throw new Error("无法获取 entity");
     id = entity.id;
     if (!id) throw new Error("无法获取 entity id");
-  } catch (e: any) {
-    console.error(e);
+  } catch (e: unknown) {
+    logger.error("[dbdj] 获取 entity 失败:", e);
     if (throwErrorIfFailed)
       throw new Error(
-        `无法获取 ${target} 的 entity: ${e?.message || "未知错误"}`,
+        `无法获取 ${target} 的 entity: ${e instanceof Error ? e.message : "未知错误"}`,
       );
   }
   const displayParts: string[] = [];
@@ -64,11 +65,11 @@ async function formatEntity(
 
   if (id) {
     displayParts.push(
-      (entity as any)._ === 'user'
+      entity && 'firstName' in entity
         ? `<a href="tg://user?id=${id}">${id}</a>`
         : `<a href="https://t.me/c/${id}">${id}</a>`,
     );
-  } else if (!target?._) {
+  } else if (typeof target !== 'object' || !target.className) {
     displayParts.push(`<code>${htmlEscape(String(target))}</code>`);
   }
 
@@ -78,33 +79,29 @@ async function formatEntity(
     display: displayParts.join(" ").trim(),
   };
 }
-function htmlEscape(text: string): string {
-  return String(text)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#x27;");
-}
-
 class DbdjPlugin extends Plugin {
-  description: string = `点兵点将<br><code>${mainPrefix}dbdj 消息数 人数 文案</code> - 从最近的消息中随机抽取指定人数的用户`;
+  description: string = `点兵点将\n<code>${mainPrefix}dbdj 消息数 人数 文案</code> - 从最近的消息中随机抽取指定人数的用户`;
   cmdHandlers: Record<
     string,
-    (msg: MessageContext, trigger?: MessageContext) => Promise<void>
+    (msg: any, trigger?: any) => Promise<void>
   > = {
-    dbdj: async (msg: MessageContext, trigger?: MessageContext) => {
+    dbdj: async (msg: any, trigger?: any) => {
       const startAt = Date.now();
       const replyAndDeleteMsg = async (message: string) => {
         const replyTarget = trigger || msg;
-        await replyTarget.replyText(html(message));
+        await replyTarget.reply(message, {
+          parseMode: "html",
+          linkPreview: false,
+        });
         try {
           await msg.delete();
-        } catch {}
+        } catch (e: unknown) {
+          logger.warn('[dbdj] 消息已被删除，跳过');
+        }
       };
 
       try {
-        const parts = (msg.text || "").trim().split(/\s+/);
+        const parts = (msg.message || "").trim().split(/\s+/);
         // 期望格式: .dbdj 消息数 人数 文案...
         const countStr = parts[1];
         const pickStr = parts[2];
@@ -122,43 +119,54 @@ class DbdjPlugin extends Plugin {
 
         await msg.edit({
           text: `点兵点将...`,
+          parseMode: "html",
         });
 
-        const client = await getGlobalClient();
+        const client = msg.client! as unknown as import("@mtcute/node").TelegramClient;
         const offsetId = (msg.id || 1) - 1; // 从命令消息之前开始
-        const messages = await client.getHistory(msg.chat.id, {
-          offset: { id: offsetId, date: 0 },
-          limit: scanCount,
-        });
+        const messages = await safeGetMessages(client, msg.peerId as unknown as import("@mtcute/core").InputPeerLike, {
+          ids: [] as number[],
+          ...{ offsetId, limit: scanCount },
+        } as unknown as Parameters<typeof safeGetMessages>[2]);
 
         // 收集有效用户: 仅统计来自用户的消息, 排除自身(out)、无 fromId 的消息
         const uniqueUserIds: number[] = [];
         const seen = new Set<number>();
         const filtered = new Set<number>();
 
+        // 先收集所有需要查询的用户ID
+        const uidsToFetch: number[] = [];
         for (const m of messages) {
           // 跳过自己发送的消息
-          // if (m.isOutgoing) continue;
-          const from = (m as any).from;
-          const uid = from?.id ? Number(from.id) : undefined;
+          // if ((m as any).out) continue;
+          const from = (m as { fromId?: { userId?: number } }).fromId;
+          const uid = from?.userId ? Number(from.userId) : undefined;
           if (!uid || !Number.isFinite(uid)) continue;
 
           if (!seen.has(uid) && !filtered.has(uid)) {
-            const entity = (await formatEntity(uid))?.entity;
+            uidsToFetch.push(uid);
+            seen.add(uid); // 标记为已处理，避免重复查询
+          }
+        }
 
-            if (
-              !entity ||
-              entity?.bot ||
-              entity?.deleted ||
-              entity?.fake ||
-              entity?.scam ||
-              entity?.botBusiness
-            ) {
-              filtered.add(uid);
-            } else {
-              seen.add(uid);
-              uniqueUserIds.push(uid);
-            }
+        // 并行查询所有用户实体
+        const entityResults = await Promise.all(
+          uidsToFetch.map(async (uid) => ({ uid, entity: (await formatEntity(uid))?.entity })),
+        );
+
+        // 分类有效用户和被过滤用户
+        for (const { uid, entity } of entityResults) {
+          if (
+            !entity ||
+            entity?.bot ||
+            entity?.deleted ||
+            entity?.fake ||
+            entity?.scam ||
+            entity?.botBusiness
+          ) {
+            filtered.add(uid);
+          } else {
+            uniqueUserIds.push(uid);
           }
         }
 
@@ -209,10 +217,10 @@ class DbdjPlugin extends Plugin {
         ].join("\n");
 
         await replyAndDeleteMsg(`${head}\n\n${stats}`);
-      } catch (error: any) {
+      } catch (error: unknown) {
         await replyAndDeleteMsg(
           `执行失败: <code>${htmlEscape(
-            error?.message || String(error),
+            getErrorMessage(error),
           )}</code>`,
         );
       }

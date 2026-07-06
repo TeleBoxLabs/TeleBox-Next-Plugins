@@ -7,6 +7,7 @@ import fs from "fs";
 import path from "path";
 
 import { safeGetMe } from "@utils/authGuards";
+import { logger } from "@utils/logger";
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
 
@@ -37,7 +38,7 @@ class KeepOnlinePlugin extends Plugin {
           await safeGetMe(client);
           const timestamp = Date.now() / 1000;
           fs.writeFileSync(file, `${timestamp.toFixed(0)}`, "utf-8");
-        } catch (e) {}
+        } catch (e: unknown) { logger.warn('[keep_online] heartbeat write failed:', e) }
       },
     },
   };

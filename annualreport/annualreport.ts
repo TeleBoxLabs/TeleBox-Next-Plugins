@@ -8,12 +8,9 @@ import { JSONFilePreset } from "lowdb/node";
 import * as path from "path";
 import * as fs from "fs";
 import axios from "axios";
-
-const htmlEscape = (text: string): string => 
-  text.replace(/[&<>"']/g, m => ({ 
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', 
-    '"': '&quot;', "'": '&#x27;' 
-  }[m] || m));
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
+import { htmlEscape } from "@utils/htmlEscape";
 
 async function getAllDialogs(client: any): Promise<any[]> {
   const dialogMap = new Map<string, any>();
@@ -27,8 +24,8 @@ async function getAllDialogs(client: any): Promise<any[]> {
           dialogMap.set(key, dialog);
         }
       }
-    } catch (error) {
-      console.error("[AnnualReport] 获取对话列表失败:", error);
+    } catch (error: unknown) {
+      logger.error("[AnnualReport] 获取对话列表失败:", error);
     }
   };
 
@@ -40,8 +37,7 @@ async function getAllDialogs(client: any): Promise<any[]> {
 
 class AnnualReportPlugin extends Plugin {
   cleanup(): void {
-    // 引用重置：清空实例级 db / cache / manager 引用，便于 reload 后重新初始化。
-    this.db = null;
+    // 引用重置：db 由 reload 后重新初始化自动覆盖，无需显式清空。
   }
 
   async setup(): Promise<void> {
@@ -49,7 +45,7 @@ class AnnualReportPlugin extends Plugin {
   }
 
   private readonly PLUGIN_NAME = "annualreport";
-  private db: any;
+  private db!: Awaited<ReturnType<typeof JSONFilePreset<{ startTime: number; reportCount: number }>>>;
   private configPath: string;
 
   constructor() {
@@ -89,8 +85,8 @@ class AnnualReportPlugin extends Plugin {
           channelCount++;
         }
       }
-    } catch (error) {
-      console.error("[AnnualReport] 获取对话统计失败:", error);
+    } catch (error: unknown) {
+      logger.error("[AnnualReport] 获取对话统计失败:", error);
     }
     
     return { private: privateCount, group: groupCount, bots: botsCount, channel: channelCount };
@@ -110,8 +106,8 @@ class AnnualReportPlugin extends Plugin {
       } else if (result.users && result.users.length > 0) {
         return result.users.length;
       }
-    } catch (error) {
-      console.error("[AnnualReport] 获取黑名单失败:", error);
+    } catch (error: unknown) {
+      logger.error("[AnnualReport] 获取黑名单失败:", error);
     }
     
     return 0;
@@ -126,8 +122,8 @@ class AnnualReportPlugin extends Plugin {
         const days = Math.floor((Date.now() - stats.mtime.getTime()) / (1000 * 60 * 60 * 24));
         return days;
       }
-    } catch (error) {
-      console.error("[AnnualReport] 读取LICENSE文件失败:", error);
+    } catch (error: unknown) {
+      logger.error("[AnnualReport] 读取LICENSE文件失败:", error);
     }
     
     // 使用插件安装时间作为备选
@@ -157,8 +153,8 @@ class AnnualReportPlugin extends Plugin {
       }
 
       return userPlugins + systemPlugins;
-    } catch (error) {
-      console.error("[AnnualReport] 统计插件数量失败:", error);
+    } catch (error: unknown) {
+      logger.error("[AnnualReport] 统计插件数量失败:", error);
       return 0;
     }
   }
@@ -176,8 +172,8 @@ class AnnualReportPlugin extends Plugin {
         text += `「${htmlEscape(data.from)}」`;
       }
       return text;
-    } catch (error) {
-      console.error("[AnnualReport] 获取一言失败:", error);
+    } catch (error: unknown) {
+      logger.error("[AnnualReport] 获取一言失败:", error);
       return '"用代码表达言语的魅力，用代码书写山河的壮丽。" —— 一言「一言开发者中心」';
     }
   }
@@ -256,10 +252,10 @@ ${hitokotoText}
 
       await msg.edit({ text: html(reportText) });
 
-    } catch (error: any) {
-      console.error("[AnnualReport] 生成报告失败:", error);
+    } catch (error: unknown) {
+      logger.error("[AnnualReport] 生成报告失败:", error);
       await msg.edit({ 
-        text: html`❌ <b>生成报告失败:</b> ${htmlEscape(error.message || "未知错误")}`
+        text: html`❌ <b>生成报告失败:</b> ${htmlEscape(getErrorMessage(error) || "未知错误")}`
       });
     }
   }

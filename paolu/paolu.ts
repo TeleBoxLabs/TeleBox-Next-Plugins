@@ -4,27 +4,23 @@ import { html } from "@mtcute/html-parser";
 import { getPrefixes } from "@utils/pluginManager";
 import { getGlobalClient } from "@utils/globalClient";
 import { safeGetMe } from "@utils/authGuards";
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
+import type { tl } from "@mtcute/core";
+import type { MtcuteInputPeer } from "@utils/mtcuteTypes";
+import { getRawType } from "@utils/entityTypeGuards";
+import { Long } from "@mtcute/core";
+import { sleep } from "@utils/asyncHelpers";
+import { htmlEscape } from "@utils/htmlEscape";
 
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
 
-// HTML转义工具（每个插件必须实现）
-const htmlEscape = (text: string): string => 
-  text.replace(/[&<>"']/g, m => ({ 
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', 
-    '"': '&quot;', "'": '&#x27;' 
-  }[m] || m));
-
-// 帮助文档常量
 const help_text = `<b>⚠️ 一键跑路</b>
 
 <code>${mainPrefix}paolu</code> - 删除群内所有消息并禁言所有成员
 
 <b>警告：</b>此操作不可逆，请谨慎使用！`;
-
-// 工具函数
-const sleep = (ms: number): Promise<void> =>
-  new Promise((resolve) => setTimeout(resolve, ms));
 
 // Timer tracking for safe cleanup
 const pendingTimers = new Set<ReturnType<typeof setTimeout>>();
@@ -54,7 +50,7 @@ class PaoluPlugin extends Plugin {
     }
 
     // 检查是否群组（非私聊）
-    const chatType = (msg.chat as any)?.type;
+    const chatType = getRawType(msg.chat);
     if (chatType === "user") {
       await msg.edit({ text: html`❌ 仅群组可用` });
       return;
@@ -70,43 +66,43 @@ class PaoluPlugin extends Plugin {
       
       try {
         const chat = await client.getChat(chatId);
-        const ct = (chat as any)?._;
+        const ct = getRawType(chat);
         if (ct === "channel") {
           try {
-            const result: any = await client.call({
+            const result: tl.channels.RawChannelParticipant = await client.call({
               _: 'channels.getParticipant',
-              channel: await client.resolvePeer(chatId) as any,
-              participant: me.id as any,
+              channel: await client.resolveChannel(chatId),
+              participant: await client.resolvePeer(me.id),
             });
             const pType = result?.participant?._;
             isAdmin =
               pType === "channelParticipantAdmin" ||
               pType === "channelParticipantCreator";
-          } catch (permError) {
-            console.log("权限检查失败，尝试备用方法:", permError);
+          } catch (permError: unknown) {
+            logger.info("权限检查失败，尝试备用方法:", permError);
             try {
-              const adminResult: any = await client.call({
+              const adminResult: tl.channels.TypeChannelParticipants = await client.call({
                 _: 'channels.getParticipants',
-                channel: await client.resolvePeer(chatId) as any,
+                channel: await client.resolveChannel(chatId),
                 filter: { _: 'channelParticipantsAdmins' },
                 offset: 0,
                 limit: 100,
-                hash: 0 as any,
+                hash: Long.fromNumber(0),
               });
               if ("users" in adminResult) {
-                const admins = adminResult.users as any[];
+                const admins = adminResult.users as Array<{ id: number }>;
                 isAdmin = admins.some(
                   (admin) => String(admin.id) === String(me.id)
                 );
               }
-            } catch (adminListError) {
-              console.log("管理员列表获取失败:", adminListError);
+            } catch (adminListError: unknown) {
+              logger.info("管理员列表获取失败:", adminListError);
               isAdmin = false;
             }
           }
         }
-      } catch (e) {
-        console.error("权限检查失败:", e);
+      } catch (e: unknown) {
+        logger.error("权限检查失败:", e);
         isAdmin = false;
       }
 
@@ -126,8 +122,9 @@ class PaoluPlugin extends Plugin {
       try {
         await client.call({
           _: 'channels.editBanned',
-          channel: await client.resolvePeer(chatId) as any,
-          participant: "all" as any,
+          channel: await client.resolveChannel(chatId),
+          // TL-layer: channels.editBanned expects TypeInputPeer, cast from string
+          participant: "all" as unknown as MtcuteInputPeer,
           bannedRights: {
             _: 'chatBannedRights',
             untilDate: 0,
@@ -142,11 +139,11 @@ class PaoluPlugin extends Plugin {
             changeInfo: true,
             inviteUsers: true,
             pinMessages: true,
-          } as any,
+          },
         });
-        console.log(`[PAOLU] 已禁言群组 ${chatId}`);
-      } catch (banError) {
-        console.error("[PAOLU] 禁言操作失败:", banError);
+        logger.info(`[PAOLU] 已禁言群组 ${chatId}`);
+      } catch (banError: unknown) {
+        logger.error("[PAOLU] 禁言操作失败:", banError);
       }
 
       // 2. 批量删除消息
@@ -158,44 +155,44 @@ class PaoluPlugin extends Plugin {
         try {
           const chat = await client.getChat(chatId);
           if ("title" in chat) {
-            chatName = (chat as any).title || "未知群组";
+            chatName = chat.title || "未知群组";
           }
-        } catch (error) {
-          console.error("获取群聊信息失败:", error);
+        } catch (error: unknown) {
+          logger.error("获取群聊信息失败:", error);
         }
 
-        console.log(`[PAOLU] 开始删除群组 ${chatName} 的消息`);
+        logger.info(`[PAOLU] 开始删除群组 ${chatName} 的消息`);
 
         let offsetId = 0;
         let hasMore = true;
         
         while (hasMore) {
-          const history: any[] = await client.getHistory(chatId, {
+          const history = await client.getHistory(chatId, {
             limit: BATCH_SIZE,
             ...(offsetId ? { offsetId } : {}),
           });
-          
+
           if (!history || history.length === 0) {
             hasMore = false;
             break;
           }
-          
+
           // 过滤掉当前命令消息
-          const messagesToDelete = history.filter((m: any) => m.id !== msg.id);
-          
+          const messagesToDelete = history.filter((m) => m.id !== msg.id);
+
           if (messagesToDelete.length > 0) {
             try {
-              await client.deleteMessagesById(chatId, messagesToDelete.map((m: any) => m.id), { revoke: true });
+              await client.deleteMessagesById(chatId, messagesToDelete.map((m) => m.id), { revoke: true });
               deletedCount += messagesToDelete.length;
-            } catch (delErr) {
+            } catch (_e: unknown) {
               // 逐个删除
               for (const m of messagesToDelete) {
                 try {
                   await client.deleteMessagesById(chatId, [m.id], { revoke: true });
                   deletedCount++;
                   await sleep(100);
-                } catch (individualError) {
-                  console.error(`[PAOLU] 删除单条消息失败 (ID: ${m.id}):`, individualError);
+                } catch (individualError: unknown) {
+                  logger.error(`[PAOLU] 删除单条消息失败 (ID: ${m.id}):`, individualError);
                 }
               }
             }
@@ -213,44 +210,45 @@ class PaoluPlugin extends Plugin {
           }
         }
 
-        console.log(`[PAOLU] 删除完成，共删除 ${deletedCount} 条消息`);
+        logger.info(`[PAOLU] 删除完成，共删除 ${deletedCount} 条消息`);
 
-      } catch (deleteError) {
-        console.error("[PAOLU] 删除消息失败:", deleteError);
+      } catch (deleteError: unknown) {
+        logger.error("[PAOLU] 删除消息失败:", deleteError);
       }
 
       // 3. 删除命令消息本身
       try {
         await msg.delete();
-      } catch (deleteError) {
-        console.error("[PAOLU] 删除命令消息失败:", deleteError);
+      } catch (deleteError: unknown) {
+        logger.error("[PAOLU] 删除命令消息失败:", deleteError);
       }
 
       // 4. 发送完成提示（自动删除）
       try {
-        const completionMsg: any = await client.sendText(chatId, html`✅ <b>跑路完成</b><br><br>• 已禁言所有成员<br>• 已删除 ${deletedCount} 条消息<br><br>此消息将在10秒后自动删除`);
+        const completionMsg = await client.sendText(chatId, html`✅ <b>跑路完成</b><br><br>• 已禁言所有成员<br>• 已删除 ${deletedCount} 条消息<br><br>此消息将在10秒后自动删除`);
 
         scheduleTimer(async () => {
           try {
-            await completionMsg?.delete();
-          } catch (e) {
-            console.error("[PAOLU] 自动删除完成提示失败:", e);
+            if (completionMsg) await client.deleteMessagesById(chatId, [completionMsg.id], { revoke: true });
+          } catch (e: unknown) {
+            logger.error("[PAOLU] 自动删除完成提示失败:", e);
           }
         }, 10000);
 
-      } catch (sendError) {
-        console.error("[PAOLU] 发送完成提示失败:", sendError);
+      } catch (sendError: unknown) {
+        logger.error("[PAOLU] 发送完成提示失败:", sendError);
       }
 
-    } catch (error: any) {
-      console.error("[PAOLU] 插件执行失败:", error);
+    } catch (error: unknown) {
+      logger.error("[PAOLU] 插件执行失败:", error);
       
       let errorMsg = "❌ 操作失败";
-      if (error.message?.includes("FLOOD_WAIT")) {
-        const waitTime = parseInt(error.message.match(/\d+/)?.[0] || "60");
+      const errMsg = getErrorMessage(error);
+      if (errMsg.includes("FLOOD_WAIT")) {
+        const waitTime = parseInt(errMsg.match(/\d+/)?.[0] || "60");
         errorMsg = `⏳ 操作过于频繁，请等待 ${waitTime} 秒后重试`;
-      } else if (error.message) {
-        errorMsg += `: ${htmlEscape(error.message)}`;
+      } else if (errMsg) {
+        errorMsg += `: ${htmlEscape(errMsg)}`;
       }
       
       await msg.edit({ text: errorMsg });

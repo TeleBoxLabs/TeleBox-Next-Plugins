@@ -3,20 +3,21 @@ import { getGlobalClient } from "@utils/globalClient";
 import { getPrefixes } from "@utils/pluginManager";
 import { createDirectoryInAssets } from "@utils/pathHelpers";
 import type { MessageContext } from "@mtcute/dispatcher";
+import type { MtcuteInputPeerLike, MtcuteReactions } from "@utils/mtcuteTypes";
 import { html } from "@mtcute/html-parser";
 import { JSONFilePreset } from "lowdb/node";
 import * as path from "path";
 import bigInt, { BigInteger } from "big-integer";
 import { safeGetReplyMessage } from "@utils/safeGetMessages";
+import { hasRawType } from "@utils/entityTypeGuards";
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
+import { htmlEscape } from "@utils/htmlEscape";
 
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
 
 // Helper to escape HTML special characters.
-const htmlEscape = (text: string): string =>
-  text.replace(/[&<>"']/g, (m) => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#x27;'
-  }[m] || m));
 
 // A whitelist of standard emojis that are valid for reactions.
 const AVAILABLE_REACTIONS = "👍👎❤️🔥🥰👏😁🤔🤯😱🤬😢🎉🤩🤮💩🙏👌🕊🤡🥱🥴😍🐳❤️‍🔥🌚🌭💯🤣⚡️🍌🏆💔🤨😐🍓🍾💋🖕😈😎😇😤🏻‍💻";
@@ -79,7 +80,7 @@ class TracePlugin extends Plugin {
   public cmdHandlers = { trace: this.handleTrace.bind(this) };
   public listenMessageHandler = this.handleMessage.bind(this);
 
-  private db: any;
+  private db!: Awaited<ReturnType<typeof JSONFilePreset<TraceDB>>>;
   private isPremium: boolean | null = null;
   // [MODIFIED] Added a property to store our own user ID.
   private meId: BigInteger | null = null;
@@ -142,10 +143,10 @@ class TracePlugin extends Plugin {
     let timer: ReturnType<typeof setTimeout>;
     timer = setTimeout(() => {
       this.pendingDeleteTimers.delete(timer);
-      msg.delete().catch(() => {});
+      msg.delete().catch(() => { /* msg may already be deleted */ });
     }, seconds * 1000);
-    if (typeof (timer as any).unref === "function") {
-      (timer as any).unref();
+    if (typeof (timer as { unref?: () => void }).unref === "function") {
+      (timer as { unref: () => void }).unref();
     }
     this.pendingDeleteTimers.add(timer);
   }
@@ -167,9 +168,9 @@ class TracePlugin extends Plugin {
     if (this.meId === null) {
         const client = await getGlobalClient();
         if (client) {
-            const me = await client.getMe() as any;
+            const me = await client.getMe() as { premium?: boolean; id?: number | bigint } | undefined;
             this.isPremium = me?.premium || false;
-            this.meId = me?.id || null;
+            this.meId = me?.id != null ? (typeof me.id === 'bigint' ? bigInt(me.id) : bigInt(Number(me.id))) : null;
         } else {
             this.isPremium = false;
         }
@@ -216,11 +217,11 @@ class TracePlugin extends Plugin {
       
       await msg.edit({ text: html(help_text) });
 
-    } catch (error: any) {
-      console.error("[trace] Error handling command:", error);
+    } catch (error: unknown) {
+      logger.error("[trace] Error handling command:", error);
       const errorMsg = `❌ <b>操作失败</b>\n` +
-                      `├ 💔 错误类型: ${error.name || 'Unknown'}\n` +
-                      `├ 📝 错误信息: ${htmlEscape(error.message)}\n` +
+                      `├ 💔 错误类型: ${error instanceof Error ? error.name : 'Unknown'}\n` +
+                      `├ 📝 错误信息: ${htmlEscape(getErrorMessage(error))}\n` +
                       `└ 💡 请检查命令格式或稍后重试`;
       await msg.edit({ text: html(errorMsg) });
     }
@@ -259,8 +260,8 @@ class TracePlugin extends Plugin {
           }
         }
       }
-    } catch (error) {
-      console.error("[trace] Listener failed to send reaction:", error);
+    } catch (error: unknown) {
+      logger.error("[trace] Listener failed to send reaction:", error);
     }
   }
 
@@ -400,9 +401,12 @@ class TracePlugin extends Plugin {
     response += `👤 <b>追踪的用户</b> (${userCount})\n`;
     if (userCount > 0) {
         response += `┌──────────\n`;
-        let index = 0;
-        for (const userId in users) {
-            const userEntity = await this.formatEntity(userId);
+        const userIds = Object.keys(users);
+        const userEntities = await Promise.all(
+            userIds.map((userId) => this.formatEntity(userId))
+        );
+        userIds.forEach((userId, index) => {
+            const userEntity = userEntities[index];
             const standardEmojis = users[userId].filter((r: string | BigInteger) => typeof r === 'string');
             const customEmojis = users[userId].filter((r: string | BigInteger) => typeof r !== 'string');
             const reactions = standardEmojis.join('') + 
@@ -410,8 +414,7 @@ class TracePlugin extends Plugin {
             const prefix = index === userCount - 1 ? '└' : '├';
             response += `${prefix} ${userEntity.display}\n`;
             response += `${prefix === '└' ? ' ' : '│'} └ ${reactions}\n`;
-            index++;
-        }
+        });
     } else {
         response += `└ <i>暂无追踪用户</i>\n`;
     }
@@ -490,16 +493,17 @@ class TracePlugin extends Plugin {
     await this.editAndDelete(msg, configMsg, 10);
   }
 
-  private async formatEntity(target: string | any, mention?: boolean, throwErrorIfFailed?: boolean) {
+  private async formatEntity(target: string | { _?: unknown; id?: number | bigint; title?: string; firstName?: string; lastName?: string; username?: string }, mention?: boolean, throwErrorIfFailed?: boolean) {
     const client = await getGlobalClient();
     if (!client) throw new Error("客户端未初始化");
-    let id: any, entity: any;
+    let id: number | bigint | undefined;
+    let entity: { _?: unknown; id?: number | bigint; title?: string; firstName?: string; lastName?: string; username?: string | null } | undefined;
     try {
-      entity = (typeof target !== 'string' && (target as any)?._) ? target : await client?.getChat(target);
+      entity = (typeof target !== 'string' && target?._) ? target : await client?.getChat(target as MtcuteInputPeerLike);
       if (!entity) throw new Error("无法获取entity");
       id = entity.id;
-    } catch (e: any) {
-      if (throwErrorIfFailed) throw new Error(`无法获取 ${target}: ${e?.message}`);
+    } catch (e: unknown) {
+      if (throwErrorIfFailed) throw new Error(`无法获取 ${target}: ${e instanceof Error ? e.message : String(e)}`);
     }
     const displayParts: string[] = [];
     if (entity?.title) displayParts.push(htmlEscape(entity.title));
@@ -510,7 +514,7 @@ class TracePlugin extends Plugin {
     }
     if (id) {
       displayParts.push(
-        (entity as any)?._ === 'user'
+        hasRawType(entity, 'user')
           ? `<a href="tg://user?id=${id}">${id}</a>`
           : `<a href="https://t.me/c/${id}">${id}</a>`
       );
@@ -524,11 +528,11 @@ class TracePlugin extends Plugin {
     const customEmojiMap = new Map<number, BigInteger>();
     const customEmojiIndices = new Set<number>();
     if (this.isPremium) {
-        const customEmojiEntities = ((msg as any).entities || []).filter(
-            (e: any) => e?._ === 'messageEntityCustomEmoji'
+        const customEmojiEntities = ((msg as unknown as { entities?: ReadonlyArray<{ _?: string; offset: number; length: number; documentId: bigint }> }).entities || []).filter(
+            (e: { _?: string; offset: number; length: number; documentId: bigint }) => e?._ === 'messageEntityCustomEmoji'
         );
         for (const entity of customEmojiEntities) {
-            customEmojiMap.set(entity.offset, entity.documentId);
+            customEmojiMap.set(entity.offset, bigInt(entity.documentId));
             for (let i = 0; i < entity.length; i++) {
                 customEmojiIndices.add(entity.offset + i);
             }
@@ -567,8 +571,11 @@ class TracePlugin extends Plugin {
     
     await client.call({
       _: "messages.sendReaction",
-      peer, msgId, reaction: reactionObjects, big,
-    } as any);
+      peer,
+      msgId,
+      reaction: reactionObjects as MtcuteReactions,
+      big,
+    });
   }
 
   // Remove duplicate MessageBuilder definition
@@ -620,15 +627,15 @@ class TracePlugin extends Plugin {
           // Use bottom-level API call to edit message with entities
           await client.call({
               _: "messages.editMessage",
-              peer: msg.chat.id,
+              peer: await client.resolvePeer(msg.chat.id),
               id: msg.id,
               message: text,
               entities: entities,
               // Don't use parseMode when using entities
               noWebpage: true
-          } as any);
-      } catch (error) {
-          console.error("[trace] Failed to edit with entities:", error);
+          });
+      } catch (error: unknown) {
+          logger.error("[trace] Failed to edit with entities:", error);
           // Fallback to regular edit without custom emoji entities
           await msg.edit({ text: html(text) });
       }

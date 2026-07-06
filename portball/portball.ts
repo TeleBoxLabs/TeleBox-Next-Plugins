@@ -1,20 +1,18 @@
 import { Plugin } from "@utils/pluginBase";
 import { getPrefixes } from "@utils/pluginManager";
 import type { MessageContext } from "@mtcute/dispatcher";
+import type { MtcuteInputChannel, MtcuteInputPeer } from "@utils/mtcuteTypes";
 import { html } from "@mtcute/html-parser";
 import { getGlobalClient } from "@utils/globalClient";
 import { safeGetReplyMessage } from "@utils/safeGetMessages";
 
 import { safeGetMe } from "@utils/authGuards";
-// HTML转义函数
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
+import { getRawType } from "@utils/entityTypeGuards";
+import { htmlEscape } from "@utils/htmlEscape";
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
-
-const htmlEscape = (text: string): string => 
-  text.replace(/[&<>"']/g, m => ({ 
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', 
-    '"': '&quot;', "'": '&#x27;' 
-  }[m] || m));
 
 const parseTimeString = (timeStr: string): number => {
   const match = timeStr.match(/^(\d+)([smhd])?$/i);
@@ -83,7 +81,8 @@ class PortballPlugin extends Plugin {
 
     try {
       // 检查是否在群组中
-      if (!((msg.chat as any)._ === 'chat' || (msg.chat as any)._ === 'channel')) {
+      const chatType = getRawType(msg.chat);
+      if (!(chatType === 'chat' || chatType === 'channel')) {
         await msg.edit({
           text: html`❌ <b>错误：</b>此命令只能在群组或超级群组中使用`
         });
@@ -150,7 +149,7 @@ class PortballPlugin extends Plugin {
         }
       } else {
         await msg.edit({
-          text: html("❌ <b>错误：</b>参数不足\n\n" + this.helpText)
+          text: html("❌ <b>错误：</b>参数不足<br><br>" + this.helpText)
         });
         await this.autoDelete(msg, 5);
         return;
@@ -171,8 +170,8 @@ class PortballPlugin extends Plugin {
       try {
         await client.call({
           _: 'channels.editBanned',
-          channel: msg.chat.id,
-          participant: sender.id,
+          channel: await client.resolvePeer(msg.chat.id) as unknown as MtcuteInputChannel,
+          participant: await client.resolvePeer(sender.id) as unknown as MtcuteInputPeer,
           bannedRights: {
             _: 'chatBannedRights',
             untilDate: untilDate,
@@ -189,58 +188,60 @@ class PortballPlugin extends Plugin {
             inviteUsers: true,
             pinMessages: true
           }
-        } as any);
+        });
 
         // 构建成功消息
-        let resultText = `🔇 <b>禁言成功</b>\n\n`;
+        let resultText = `🔇 <b>禁言成功</b><br><br>`;
         
         // 获取用户名
         let userName = "";
-        const senderAny = sender as any;
-        if (senderAny._ === 'user') {
-          if (senderAny.firstName && senderAny.lastName) {
-            userName = `${senderAny.firstName} ${senderAny.lastName}`;
-          } else if (senderAny.firstName) {
-            userName = senderAny.firstName;
+        const senderRaw = sender as { _?: string; firstName?: string; lastName?: string; id?: number | bigint };
+        const senderType = getRawType(sender);
+        if (senderType === 'user') {
+          if (senderRaw.firstName && senderRaw.lastName) {
+            userName = `${senderRaw.firstName} ${senderRaw.lastName}`;
+          } else if (senderRaw.firstName) {
+            userName = senderRaw.firstName;
           } else {
-            userName = `用户 ${String(senderAny.id)}`;
+            userName = `用户 ${String(senderRaw.id)}`;
           }
         } else {
-          userName = `用户 ${String(senderAny.id)}`;
+          userName = `用户 ${String(senderRaw.id)}`;
         }
 
-        resultText += `• <b>用户：</b>${htmlEscape(userName)}\n`;
-        resultText += `• <b>时长：</b>${seconds}秒\n`;
+        resultText += `• <b>用户：</b>${htmlEscape(userName)}<br>`;
+        resultText += `• <b>时长：</b>${seconds}秒<br>`;
         
         if (reason) {
-          resultText += `• <b>理由：</b>${htmlEscape(reason)}\n`;
+          resultText += `• <b>理由：</b>${htmlEscape(reason)}<br>`;
         }
         
-        resultText += `\n⏰ 到期自动解除`;
+        resultText += `<br>⏰ 到期自动解除`;
 
         // 发送成功消息
         await client.sendText(msg.chat.id, html(resultText));
 
         // 删除命令消息
-        await msg.delete({ revoke: true } as any);
+        await msg.delete({ revoke: true } as { revoke: boolean });
 
-      } catch (error: any) {
-        console.error("[Portball] 禁言失败:", error);
+      } catch (error: unknown) {
+        logger.error("[Portball] 禁言失败:", error);
         
         let errorMsg = "❌ <b>禁言失败：</b>";
+        const errorMessage = getErrorMessage(error);
         
-        if (error.message?.includes("ADMIN_REQUIRED")) {
+        if (errorMessage.includes("ADMIN_REQUIRED")) {
           errorMsg += "需要管理员权限";
-        } else if (error.message?.includes("USER_ADMIN_INVALID")) {
+        } else if (errorMessage.includes("USER_ADMIN_INVALID")) {
           errorMsg += "无法禁言管理员";
-        } else if (error.message?.includes("CHAT_ADMIN_REQUIRED")) {
+        } else if (errorMessage.includes("CHAT_ADMIN_REQUIRED")) {
           errorMsg += "需要群组管理员权限";
-        } else if (error.message?.includes("CHANNEL_PRIVATE")) {
+        } else if (errorMessage.includes("CHANNEL_PRIVATE")) {
           errorMsg += "无法在私有频道操作";
-        } else if (error.message?.includes("USER_NOT_PARTICIPANT")) {
+        } else if (errorMessage.includes("USER_NOT_PARTICIPANT")) {
           errorMsg += "用户不在群组中";
         } else {
-          errorMsg += htmlEscape(error.message || "未知错误");
+          errorMsg += htmlEscape(errorMessage || "未知错误");
         }
 
         await msg.edit({
@@ -249,10 +250,10 @@ class PortballPlugin extends Plugin {
         await this.autoDelete(msg, 5);
       }
 
-    } catch (error: any) {
-      console.error("[Portball] 处理错误:", error);
+    } catch (error: unknown) {
+      logger.error("[Portball] 处理错误:", error);
       await msg.edit({
-        text: html`❌ <b>处理失败：</b>${error.message || "未知错误"}`
+        text: html`❌ <b>处理失败：</b>${htmlEscape(getErrorMessage(error) || "未知错误")}`
       });
       await this.autoDelete(msg, 5);
     }
@@ -262,10 +263,8 @@ class PortballPlugin extends Plugin {
   private async autoDelete(msg: MessageContext, seconds: number = 5): Promise<void> {
     scheduleTimer(async () => {
       try {
-        await msg.delete({ revoke: true } as any);
-      } catch (error) {
-        // 忽略删除错误
-      }
+        await msg.delete({ revoke: true } as { revoke: boolean });
+      } catch (error: unknown) { logger.warn(`[portball] 忽略删除错误:`, error) }
     }, seconds * 1000);
   }
   cleanup(): void {

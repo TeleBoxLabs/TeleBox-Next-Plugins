@@ -4,6 +4,10 @@ import { getGlobalClient } from "@utils/globalClient";
 import { createCanvas, registerFont } from "canvas";
 import fs from "fs";
 import path from "path";
+import { logger } from "@utils/logger";
+import type { MessageContext } from "@mtcute/dispatcher";
+import type { TelegramClient, InputPeerLike, Chat } from "@mtcute/node";
+import type { Message } from "@mtcute/core";
 
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0] || ".";
@@ -32,8 +36,8 @@ function ensureCjkFont(): void {
       registerFont(fontPath, { family: CJK_FONT_FAMILY });
       cjkFontRegistered = true;
       break;
-    } catch (error) {
-      console.warn(`[cy] 注册中文字体失败: ${fontPath}`, error);
+    } catch (error: unknown) {
+      logger.warn(`[cy] 注册中文字体失败: ${fontPath}`, error);
     }
   }
 }
@@ -107,7 +111,7 @@ function readScheduleConfig(): CyScheduleConfig {
       times: Array.isArray(raw.times) ? raw.times.map(String).filter(isValidTime).slice(0, 12) : [],
       limit: normalizeLimit(raw.limit),
     };
-  } catch {
+  } catch (_e: unknown) {
     return { ...DEFAULT_SCHEDULE };
   }
 }
@@ -143,23 +147,22 @@ function parseTimeArgs(parts: string[], fallbackLimit: number): { times: string[
 }
 
 function stablePeerPart(value: unknown): string {
-  const item: any = value as any;
-  if (!item) return "";
+  if (!value || typeof value !== 'object') return "";
+  const item = value as { channelId?: unknown; chatId?: unknown; userId?: unknown; value?: unknown; id?: unknown };
   if (item.channelId) return `-100${String(item.channelId)}`;
   if (item.chatId) return `-${String(item.chatId)}`;
   if (item.userId) return String(item.userId);
   return String(item.value ?? item.id ?? "");
 }
 
-function targetFromCurrentChat(msg: any): string {
-  const chat: any = (msg as any).chat;
-  if (chat?.username) return `@${chat.username}`;
-  if ((msg as any).chatId) return String((msg as any).chatId);
-  return stablePeerPart((msg as any).peerId);
+function targetFromCurrentChat(msg: MessageContext): string {
+  const chat = msg.chat as Chat;
+  if (chat.username) return `@${chat.username}`;
+  return String(msg.chat.id);
 }
 
-function messageText(msg: any): string {
-  if ((msg as any).sticker) return "";
+function messageText(msg: Message | MessageContext): string {
+  if (msg.media && msg.media.type === 'sticker') return "";
   return String(msg.text || "").trim();
 }
 
@@ -314,12 +317,12 @@ function renderWordCloud(words: WordItem[], limit: number, validMessages: number
   return canvas.toBuffer("image/png");
 }
 
-async function fetchRecentMessages(client: any, peer: any, limit: number): Promise<any[]> {
-  if (!peer || !client) return [];
+async function fetchRecentMessages(client: TelegramClient, peer: InputPeerLike, limit: number): Promise<Message[]> {
+  if (!peer) return [];
   return client.getHistory(peer, { limit });
 }
 
-async function buildCloudImage(client: any, target: any, limit: number): Promise<{ png: Buffer; validMessages: number }> {
+async function buildCloudImage(client: TelegramClient, target: InputPeerLike, limit: number): Promise<{ png: Buffer; validMessages: number }> {
   const messages = await fetchRecentMessages(client, target, limit);
   const counts = new Map<string, number>();
   let validMessages = 0;
@@ -334,7 +337,7 @@ async function buildCloudImage(client: any, target: any, limit: number): Promise
   return { png: renderWordCloud(words, limit, validMessages), validMessages };
 }
 
-async function sendCloudToTarget(client: any, target: any, limit: number, replyTo?: number): Promise<void> {
+async function sendCloudToTarget(client: TelegramClient, target: InputPeerLike, limit: number, replyTo?: number): Promise<void> {
   const { png } = await buildCloudImage(client, target, limit);
   await client.sendMedia(target, {
     type: 'photo',
@@ -393,7 +396,7 @@ class CyPlugin extends Plugin {
   constructor() {
     super();
     this.timer = setInterval(() => {
-      this.tickSchedule().catch((error) => console.error("[cy] 定时词云失败:", error));
+      this.tickSchedule().catch((error) => logger.error("[cy] 定时词云失败:", error));
     }, 30_000);
   }
 
@@ -424,7 +427,7 @@ class CyPlugin extends Plugin {
     }
   }
 
-  cmdHandlers: Record<string, (msg: any, trigger?: any) => Promise<void>> = {
+  cmdHandlers: Record<string, (msg: MessageContext, trigger?: MessageContext) => Promise<void>> = {
     cy: async (msg) => {
       const args = getArgs(String(msg.text || ""));
       const [subCommand = "", ...restParts] = args.split(/\s+/).filter(Boolean);
@@ -492,8 +495,8 @@ class CyPlugin extends Plugin {
       await msg.edit({ text: `正在统计最近 ${limit} 条消息...` });
       try {
         const client = await getGlobalClient();
-        await sendCloudToTarget(client, msg.chatId, limit, (msg as any).replyTo?.replyToTopId || msg.replyToMessage?.id || msg.id);
-      } catch (error) {
+        await sendCloudToTarget(client, msg.chat.id, limit, msg.replyToMessage?.id || msg.id);
+      } catch (_e: unknown) {
         await msg.edit({ text: "没有统计到足够的热词。" });
         return;
       }

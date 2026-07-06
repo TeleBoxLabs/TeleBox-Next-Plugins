@@ -1,6 +1,7 @@
 import { Plugin } from "@utils/pluginBase";
 import { getPrefixes } from "@utils/pluginManager";
 import type { MessageContext } from "@mtcute/dispatcher";
+import type { MtcuteFileDownloadLocation } from "@utils/mtcuteTypes";
 import { html } from "@mtcute/html-parser";
 import { getGlobalClient } from "@utils/globalClient";
 import * as fs from "fs/promises";
@@ -12,6 +13,9 @@ import { createDirectoryInAssets } from "@utils/pathHelpers";
 import { exec } from "child_process";
 import { promisify } from "util";
 import { safeGetReplyMessage } from "@utils/safeGetMessages";
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
+import { htmlEscape } from "@utils/htmlEscape";
 
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
@@ -20,15 +24,6 @@ const commandName = `${mainPrefix}${pluginName}`;
 
 const execAsync = promisify(exec);
 const GH_BASE_DOWNLOAD = "https://github.com/OpenListTeam/OpenList/releases/latest/download";
-
-const htmlEscape = (text: unknown): string =>
-  String(text ?? "").replace(/[&<>"']/g, (m) => ({
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    '"': "&quot;",
-    "'": "&#x27;",
-  }[m] || m));
 
 const codeTag = (text: unknown): string => `<code>${htmlEscape(text)}</code>`;
 const preTag = (text: unknown): string => `<pre>${htmlEscape(text)}</pre>`;
@@ -167,9 +162,11 @@ class OpenListPlugin extends Plugin {
         return;
       }
 
-      const hasSystemd = await this.hasCmd("systemctl");
-      const hasCurl = await this.hasCmd("curl");
-      const hasTar = await this.hasCmd("tar");
+      const [hasSystemd, hasCurl, hasTar] = await Promise.all([
+        this.hasCmd("systemctl"),
+        this.hasCmd("curl"),
+        this.hasCmd("tar"),
+      ]);
       if (!hasSystemd || !hasCurl || !hasTar) {
         const missing = [
           !hasSystemd ? "systemctl" : "",
@@ -255,7 +252,7 @@ class OpenListPlugin extends Plugin {
           `bash -lc 'hostname -I 2>/dev/null | awk "{print $1}"'`
         );
         ip = (stdout || "").trim();
-      } catch {}
+      } catch (e: unknown) { logger.warn('操作失败', e) }
 
       const lines: string[] = [];
       lines.push("安装完成");
@@ -266,9 +263,9 @@ class OpenListPlugin extends Plugin {
         lines.push(`账号: ${username}`);
         lines.push(`密码: ${password}`);
       }
-      await msg.edit({ text: lines.join("\n") });
-    } catch (error: any) {
-      await msg.edit({ text: `安装失败: ${htmlEscape(error?.message || error)}` });
+      await msg.edit({ text: lines.join("<br>") });
+    } catch (error: unknown) {
+      await msg.edit({ text: `安装失败: ${htmlEscape(getErrorMessage(error))}` });
     }
   }
 
@@ -279,9 +276,11 @@ class OpenListPlugin extends Plugin {
         return;
       }
 
-      const hasSystemd = await this.hasCmd("systemctl");
-      const hasCurl = await this.hasCmd("curl");
-      const hasTar = await this.hasCmd("tar");
+      const [hasSystemd, hasCurl, hasTar] = await Promise.all([
+        this.hasCmd("systemctl"),
+        this.hasCmd("curl"),
+        this.hasCmd("tar"),
+      ]);
       if (!hasSystemd || !hasCurl || !hasTar) {
         const missing = [
           !hasSystemd ? "systemctl" : "",
@@ -325,8 +324,8 @@ class OpenListPlugin extends Plugin {
       const verMatch = verOut.match(/Version:\s*([^\s]+)/);
       const version = verMatch ? verMatch[1] : "";
       await msg.edit({ text: `更新完成${version ? `，版本: ${version}` : ""}` });
-    } catch (error: any) {
-      await msg.edit({ text: `更新失败: ${error?.message || error}` });
+    } catch (error: unknown) {
+      await msg.edit({ text: `更新失败: ${getErrorMessage(error)}` });
     }
   }
 
@@ -347,8 +346,8 @@ class OpenListPlugin extends Plugin {
         await execAsync(`rm -rf "${installPath}"`);
       }
       await msg.edit({ text: "已卸载" });
-    } catch (error: any) {
-      await msg.edit({ text: `卸载失败: ${error?.message || error}` });
+    } catch (error: unknown) {
+      await msg.edit({ text: `卸载失败: ${getErrorMessage(error)}` });
     }
   }
 
@@ -369,8 +368,8 @@ class OpenListPlugin extends Plugin {
       await execAsync(`cp -r "${installPath}/data" "${backupDir}/"`);
 
       await msg.edit({ text: `备份成功\n目录: ${codeTag(backupDir)}` });
-    } catch (error: any) {
-      await msg.edit({ text: `备份失败: ${htmlEscape(error?.message || error)}` });
+    } catch (error: unknown) {
+      await msg.edit({ text: `备份失败: ${htmlEscape(getErrorMessage(error))}` });
     }
   }
 
@@ -405,8 +404,8 @@ class OpenListPlugin extends Plugin {
       await execAsync(`systemctl start openlist`);
 
       await msg.edit({ text: "恢复成功" });
-    } catch (error: any) {
-      await msg.edit({ text: `恢复失败: ${htmlEscape(error?.message || error)}` });
+    } catch (error: unknown) {
+      await msg.edit({ text: `恢复失败: ${htmlEscape(getErrorMessage(error))}` });
     }
   }
 
@@ -471,8 +470,8 @@ class OpenListPlugin extends Plugin {
       } else {
         await msg.edit({ text: `执行结果:\n\n${preTag((stdout || "").trim())}` });
       }
-    } catch (error: any) {
-      await msg.edit({ text: `管理命令失败: ${htmlEscape(error?.message || error)}` });
+    } catch (error: unknown) {
+      await msg.edit({ text: `管理命令失败: ${htmlEscape(getErrorMessage(error))}` });
     }
   }
 
@@ -538,8 +537,8 @@ class OpenListPlugin extends Plugin {
       await execAsync(`systemctl start openlist`);
 
       await msg.edit({ text: `端口已修改为 ${port}，服务已重启。` });
-    } catch (error: any) {
-      await msg.edit({ text: `端口修改失败: ${error?.message || error}` });
+    } catch (error: unknown) {
+      await msg.edit({ text: `端口修改失败: ${getErrorMessage(error)}` });
     }
   }
 
@@ -559,18 +558,17 @@ class OpenListPlugin extends Plugin {
         finalPath = db.data.defaultPath || "";
       }
 
-      const media = replyToMsg.media;
+      const media = replyToMsg.media as { type?: string; fileName?: string; mimeType?: string } | null;
       let fileName = "";
 
-      if ((media as any)?.type === 'photo') {
+      if (media?.type === 'photo') {
         fileName = `photo_${Date.now()}.jpg`;
-      } else if ((media as any)?.type === 'document') {
-        const doc = media as any;
-        if (doc.fileName) {
-          fileName = doc.fileName;
+      } else if (media?.type === 'document') {
+        if (media.fileName) {
+          fileName = media.fileName;
         } else {
           let ext = "";
-          switch (doc.mimeType as string) {
+          switch (media.mimeType as string) {
             case "video/mp4": ext = ".mp4"; break;
             case "video/x-matroska": ext = ".mkv"; break;
             case "video/quicktime": ext = ".mov"; break;
@@ -595,7 +593,7 @@ class OpenListPlugin extends Plugin {
       await msg.edit({ text: `正在下载: ${htmlEscape(fileName)}` });
 
       const client = await getGlobalClient();
-      const buffer = await client.downloadAsBuffer(replyToMsg.media as any);
+      const buffer = await client.downloadAsBuffer(replyToMsg.media as MtcuteFileDownloadLocation);
 
       if (!buffer || !(buffer instanceof Buffer)) {
         await msg.edit({ text: "文件下载失败或格式不支持。" });
@@ -611,8 +609,8 @@ class OpenListPlugin extends Plugin {
         await fs.writeFile(savePath, buffer);
         await msg.edit({ text: `文件已保存到: ${codeTag(savePath)}` });
       }
-    } catch (error: any) {
-      await msg.edit({ text: `文件保存失败: ${htmlEscape(error?.message || error)}` });
+    } catch (error: unknown) {
+      await msg.edit({ text: `文件保存失败: ${htmlEscape(getErrorMessage(error))}` });
     }
   }
 
@@ -654,9 +652,9 @@ class OpenListPlugin extends Plugin {
 
       await msg.edit({ text: `✅ 文件已上传到 OpenList: ${codeTag(fullPath)}` });
 
-    } catch (error: any) {
-      console.error("OpenList Upload Error:", error);
-      const errMsg = error?.response?.data?.message || error.message || "未知错误";
+    } catch (error: unknown) {
+      logger.error("OpenList Upload Error:", error);
+      const errMsg = getErrorMessage(error);
       throw new Error(`上传失败: ${errMsg}`);
     }
   }
@@ -669,7 +667,7 @@ class OpenListPlugin extends Plugin {
       const db = await this.getDb();
       dbUser = db.data.username;
       dbPass = db.data.password;
-    } catch (e) {}
+    } catch (e: unknown) { logger.debug("openlist: DB credentials read failed, will try config file", e); }
 
     // 2. Get Config credentials
     let configUser = "";
@@ -682,7 +680,7 @@ class OpenListPlugin extends Plugin {
         let configContent = "";
         try {
           configContent = await fs.readFile(configPath, "utf-8");
-        } catch {
+        } catch (_e: unknown) {
           const { stdout } = await execAsync(`cat "${configPath}" 2>/dev/null`);
           configContent = stdout;
         }
@@ -694,8 +692,8 @@ class OpenListPlugin extends Plugin {
             configPass = config.users[0].password;
           }
         }
-      } catch (e) {
-        console.error("Error reading config:", e);
+      } catch (e: unknown) {
+        logger.error("Error reading config:", e);
       }
     }
 
@@ -726,7 +724,7 @@ class OpenListPlugin extends Plugin {
         return response.data.data.token;
       }
       throw new Error(response.data?.message || "Login failed");
-    } catch (error) {
+    } catch (error: unknown) {
       throw error;
     }
   }
@@ -757,7 +755,7 @@ class OpenListPlugin extends Plugin {
           );
           const m = verOut.match(/Version:\s*([^\s]+)/);
           version = m ? m[1] : "";
-        } catch {}
+        } catch (e: unknown) { logger.warn('操作失败', e) }
       }
 
       let publicIp = "";
@@ -766,7 +764,7 @@ class OpenListPlugin extends Plugin {
           `bash -lc 'curl -s4 --connect-timeout 5 ip.sb || curl -s4 --connect-timeout 5 ifconfig.me'`
         );
         publicIp = (ipOut || "").trim();
-      } catch {}
+      } catch (e: unknown) { logger.warn('操作失败', e) }
 
       const lines: string[] = [];
       lines.push(`<b>状态:</b> ${installed ? `已安装` : "未安装"}`);
@@ -790,14 +788,14 @@ class OpenListPlugin extends Plugin {
               lines.push(`${index + 1}. <b>用户:</b> ${htmlEscape(user.username)} | <b>密码:</b> ${htmlEscape(user.password)}`);
             });
           }
-        } catch (e) {
+        } catch (_e: unknown) {
           lines.push("\n无法解析账户信息。");
         }
       }
 
-      await msg.edit({ text: lines.join("\n") });
-    } catch (error: any) {
-      await msg.edit({ text: `状态获取失败: ${htmlEscape(error?.message || error)}` });
+      await msg.edit({ text: lines.join("<br>") });
+    } catch (error: unknown) {
+      await msg.edit({ text: `状态获取失败: ${htmlEscape(getErrorMessage(error))}` });
     }
   }
 
@@ -824,7 +822,7 @@ class OpenListPlugin extends Plugin {
       );
       const p = (stdout || "").trim();
       if (p) return p;
-    } catch {}
+    } catch (e: unknown) { logger.warn('操作失败', e) }
     return "/opt/openlist";
   }
 
@@ -832,7 +830,7 @@ class OpenListPlugin extends Plugin {
     try {
       await execAsync(`bash -lc 'command -v ${cmd} >/dev/null 2>&1'`);
       return true;
-    } catch {
+    } catch (_e: unknown) {
       return false;
     }
   }
@@ -843,7 +841,7 @@ class OpenListPlugin extends Plugin {
         `bash -lc '[ -d "${path}" ] && echo 1 || echo 0'`
       );
       return stdout.trim() === "1";
-    } catch {
+    } catch (_e: unknown) {
       return false;
     }
   }
@@ -862,7 +860,7 @@ class OpenListPlugin extends Plugin {
         `bash -lc '[ -f "${path}" ] && echo 1 || echo 0'`
       );
       return stdout.trim() === "1";
-    } catch {
+    } catch (_e: unknown) {
       return false;
     }
   }

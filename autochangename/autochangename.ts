@@ -9,13 +9,14 @@ import { html } from "@mtcute/html-parser";
 import { JSONFilePreset } from "lowdb/node";
 import { cronManager } from "@utils/cronManager";
 import * as path from "path";
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
+import { htmlEscape } from "@utils/htmlEscape";
 
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
 
 // === 配置与工具函数 ===
-const htmlEscape = (text: string): string => 
-  text.replace(/[&<>"']/g, m => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#x27;'}[m] || m));
 
 // 帮助文本定义（必需）
 const help_text = `🤖 <b>自动昵称更新插件 v3</b>
@@ -127,7 +128,8 @@ const help_text = `🤖 <b>自动昵称更新插件 v3</b>
 <b>❓ 遇到问题？</b>
 • 使用 <code>${mainPrefix}acn status</code> 检查运行状态
 • 使用 <code>${mainPrefix}acn reset</code> 重置所有设置
-• 重新执行 <code>${mainPrefix}acn save</code> 保存昵称`;
+
+`;
 
 // === 类型定义 ===
 interface UserSettings {
@@ -192,7 +194,7 @@ class DataManager {
     this.initPromise = (async () => {
       const dbPath = path.join(createDirectoryInAssets("autochangename"), "autochangename.json");
       this.db = await JSONFilePreset<ConfigData>(dbPath, { users: {}, random_texts: [] });
-      console.log("[AutoChangeName] 数据库初始化成功");
+      logger.info("[AutoChangeName] 数据库初始化成功");
     })();
     
     return this.initPromise;
@@ -211,7 +213,7 @@ class DataManager {
       this.db!.data.users[settings.user_id.toString()] = { ...settings };
       await this.db!.write();
       return true;
-    } catch { return false; }
+    } catch (e: unknown) { logger.warn('autochangename: saveUserSettings failed', e); return false; }
   }
 
   static async getRandomTexts(): Promise<string[]> {
@@ -228,7 +230,7 @@ class DataManager {
         .filter(t => t.length > 0 && t.length <= 50);
       await this.db!.write();
       return true;
-    } catch { return false; }
+    } catch (e: unknown) { logger.warn('autochangename: saveRandomTexts failed', e); return false; }
   }
 
   static async getAllEnabledUsers(): Promise<number[]> {
@@ -251,7 +253,7 @@ class NameManager {
   private readonly TASK_NAME = "autochangename_update";
   private static instance: NameManager;
   private isUpdating = false;
-  private profileCache: { data: any; timestamp: number } | null = null;
+  private profileCache: { data: { firstName: string; lastName: string }; timestamp: number } | null = null;
   private readonly CACHE_TTL = 60000;
   private readonly timezoneAbbreviationMap: Record<string, string> = {
     'Africa/Abidjan': 'GMT', 'Africa/Accra': 'GMT', 'Africa/Addis_Ababa': 'EAT', 'Africa/Algiers': 'CET',
@@ -417,7 +419,7 @@ class NameManager {
       if (!abbreviation) return null;
       if (/^GMT[+-]/.test(abbreviation)) return null;
       return abbreviation;
-    } catch {
+    } catch (_e: unknown) {
       return null;
     }
   }
@@ -439,7 +441,7 @@ class NameManager {
       const hours = parseInt(match[2], 10);
       const minutes = parseInt(match[3], 10);
       return sign * (hours * 60 + minutes);
-    } catch {
+    } catch (_e: unknown) {
       return null;
     }
   }
@@ -490,7 +492,8 @@ class NameManager {
       
       this.profileCache = { data: profile, timestamp: Date.now() };
       return profile;
-    } catch {
+    } catch (error: unknown) {
+      logger.warn('[autochangename] 获取当前用户资料失败，使用缓存或跳过:', error);
       return null;
     }
   }
@@ -544,7 +547,7 @@ class NameManager {
         return "00:" + timeStr.slice(3);
       }
       return timeStr;
-    } catch {
+    } catch (_e: unknown) {
       const now = new Date();
       return `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
     }
@@ -557,7 +560,7 @@ class NameManager {
       }).split(':')[0]);
       const clocks = ['🕛', '🕐', '🕑', '🕒', '🕓', '🕔', '🕕', '🕖', '🕗', '🕘', '🕙', '🕚'];
       return clocks[hour % 12];
-    } catch { return '🕐'; }
+    } catch (e: unknown) { logger.warn('autochangename: getClockEmoji failed', e); return '🕐'; }
   }
 
   private getDoubleStruckUpper(char: string): string {
@@ -645,7 +648,7 @@ class NameManager {
       const result = await translate(normalized, { to: "en" });
       const translated = typeof result === "string" ? result : result?.text;
       return typeof translated === "string" && translated.trim() ? translated.trim() : normalized;
-    } catch {
+    } catch (_e: unknown) {
       return normalized;
     }
   }
@@ -704,10 +707,10 @@ class NameManager {
       settings.weather_cache_ts = now;
       await DataManager.saveUserSettings(settings);
       return compact;
-    } catch {
+    } catch (e: unknown) {
       settings.weather_compact = "";
       settings.weather_cache_ts = now;
-      try { await DataManager.saveUserSettings(settings); } catch { /* ignore */ }
+      try { await DataManager.saveUserSettings(settings); } catch (e: unknown) { logger.warn('操作失败', e) }
       return "";
     }
   }
@@ -757,8 +760,8 @@ class NameManager {
         return `GMT${sign}${offsetHours}`;
       }
       
-    } catch (error) {
-      console.error('[AutoChangeName] 时区计算失败:', error);
+    } catch (error: unknown) {
+      logger.error('[AutoChangeName] 时区计算失败:', error);
       return 'GMT+8';
     }
   }
@@ -887,14 +890,15 @@ class NameManager {
       settings.last_update = new Date().toISOString();
       await DataManager.saveUserSettings(settings);
       return true;
-    } catch (error: any) {
-      if (error.message?.includes("FLOOD_WAIT")) {
+    } catch (error: unknown) {
+      const errMsg = getErrorMessage(error);
+      if (errMsg.includes("FLOOD_WAIT")) {
         const settings = await DataManager.getUserSettings(userId);
         if (settings && settings.is_enabled) {
           settings.is_enabled = false;
           await DataManager.saveUserSettings(settings);
         }
-      } else if (error.message?.includes("USERNAME_NOT_MODIFIED")) {
+      } else if (errMsg.includes("USERNAME_NOT_MODIFIED")) {
         return true;
       }
       return false;
@@ -920,8 +924,8 @@ class NameManager {
           this.isUpdating = false;
         }
       });
-    } catch (error) {
-      console.error("[AutoChangeName] 启动自动更新失败:", error);
+    } catch (error: unknown) {
+      logger.error("[AutoChangeName] 启动自动更新失败:", error);
     }
   }
 
@@ -975,8 +979,8 @@ class AutoChangeNamePlugin extends Plugin {
       if (enabledUsers.length > 0) {
         nameManager.startAutoUpdate();
       }
-    } catch (e) {
-      console.error("[AutoChangeName] setup 重新初始化失败:", e);
+    } catch (e: unknown) {
+      logger.error("[AutoChangeName] setup 重新初始化失败:", e);
     }
   }
 
@@ -998,7 +1002,7 @@ class AutoChangeNamePlugin extends Plugin {
       try {
         let userId: number | null = null;
         
-        const chatType = (msg.chat as any)?.chatType;
+        const chatType = (msg.chat as { chatType?: string })?.chatType;
         if (chatType === 'channel') {
           await msg.edit({
             text: html(`⚠️ <b>不支持在频道中使用此命令</b><br><br>请在私聊中发送命令来管理动态昵称。`)
@@ -1060,12 +1064,13 @@ class AutoChangeNamePlugin extends Plugin {
             });
         }
 
-      } catch (error: any) {
-        if (error.message?.includes("FLOOD_WAIT")) {
-          const waitTime = parseInt(error.message.match(/\d+/)?.[0] || "60");
+      } catch (error: unknown) {
+        const errMsg = getErrorMessage(error);
+        if (errMsg.includes("FLOOD_WAIT")) {
+          const waitTime = parseInt(errMsg.match(/\d+/)?.[0] || "60");
           await msg.edit({ text: html(`⏳ <b>请求过于频繁</b><br><br>需要等待 ${waitTime} 秒后重试`) });
-        } else if (!error.message?.includes("MESSAGE_ID_INVALID")) {
-          const safeErrorMsg = (error.message || "未知错误").substring(0, 100);
+        } else if (!errMsg.includes("MESSAGE_ID_INVALID")) {
+          const safeErrorMsg = (errMsg || "未知错误").substring(0, 100);
           await msg.edit({ text: html(`❌ <b>操作失败:</b> ${htmlEscape(safeErrorMsg)}`) });
         }
       }
@@ -1170,7 +1175,10 @@ class AutoChangeNamePlugin extends Plugin {
     }
 
     const toggleableComponents = ["time", "text", "weather"] as const;
-    if (!toggleableComponents.includes(action as any)) {
+    function isToggleable(action: string): action is "time" | "text" | "weather" {
+      return (toggleableComponents as readonly string[]).includes(action);
+    }
+    if (!isToggleable(action)) {
       await msg.edit({
         text: html(`❌ <b>acn show 仅支持管理 time/text/weather</b><br><br>emoji 请使用：<br>• <code>${mainPrefix}acn emoji on/off</code>`)
       });
@@ -1239,11 +1247,11 @@ class AutoChangeNamePlugin extends Plugin {
       
       texts.push(...validLines);
       if (await DataManager.saveRandomTexts(texts)) {
-        let res = `✅ <b>文本添加结果</b><br><br>`;
+        let res = `✅ <b>文本添加结果</b>\n\n`;
         if (validLines.length > 0) res += `✅ 成功添加 ${validLines.length} 条\n`;
         if (duplicateLines.length > 0) res += `⚠️ 跳过 ${duplicateLines.length} 条重复\n`;
         if (invalidLines.length > 0) res += `❌ 跳过 ${invalidLines.length} 条超长\n`;
-        await msg.edit({ text: html(res + `\n📊 当前总数: ${texts.length}`) });
+        await msg.edit({ text: html(res + `<br>📊 当前总数: ${texts.length}`) });
       } else {
         await msg.edit({ text: html("❌ 添加失败") });
       }
@@ -1253,13 +1261,22 @@ class AutoChangeNamePlugin extends Plugin {
         texts.splice(index, 1);
         if (await DataManager.saveRandomTexts(texts)) {
           await msg.edit({ text: html(`✅ <b>文本已删除</b><br>📊 剩余数量: ${texts.length}`) });
-        } else await msg.edit({ text: html("❌ 删除失败") });
-      } else await msg.edit({ text: html("❌ 无效的索引号") });
+        } else {
+          await msg.edit({ text: html("❌ 删除失败") });
+        }
+      } else {
+        await msg.edit({ text: html("❌ 无效的索引号") });
+      }
     } else if (action === "list") {
-      if (texts.length === 0) await msg.edit({ text: html(`📝 <b>无随机文本</b><br>使用 <code>${mainPrefix}acn text add 文本</code> 添加`) });
-      else await msg.edit({ text: html(`📝 <b>随机文本列表</b><br><br>${texts.map((t, i) => `)${i + 1}. ${htmlEscape(t)}`).join("\n")}\n\n📊 总数量: ${texts.length}`) });
+      if (texts.length === 0) {
+        await msg.edit({ text: html(`📝 <b>无随机文本</b><br>使用 <code>${mainPrefix}acn text add 文本</code> 添加`) });
+      } else {
+        await msg.edit({ text: html(`📝 <b>随机文本列表</b><br><br>${texts.map((t, i) => `)${i + 1}. ${htmlEscape(t)}`).join("<br>")}<br><br>📊 总数量: ${texts.length}`) });
+      }
     } else if (action === "clear") {
-      if (await DataManager.saveRandomTexts([])) await msg.edit({ text: html("✅ 所有文本已清空") });
+      if (await DataManager.saveRandomTexts([])) {
+        await msg.edit({ text: html("✅ 所有文本已清空") });
+      }
     } else {
       await msg.edit({ text: html(`❌ <b>命令格式错误</b><br>请使用 add, del, list, clear`) });
     }
@@ -1299,7 +1316,8 @@ America/New_York
     if (sub === "format") return this.handleTimezoneFormat(msg, userId, args.slice(1));
 
     const newTimezone = (sub === "set" ? args.slice(1) : args).join(" ").trim();
-    try { new Date().toLocaleString("en-US", { timeZone: newTimezone }); } catch {
+    try { new Date().toLocaleString("en-US", { timeZone: newTimezone }); } catch (e: unknown) {
+      logger.warn('[autochangename] 无效时区标识符:', newTimezone, e);
       return void await msg.edit({ text: html(`❌ <b>无效的时区标识符</b>`) });
     }
 
@@ -1365,7 +1383,7 @@ America/New_York
     userId: number, 
     args: string[], 
     options: {
-      key: keyof UserSettings;
+      key: keyof Pick<UserSettings, 'show_clock_emoji' | 'show_time' | 'show_timezone' | 'weather_enabled'>;
       settingName: string;
       command: string;
       defaultOn?: boolean;
@@ -1376,7 +1394,7 @@ America/New_York
 
     const action = args[0]?.toLowerCase();
     if (action === "on" || action === "off") {
-      (settings as any)[options.key] = action === "on";
+      (settings[options.key] as boolean) = action === "on";
       if (await DataManager.saveUserSettings(settings)) {
         if (settings.is_enabled) await nameManager.updateUserProfile(userId, true);
         await msg.edit({ text: html(`<b>${options.settingName}已${action === "on" ? "开启" : "关闭"}</b>`) });
@@ -1384,9 +1402,9 @@ America/New_York
         await msg.edit({ text: html("❌ 设置保存失败") });
       }
     } else {
-      const isOn = options.defaultOn 
-        ? (settings as any)[options.key] !== false 
-        : (settings as any)[options.key] === true;
+      const isOn = options.defaultOn
+        ? (settings[options.key] as boolean) !== false
+        : (settings[options.key] as boolean) === true;
       await msg.edit({ text: html(`<b>${options.settingName}</b><br>当前: <code>${isOn ? "开启" : "关闭"}</code><br>使用 <code>${mainPrefix}acn ${options.command} on/off</code> 切换`) });
     }
   }
@@ -1490,7 +1508,7 @@ America/New_York
       settings.is_enabled = false;
       await DataManager.saveUserSettings(settings);
       await msg.edit({ text: html("✅ <b>已恢复原始昵称并禁用自动更新</b>") });
-    } catch {
+    } catch (_e: unknown) {
       await msg.edit({ text: html("❌ 重置失败") });
     }
   }
@@ -1498,16 +1516,17 @@ America/New_York
   async init(): Promise<void> {
     try {
       const enabledUsers = await DataManager.getAllEnabledUsers();
-      for (const userId of enabledUsers) {
+      // Parallelize independent user settings checks
+      await Promise.all(enabledUsers.map(async (userId) => {
         const settings = await DataManager.getUserSettings(userId);
         if (settings && !settings.original_first_name) {
           settings.is_enabled = false;
           await DataManager.saveUserSettings(settings);
         }
-      }
+      }));
       if (enabledUsers.length > 0) nameManager.startAutoUpdate();
-    } catch (e) {
-      console.error("[AutoChangeName] 初始化失败:", e);
+    } catch (e: unknown) {
+      logger.error("[AutoChangeName] 初始化失败:", e);
     }
   }
 
@@ -1519,7 +1538,7 @@ America/New_York
 const plugin = new AutoChangeNamePlugin();
 
 if (process.env.TELEBOX_AUTO_INIT !== 'false') {
-  (async () => { try { await plugin.init(); } catch (e) {} })();
+  (async () => { try { await plugin.init(); } catch (e: unknown) { logger.error("autochangename: init failed", e); } })();
 }
 
 export const __test__ = {

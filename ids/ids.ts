@@ -6,12 +6,13 @@ import { html } from "@mtcute/html-parser";
 import { safeGetReplyMessage } from "@utils/safeGetMessages";
 
 import { safeGetMe } from "@utils/authGuards";
-// HTML转义工具
-const htmlEscape = (text: string): string => 
-  text.replace(/[&<>"']/g, m => ({ 
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', 
-    '"': '&quot;', "'": '&#x27;' 
-  }[m] || m));
+import { logger } from "@utils/logger";
+import { hasRawType } from "@utils/entityTypeGuards";
+import type { TelegramClient } from "@mtcute/node";
+import type { tl } from "@mtcute/core";
+import type { MtcuteInputChannel, MtcuteInputUser } from "@utils/mtcuteTypes";
+import { getErrorMessage } from "@utils/errorHelpers";
+import { htmlEscape } from "@utils/htmlEscape";
 
 const codeTag = (text: string | number): string => `<code>${htmlEscape(String(text))}</code>`;
 
@@ -38,6 +39,24 @@ const help_text = `🆔 <b>用户信息查询插件</b>
 
 <b>支持格式：</b>
 • @用户名、用户ID、频道ID、回复消息`;
+
+type UserInfo = {
+  id: number;
+  user: unknown;
+  username: string | null;
+  firstName: string | null;
+  lastName: string | null;
+  isBot: boolean;
+  isVerified: boolean;
+  isPremium: boolean;
+  isScam: boolean;
+  isFake: boolean;
+  dc: string;
+  bio: string | null;
+  commonChats: number;
+  regDate: string;
+  joinedDate: string | null;
+}
 
 class IdsPlugin extends Plugin {
 
@@ -73,7 +92,7 @@ class IdsPlugin extends Plugin {
 
         await msg.edit({ text: html("🔍 <b>正在查询用户信息...</b>") });
 
-        let targetUser: any = null;
+        let targetUser: unknown = null;
         let targetId: number | null = null;
 
         if (target) {
@@ -83,13 +102,14 @@ class IdsPlugin extends Plugin {
           try {
             const reply = await safeGetReplyMessage(msg);
             if (reply) {
-              const replySenderId = (reply as any).senderId;
+              const replySender = (reply as { sender?: { id?: number } }).sender;
+              const replySenderId = replySender?.id;
               if (replySenderId) {
                 targetId = Number(replySenderId);
-                targetUser = (reply as any).sender;
+                targetUser = replySender;
               }
             }
-          } catch {}
+          } catch (e: unknown) { logger.warn('[ids] get reply sender failed:', e) }
         }
 
         if (!targetUser && !targetId) {
@@ -107,8 +127,8 @@ class IdsPlugin extends Plugin {
         const result = this.formatUserInfo(userInfo);
         await this.sendLongMessage(msg, result);
 
-      } catch (error: any) {
-        await msg.edit({ text: html(`❌ <b>查询失败:</b> ${htmlEscape(error.message || "未知错误")}`) });
+      } catch (error: unknown) {
+        await msg.edit({ text: html(`❌ <b>查询失败:</b> ${htmlEscape(getErrorMessage(error) || "未知错误")}`) });
       }
     }
   };
@@ -126,60 +146,60 @@ class IdsPlugin extends Plugin {
     return `${d.getFullYear()}年${d.getMonth() + 1}月`;
   }
 
-  private async getUserInfo(client: any, user: any, userId: number, msg: MessageContext): Promise<any> {
-    const info: any = {
-      id: userId, user, username: user?.username || null,
-      firstName: user?.firstName || user?.first_name || null,
-      lastName: user?.lastName || user?.last_name || null,
-      isBot: user?.bot || false, isVerified: user?.verified || false,
-      isPremium: user?.premium || false, isScam: user?.scam || false,
-      isFake: user?.fake || false, dc: "未知", bio: null, commonChats: 0,
+  private async getUserInfo(client: TelegramClient, user: unknown, userId: number, msg: MessageContext): Promise<UserInfo> {
+    const info: UserInfo = {
+      id: userId, user, username: (user as { username?: string })?.username || null,
+      firstName: (user as { firstName?: string })?.firstName || (user as { first_name?: string })?.first_name || null,
+      lastName: (user as { lastName?: string })?.lastName || (user as { last_name?: string })?.last_name || null,
+      isBot: (user as { bot?: boolean })?.bot || false, isVerified: (user as { verified?: boolean })?.verified || false,
+      isPremium: (user as { premium?: boolean })?.premium || false, isScam: (user as { scam?: boolean })?.scam || false,
+      isFake: (user as { fake?: boolean })?.fake || false, dc: "未知", bio: null, commonChats: 0,
       regDate: this.getPreciseRegDate(userId), joinedDate: null
     };
 
     try {
-      const full: any = await client.call({
+      const full = await client.call({
         _: "users.getFullUser",
-        id: await client.resolvePeer(userId),
-      });
+        id: await client.resolvePeer(userId) as unknown as MtcuteInputUser,
+      }) as { fullUser?: { about?: string; commonChatsCount?: number } };
       if (full.fullUser) {
         info.bio = full.fullUser.about || null;
         info.commonChats = full.fullUser.commonChatsCount || 0;
       }
-    } catch {}
+    } catch (e: unknown) { logger.warn('[ids] get full user info failed:', e) }
 
     const chat = await msg.getCompleteChat();
-    if (chat && (chat as any)._ === 'channel' || (chat as any)._ === 'chat') {
+    if (chat && (hasRawType(chat, 'channel') || hasRawType(chat, 'chat'))) {
       try {
-        const p: any = await client.call({
+        const p = await client.call({
           _: "channels.getParticipant",
-          channel: await client.resolvePeer(msg.chat.id),
+          channel: await client.resolvePeer(msg.chat.id) as unknown as MtcuteInputChannel,
           participant: await client.resolvePeer(userId),
-        });
+        }) as { participant?: { date?: number } };
         if (p.participant?.date) {
           const jd = new Date(p.participant.date * 1000);
           info.joinedDate = `${jd.getFullYear()}-${(jd.getMonth()+1).toString().padStart(2,'0')}-${jd.getDate().toString().padStart(2,'0')} ${jd.getHours().toString().padStart(2,'0')}:${jd.getMinutes().toString().padStart(2,'0')}`;
         }
-      } catch {}
+      } catch (e: unknown) { logger.warn('[ids] get participant info failed:', e) }
     }
 
     info.dc = await this.getUserDC(client, userId, user);
     return info;
   }
 
-  private async getUserDC(client: any, userId: number, user: any): Promise<string> {
+  private async getUserDC(client: TelegramClient, userId: number, user: unknown): Promise<string> {
     try {
-      const full: any = await client.call({
+      const full = await client.call({
         _: "users.getFullUser",
-        id: await client.resolvePeer(userId),
-      });
-      const u = full.users[0];
-      if (u?.photo?._ !== "userProfilePhotoEmpty") return `DC${u.photo.dcId}`;
+        id: await client.resolvePeer(userId) as unknown as MtcuteInputUser,
+      }) as { users?: Array<{ photo?: { _?: string; dcId?: number } }> };
+      const u = full.users?.[0];
+      if (u?.photo?._ !== "userProfilePhotoEmpty" && u?.photo) return `DC${u.photo.dcId}`;
       return "无头像";
-    } catch { return "未知"; }
+    } catch (e: unknown) { logger.warn('ids: getDcId failed', e); return "未知"; }
   }
 
-  private formatUserInfo(info: any): string {
+  private formatUserInfo(info: UserInfo): string {
     const userId = info.id;
     let displayName = info.firstName ? `${info.firstName}${info.lastName ? ' ' + info.lastName : ''}` : (info.username ? `@${info.username}` : `用户 ${userId}`);
     let usernameInfo = info.username ? `@${info.username}` : "无用户名";
@@ -215,14 +235,14 @@ class IdsPlugin extends Plugin {
     return result;
   }
 
-  private async parseTarget(client: any, target: string) {
+  private async parseTarget(client: TelegramClient, target: string) {
     if (target.startsWith("@")) {
       const e = await client.getChat(target);
       return { user: e, id: Number(e.id) };
     }
     const id = parseInt(target);
     if (!isNaN(id)) {
-      try { return { user: await client.getChat(id), id }; } catch { return { user: null, id }; }
+      try { return { user: await client.getChat(id), id }; } catch (e: unknown) { logger.debug('[ids] getChat failed for id:', id, e); return { user: null, id }; }
     }
     throw new Error("无效格式");
   }
@@ -231,8 +251,8 @@ class IdsPlugin extends Plugin {
     if (text.length <= 4096) { await msg.edit({ text: html(text) }); return; }
     const parts = text.match(/[\s\S]{1,4000}/g) || [];
     for (let i = 0; i < parts.length; i++) {
-      if (i === 0) await msg.edit({ text: html(parts[i] + `\n\n📄 (1/${parts.length})`) });
-      else await msg.replyText(html(parts[i] + `\n\n📄 (${i + 1}/${parts.length})`));
+      if (i === 0) await msg.edit({ text: html(parts[i] + `<br><br>📄 (1/${parts.length})`) });
+      else await msg.replyText(html(parts[i] + `<br><br>📄 (${i + 1}/${parts.length})`));
     }
   }
 }

@@ -4,6 +4,8 @@ import { html } from "@mtcute/html-parser";
 import { execFile } from "child_process";
 import util from "util";
 import axios from "axios";
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
 
 const execFilePromise = util.promisify(execFile);
 
@@ -104,7 +106,7 @@ async function getIpLocation(ip: string): Promise<string> {
 
       return "未知";
     }
-  } catch (error) {
+  } catch (error: unknown) {
     try {
       const response = await axios.get(`https://ipinfo.io/${ip}/json`, {
         timeout: 3000,
@@ -146,8 +148,8 @@ async function getIpLocation(ip: string): Promise<string> {
 
         return "未知";
       }
-    } catch (fallbackError) {
-      console.error(
+    } catch (_e: unknown) {
+      logger.error(
         "Both ip.sb and ipinfo.io APIs failed for IP location lookup"
       );
     }
@@ -186,19 +188,20 @@ async function executeDig(args: string[]): Promise<any> {
       output: stdout.trim(),
       isShortOutput: hasShortOutput,
     };
-  } catch (error: any) {
-    console.error("Dig execution error:", error);
+  } catch (error: unknown) {
+    logger.error("Dig execution error:", error);
 
+    const errMsg = getErrorMessage(error);
     if (
-      error.message?.includes("not found") ||
-      error.message?.includes("not recognized")
+      errMsg.includes("not found") ||
+      errMsg.includes("not recognized")
     ) {
       throw new Error(
         "系统未安装 dig 工具。请安装 bind-utils (Linux) 或 dnsutils (Ubuntu/Debian) 包。"
       );
     }
 
-    throw new Error(`DNS 查询失败: ${error.message || error}`);
+    throw new Error(`DNS 查询失败: ${errMsg}`);
   }
 }
 
@@ -228,20 +231,23 @@ async function formatShortDnsResults(
 
     resultText += "\n";
 
-    for (let i = 0; i < displayLines.length; i++) {
-      const line = displayLines[i]?.trim() || "";
+    // 并行查询所有 IP 位置
+    const ipv4Lines = displayLines.filter((l) => isValidIPv4(l?.trim() || ""));
+    const locations = await Promise.all(ipv4Lines.map((l) => getIpLocation(l!.trim())));
+    const locationMap = new Map<string, string | undefined>();
+    ipv4Lines.forEach((l, i) => locationMap.set(l!.trim(), locations[i]));
 
-      if (isValidIPv4(line)) {
-        const location = await getIpLocation(line);
+    for (const line of displayLines) {
+      const trimmed = line?.trim() || "";
+      if (isValidIPv4(trimmed)) {
+        const location = locationMap.get(trimmed);
         if (location) {
-          resultText += `\n\n📍 <code>${htmlEscape(
-            line
-          )}</code>\n   <i>${htmlEscape(location)}</i>`;
+          resultText += `\n\n📍 <code>${htmlEscape(trimmed)}</code>\n   <i>${htmlEscape(location)}</i>`;
         } else {
-          resultText += `\n\n📍 <code>${htmlEscape(line)}</code>`;
+          resultText += `\n\n📍 <code>${htmlEscape(trimmed)}</code>`;
         }
       } else {
-        resultText += `\n\n🔗 <code>${htmlEscape(line)}</code>`;
+        resultText += `\n\n🔗 <code>${htmlEscape(trimmed)}</code>`;
       }
     }
 
@@ -339,6 +345,24 @@ async function formatDetailedDnsResults(
   const displayLines = answerSection.slice(0, 3);
   const hasMore = answerSection.length > 3;
 
+  // 预收集所有需要查询位置的 IPv4 地址，并行查询
+  const ipsToLookup: string[] = [];
+  for (const line of displayLines) {
+    const record = parseDnsRecord(line);
+    if (record) {
+      if (isValidIPv4(record.value)) ipsToLookup.push(record.value);
+    } else {
+      const parts = (line || "").split(/\s+/);
+      const lastPart = parts[parts.length - 1] || "";
+      if (isValidIPv4(lastPart)) ipsToLookup.push(lastPart);
+    }
+  }
+  const locationMap = new Map<string, string>();
+  if (ipsToLookup.length > 0) {
+    const locations = await Promise.all(ipsToLookup.map((ip) => getIpLocation(ip)));
+    ipsToLookup.forEach((ip, i) => { if (locations[i]) locationMap.set(ip, locations[i]!); });
+  }
+
   for (let i = 0; i < displayLines.length; i++) {
     const line = displayLines[i] || "";
     const record = parseDnsRecord(line);
@@ -368,7 +392,7 @@ async function formatDetailedDnsResults(
       }
 
       if (isValidIPv4(record.value)) {
-        const location = await getIpLocation(record.value);
+        const location = locationMap.get(record.value);
         if (location) {
           resultText += `\n   <i>${htmlEscape(location)}</i>`;
         }
@@ -378,7 +402,7 @@ async function formatDetailedDnsResults(
       const lastPart = parts[parts.length - 1] || "";
 
       if (isValidIPv4(lastPart)) {
-        const location = await getIpLocation(lastPart);
+        const location = locationMap.get(lastPart);
         resultText += `\n\n📍 <code>${htmlEscape(lastPart)}</code>`;
         if (location) {
           resultText += `\n   <i>${htmlEscape(location)}</i>`;
@@ -427,18 +451,17 @@ const dig = async (msg: MessageContext) => {
       text: html(resultText),
       disableWebPreview: true,
     });
-  } catch (error: any) {
-    console.error("DNS query error:", error);
+  } catch (error: unknown) {
+    logger.error("DNS query error:", error);
 
     let errorMessage = `❌ <b>DNS 查询失败</b>`;
 
-    if (error.message) {
-      errorMessage += `\n\n<b>错误详情:</b>\n<code>${htmlEscape(
-        error.message
-      )}</code>`;
+    const errMsg = getErrorMessage(error);
+    if (errMsg) {
+      errorMessage += `\n\n<b>错误详情:</b>\n<code>${htmlEscape(errMsg)}</code>`;
     }
 
-    if (error.message?.includes("未安装 dig 工具")) {
+    if (errMsg.includes("未安装 dig 工具")) {
       errorMessage += `\n\n<b>解决方案:</b>
 • Ubuntu/Debian: <code>sudo apt-get install dnsutils</code>
 • RHEL/CentOS: <code>sudo yum install bind-utils</code>

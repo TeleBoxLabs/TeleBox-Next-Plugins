@@ -1,22 +1,40 @@
 import { Plugin } from "@utils/pluginBase";
 import type { TelegramClient } from "@mtcute/node";
 import type { MessageContext } from "@mtcute/dispatcher";
+import type { MtcuteInputChannel, MtcuteInputPeer, MtcuteLong } from "@utils/mtcuteTypes";
 import { html } from "@mtcute/html-parser";
 import { getGlobalClient } from "@utils/globalClient";
 import { getPrefixes } from "@utils/pluginManager";
 import { createDirectoryInAssets } from "@utils/pathHelpers";
 import * as fs from "fs";
 import * as path from "path";
-import { promisify } from "util";
+import { sleep } from "@utils/asyncHelpers";
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
+import { getTitle } from "@utils/entityTypeGuards";
+import type { tl } from "@mtcute/core";
+import Long from "long";
+import { htmlEscape } from "@utils/htmlEscape";
 
-const sleep = promisify(setTimeout);
+/** Raw user object returned by TL API calls like channels.getParticipants */
+interface RawUser {
+  id: number;
+  username?: string;
+  first_name?: string;
+  last_name?: string;
+  deleted?: boolean;
+  status?: tl.TypeUserStatus;
+}
+
+/** Raw participants result from channels.getParticipants */
+interface RawChannelParticipants {
+  count: number;
+  participants: unknown[];
+  users: RawUser[];
+  chats: unknown[];
+}
+
 const CACHE_DIR = createDirectoryInAssets("clean_member_cache");
-
-const htmlEscape = (text: string): string => 
-  text.replace(/[&<>"']/g, m => ({ 
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', 
-    '"': '&quot;', "'": '&#x27;' 
-  }[m] || m));
 
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
@@ -84,8 +102,8 @@ async function ensureDirectories(): Promise<void> {
     if (!fs.existsSync(CACHE_DIR)) {
       fs.mkdirSync(CACHE_DIR, { recursive: true });
     }
-  } catch (error) {
-    console.error('Failed to create cache directory:', error);
+  } catch (error: unknown) {
+    logger.error('Failed to create cache directory:', error);
     throw error;
   }
 }
@@ -124,9 +142,9 @@ async function generateReport(cacheData: CacheData): Promise<string> {
   const csvString = csvContent.map((row) => row.join(",")).join("\n");
   try {
     fs.writeFileSync(reportFile, "\ufeff" + csvString, "utf8");
-    console.log(`Report generated: ${reportFile}`);
-  } catch (error) {
-    console.error('Failed to write report file:', error);
+    logger.info(`Report generated: ${reportFile}`);
+  } catch (error: unknown) {
+    logger.error('Failed to write report file:', error);
     await sleep(1000);
     fs.writeFileSync(reportFile, "\ufeff" + csvString, "utf8");
   }
@@ -160,9 +178,9 @@ async function generateFailedReport(failedUsers: FailedUserInfo[], chatTitle: st
   const csvString = csvContent.map((row) => row.join(",")).join("\n");
   try {
     fs.writeFileSync(reportFile, "\ufeff" + csvString, "utf8");
-    console.log(`Failed report generated: ${reportFile}`);
-  } catch (error) {
-    console.error('Failed to write failed report file:', error);
+    logger.info(`Failed report generated: ${reportFile}`);
+  } catch (error: unknown) {
+    logger.error('Failed to write failed report file:', error);
     await sleep(1000);
     fs.writeFileSync(reportFile, "\ufeff" + csvString, "utf8");
   }
@@ -177,35 +195,35 @@ async function checkAdminPermissions(msg: MessageContext): Promise<boolean> {
     try {
       const result: any = await client.call({
         _: 'channels.getParticipant',
-        channel: await client.resolvePeer(msg.chat.id) as any,
-        participant: me.id as any,
+        channel: await client.resolvePeer(msg.chat.id) as unknown as MtcuteInputChannel,
+        participant: me.id as unknown as MtcuteInputPeer,
       });
       if (result?.participant?._ === 'channelParticipantAdmin' || 
           result?.participant?._ === 'channelParticipantCreator') {
         return true;
       }
-    } catch (participantError) {
-      console.log('GetParticipant failed, trying alternative method:', participantError);
+    } catch (participantError: unknown) {
+      logger.info('GetParticipant failed, trying alternative method:', participantError);
     }
     try {
       const result: any = await client.call({
         _: 'channels.getParticipants',
-        channel: await client.resolvePeer(msg.chat.id) as any,
+        channel: await client.resolvePeer(msg.chat.id) as unknown as MtcuteInputChannel,
         filter: { _: 'channelParticipantsAdmins' },
         offset: 0,
         limit: 100,
-        hash: 0 as any,
+        hash: 0 as unknown as MtcuteLong,
       });
       if ('users' in result) {
-        const admins = result.users as any[];
+        const admins = result.users as RawUser[];
         return admins.some(admin => Number(admin.id) === Number(me.id));
       }
-    } catch (adminListError) {
-      console.log('GetParticipants admin list failed:', adminListError);
+    } catch (adminListError: unknown) {
+      logger.info('GetParticipants admin list failed:', adminListError);
     }
     return false;
-  } catch (error) {
-    console.error('Permission check failed:', error);
+  } catch (error: unknown) {
+    logger.error('Permission check failed:', error);
     return false;
   }
 }
@@ -213,7 +231,7 @@ async function checkAdminPermissions(msg: MessageContext): Promise<boolean> {
 async function removeChatMember(client: TelegramClient, channelEntity: any, userId: number): Promise<void> {
   try {
     const userEntity = await client.resolvePeer(userId);
-    console.log(`正在移出用户: ${userId}`);
+    logger.info(`正在移出用户: ${userId}`);
     await client.call({
       _: 'channels.editBanned',
       channel: channelEntity,
@@ -233,7 +251,7 @@ async function removeChatMember(client: TelegramClient, channelEntity: any, user
         inviteUsers: true,
         pinMessages: true,
       },
-    } as any);
+    });
     await sleep(2000 + Math.random() * 1000);
     await client.call({
       _: 'channels.editBanned',
@@ -254,20 +272,21 @@ async function removeChatMember(client: TelegramClient, channelEntity: any, user
         inviteUsers: false,
         pinMessages: false,
       },
-    } as any);
-    console.log(`用户 ${userId} 已移出并解封，可重新加入`);
-  } catch (error: any) {
-    console.error(`移出用户 ${userId} 失败:`, error);
-    if (error.errorMessage && error.errorMessage.includes("FLOOD_WAIT")) {
-      const seconds = parseInt(error.errorMessage.match(/\d+/)?.[0] || "60");
-      console.log(`遇到频率限制，等待 ${seconds} 秒后重试`);
+    });
+    logger.info(`用户 ${userId} 已移出并解封，可重新加入`);
+  } catch (error: unknown) {
+    logger.error(`移出用户 ${userId} 失败:`, error);
+    const errorMsg = getErrorMessage(error);
+    if (errorMsg.includes("FLOOD_WAIT")) {
+      const seconds = parseInt(errorMsg.match(/\d+/)?.[0] || "60");
+      logger.info(`遇到频率限制，等待 ${seconds} 秒后重试`);
       await sleep(seconds * 1000);
       await removeChatMember(client, channelEntity, userId);
-    } else if (error.errorMessage && error.errorMessage.includes("USER_NOT_PARTICIPANT")) {
-      console.log(`用户 ${userId} 已不在群组中`);
+    } else if (errorMsg.includes("USER_NOT_PARTICIPANT")) {
+      logger.info(`用户 ${userId} 已不在群组中`);
       return;
-    } else if (error.errorMessage && error.errorMessage.includes("CHAT_ADMIN_REQUIRED")) {
-      console.log(`无权限移出用户 ${userId}（可能是管理员）`);
+    } else if (errorMsg.includes("CHAT_ADMIN_REQUIRED")) {
+      logger.info(`无权限移出用户 ${userId}（可能是管理员）`);
       throw error;
     } else {
       throw error;
@@ -275,16 +294,16 @@ async function removeChatMember(client: TelegramClient, channelEntity: any, user
   }
 }
 
-function getLastOnlineDays(user: any): number | null {
+function getLastOnlineDays(user: RawUser): number | null {
   if (!user.status) return null;
-  const statusType = (user.status as any)._;
+  const statusType = user.status._;
   if (statusType === 'userStatusOnline' || statusType === 'userStatusRecently') {
     return 0;
   } else if (statusType === 'userStatusOffline') {
-    if (user.status.wasOnline) {
-      const days = Math.floor((Date.now() - Number(user.status.wasOnline) * 1000) / (1000 * 60 * 60 * 24));
-      return days;
-    }
+    // wasOnline is a Unix timestamp (number) when status is userStatusOffline
+    const wasOnline = user.status.wasOnline;
+    const days = Math.floor((Date.now() - wasOnline * 1000) / (1000 * 60 * 60 * 24));
+    return days;
   } else if (statusType === 'userStatusLastWeek') {
     return 7;
   } else if (statusType === 'userStatusLastMonth') {
@@ -341,10 +360,10 @@ async function streamProcessMembers(options: StreamProcessOptions): Promise<Stre
         filter: { _: 'channelParticipantsRecent' },
         offset: offset,
         limit: limit,
-        hash: 0 as any,
-      } as any);
+        hash: Long.fromNumber(0),
+      });
       if ("users" in participantsResult && participantsResult.users.length > 0) {
-        const users = participantsResult.users as any[];
+        const users = participantsResult.users as RawUser[];
         result.totalScanned += users.length;
         for (const user of users) {
           const uid = Number(user.id);
@@ -365,20 +384,20 @@ async function streamProcessMembers(options: StreamProcessOptions): Promise<Stre
                 q: "",
                 filter: { _: 'inputMessagesFilterEmpty' },
                 minDate,
-                maxDate: undefined as any,
+                maxDate: undefined as unknown as number,
                 offsetId: 0,
                 addOffset: 0,
                 limit: 1,
                 maxId: 0,
                 minId: 0,
-                hash: 0 as any,
+                hash: Long.fromNumber(0),
                 fromId: userEntity,
-              } as any);
+              });
               const cnt = ("count" in res) ? res.count : (res?.messages?.length || 0);
               if (cnt === 0) {
                 shouldProcess = true;
               }
-            } catch (error) {
+            } catch (_e: unknown) {
               continue;
             }
           } else if (mode === "3") {
@@ -389,25 +408,25 @@ async function streamProcessMembers(options: StreamProcessOptions): Promise<Stre
                 peer: chatEntity,
                 q: "",
                 filter: { _: 'inputMessagesFilterEmpty' },
-                minDate: undefined as any,
-                maxDate: undefined as any,
+                minDate: undefined as unknown as number,
+                maxDate: undefined as unknown as number,
                 offsetId: 0,
                 addOffset: 0,
                 limit: 1,
                 maxId: 0,
                 minId: 0,
-                hash: 0 as any,
+                hash: Long.fromNumber(0),
                 fromId: userEntity,
-              } as any);
+              });
               const cnt = ("count" in res) ? res.count : (res?.messages?.length || 0);
               if (cnt < day) {
                 shouldProcess = true;
               }
-            } catch (error) {
+            } catch (_e: unknown) {
               continue;
             }
           } else if (mode === "4") {
-            if ((user as any).deleted) {
+            if ('deleted' in user && (user as { deleted?: boolean }).deleted) {
               shouldProcess = true;
             }
           } else if (mode === "5") {
@@ -417,16 +436,17 @@ async function streamProcessMembers(options: StreamProcessOptions): Promise<Stre
             result.totalFound++;
             const userInfo: UserInfo = {
               id: uid,
-              username: (user as any).username || "",
-              first_name: (user as any).firstName || "",
-              last_name: (user as any).lastName || "",
-              is_deleted: (user as any).deleted || false,
+              username: (user as { username?: string }).username || "",
+              first_name: (user as { firstName?: string }).firstName || "",
+              last_name: (user as { lastName?: string }).lastName || "",
+              is_deleted: 'deleted' in user && (user as { deleted?: boolean }).deleted || false,
               last_online: null,
             };
             if (user.status) {
-              const statusType = (user.status as any)._;
-              if (statusType === 'userStatusOffline' && user.status.wasOnline) {
-                userInfo.last_online = new Date(Number(user.status.wasOnline) * 1000).toISOString();
+              const statusType = user.status._;
+              if (statusType === 'userStatusOffline') {
+                // wasOnline is a Unix timestamp (number) when status is userStatusOffline
+                userInfo.last_online = new Date(user.status.wasOnline * 1000).toISOString();
               } else if (statusType === 'userStatusOnline') {
                 userInfo.last_online = "online";
               } else if (statusType === 'userStatusRecently') {
@@ -440,7 +460,7 @@ async function streamProcessMembers(options: StreamProcessOptions): Promise<Stre
             result.users.push(userInfo);
             if (!onlySearch) {
               if (maxRemove && result.totalRemoved >= maxRemove) {
-                console.log(`已达到移除上限 ${maxRemove} 人，停止处理`);
+                logger.info(`已达到移除上限 ${maxRemove} 人，停止处理`);
                 hasMore = false;
                 break;
               }
@@ -456,15 +476,15 @@ async function streamProcessMembers(options: StreamProcessOptions): Promise<Stre
                 }
                 await sleep(1000 + Math.random() * 500);
                 if (maxRemove && result.totalRemoved >= maxRemove) {
-                  console.log(`已达到移除上限 ${maxRemove} 人，停止处理`);
+                  logger.info(`已达到移除上限 ${maxRemove} 人，停止处理`);
                   hasMore = false;
                   break;
                 }
-              } catch (error: any) {
-                console.error(`Failed to remove user ${uid}:`, error);
+              } catch (error: unknown) {
+                logger.error(`Failed to remove user ${uid}:`, error);
                 const failedUser: FailedUserInfo = {
                   ...userInfo,
-                  error_message: error.message || error.toString()
+                  error_message: getErrorMessage(error)
                 };
                 result.failedUsers.push(failedUser);
               }
@@ -473,7 +493,7 @@ async function streamProcessMembers(options: StreamProcessOptions): Promise<Stre
         }
         if (users.length < limit) {
           hasMore = false;
-          console.log(`批次 ${batchNumber}: 获取 ${users.length} 人，少于限制 ${limit}，结束扫描`);
+          logger.info(`批次 ${batchNumber}: 获取 ${users.length} 人，少于限制 ${limit}，结束扫描`);
         } else {
           offset += limit;
           await sleep(100);
@@ -482,7 +502,7 @@ async function streamProcessMembers(options: StreamProcessOptions): Promise<Stre
         hasMore = false;
       }
       if (offset > 50000) {
-        console.warn("达到最大扫描限制 50000 人");
+        logger.warn("达到最大扫描限制 50000 人");
         break;
       }
     }
@@ -500,8 +520,8 @@ async function streamProcessMembers(options: StreamProcessOptions): Promise<Stre
       }
     }
     return result;
-  } catch (error) {
-    console.error("Stream process error:", error);
+  } catch (error: unknown) {
+    logger.error("Stream process error:", error);
     if (statusCallback) {
       await statusCallback(`❌ 处理失败: ${error}`, true);
     }
@@ -518,16 +538,16 @@ async function getAdminIds(client: TelegramClient, chatEntity: any): Promise<Set
       filter: { _: 'channelParticipantsAdmins' },
       offset: 0,
       limit: 200,
-      hash: 0 as any,
-    } as any);
+      hash: Long.fromNumber(0),
+    });
     if ("users" in result) {
-      const admins = result.users as any[];
+      const admins = result.users as RawUser[];
       for (const admin of admins) {
         adminIds.add(Number(admin.id));
       }
     }
-  } catch (error) {
-    console.error("Failed to get admins:", error);
+  } catch (error: unknown) {
+    logger.error("Failed to get admins:", error);
   }
   return adminIds;
 }
@@ -672,7 +692,7 @@ const clean_member = async (msg: MessageContext) => {
     "5": "所有普通成员",
   };
 
-  let chatTitle = (msg.chat as any)?.title || "当前群组";
+  let chatTitle = getTitle(msg.chat) || "当前群组";
   let chatId: any = msg.chat.id;
   let channelEntity: any;
   
@@ -681,14 +701,14 @@ const clean_member = async (msg: MessageContext) => {
       channelEntity = await client.resolvePeer(targetChatId);
       try {
         const chatInfo = await client.getChat(targetChatId);
-        if (chatInfo && 'title' in chatInfo) {
-          chatTitle = (chatInfo as any).title || "目标群组";
+        if (chatInfo) {
+          chatTitle = getTitle(chatInfo) || "目标群组";
         }
-      } catch (_) {}
+      } catch (e: unknown) { logger.warn('获取聊天信息失败', e) }
       chatId = channelEntity;
-    } catch (error: any) {
+    } catch (error: unknown) {
       await msg.edit({
-        text: html`❌ <b>错误：</b>无法访问指定群组<br><br>请确认群组ID正确且您是该群组成员<br>错误: ${htmlEscape(error.message || error.toString())}`,
+        text: html`❌ <b>错误：</b>无法访问指定群组<br><br>请确认群组ID正确且您是该群组成员<br>错误: ${htmlEscape(getErrorMessage(error))}`,
       });
       return;
     }
@@ -725,10 +745,10 @@ const clean_member = async (msg: MessageContext) => {
           await msg.edit({
             text: progressMessage,
           });
-        } catch (editError: any) {
-          console.log("原消息编辑失败，切换到收藏夹:", editError);
+        } catch (editError: unknown) {
+          logger.info("原消息编辑失败，切换到收藏夹:", editError);
           useOriginalMessage = false;
-          const savedMsg = await client.sendText("me", html`⚠️ <b>原消息已被删除，进度转移到收藏夹</b><br><br>${message}` as any);
+          const savedMsg = await client.sendText("me", html`⚠️ <b>原消息已被删除，进度转移到收藏夹</b><br><br>${message}`);
           if (savedMsg && typeof savedMsg.id === 'number') {
             savedMessageId = savedMsg.id;
           }
@@ -736,44 +756,44 @@ const clean_member = async (msg: MessageContext) => {
       } else {
         if (savedMessageId) {
           try {
-            await msg.edit({text: savedMessageId} as any);
-          } catch (error) {
-            const newMsg = await client.sendText("me", progressMessage as any);
+            await msg.edit({ text: String(savedMessageId) });
+          } catch (_e: unknown) {
+            const newMsg = await client.sendText("me", progressMessage);
             if (newMsg && typeof newMsg.id === 'number') {
               savedMessageId = newMsg.id;
             }
           }
         } else {
-          const newMsg = await client.sendText("me", progressMessage as any);
+          const newMsg = await client.sendText("me", progressMessage);
           if (newMsg && typeof newMsg.id === 'number') {
             savedMessageId = newMsg.id;
           }
         }
       }
-    } catch (error) {
-      console.log("Status update failed:", error);
+    } catch (error: unknown) {
+      logger.info("Status update failed:", error);
     }
   };
   
   let numericChatId: number = 0;
   try {
     if (typeof chatId === "object" && "channelId" in chatId) {
-      numericChatId = Number((chatId as any).channelId);
+      numericChatId = Number((chatId as { channelId?: unknown }).channelId);
     } else if (typeof chatId === "object" && "chatId" in chatId) {
-      numericChatId = Number((chatId as any).chatId);
+      numericChatId = Number((chatId as { chatId?: unknown }).chatId);
     } else {
       numericChatId = Number(chatId);
     }
-  } catch (error) {
-    console.error("Failed to extract numeric chat ID:", error);
+  } catch (error: unknown) {
+    logger.error("Failed to extract numeric chat ID:", error);
   }
   if (onlySearch && numericChatId) {
     const cached = await checkCache(numericChatId, mode, day, statusCallback);
     if (cached) {
       try {
         await generateReport(cached);
-      } catch (error) {
-        console.error("Failed to generate report:", error);
+      } catch (error: unknown) {
+        logger.error("Failed to generate report:", error);
       }
       await msg.edit({
         text: html`✅ 搜索完成（缓存）<br><br>📊 找到 ${cached.total_found} 名符合条件用户<br>📁 报告已保存至 \`${CACHE_DIR}/\`<br><br>💡 执行清理: \`${mainPrefix}clean_member ${mode}${day > 0 ? " " + day : ""}\``,
@@ -841,14 +861,14 @@ const clean_member = async (msg: MessageContext) => {
       });
     } else {
       if (savedMessageId) {
-        await msg.edit({text: savedMessageId} as any);
+        await msg.edit({ text: String(savedMessageId) });
       } else {
-        await client.sendText("me", html(finalMessage) as any);
+        await client.sendText("me", html(finalMessage));
       }
     }
-  } catch (error) {
-    console.error("显示最终结果失败:", error);
-    await client.sendText("me", html(finalMessage) as any);
+  } catch (error: unknown) {
+    logger.error("显示最终结果失败:", error);
+    await client.sendText("me", html(finalMessage));
   }
   if (!useOriginalMessage) {
     try {
@@ -859,10 +879,10 @@ const clean_member = async (msg: MessageContext) => {
         `⚠️ 注意：原消息已被删除，报告已转移到收藏夹\n\n` +
         finalMessage;
       
-      await client.sendText("me", html(reportMessage) as any);
-      console.log("完整报告已发送到收藏夹");
-    } catch (error) {
-      console.error("发送完整报告失败:", error);
+      await client.sendText("me", html(reportMessage));
+      logger.info("完整报告已发送到收藏夹");
+    } catch (error: unknown) {
+      logger.error("发送完整报告失败:", error);
     }
   }
   
@@ -878,10 +898,10 @@ const clean_member = async (msg: MessageContext) => {
         type: 'document' as const,
         file: failedReportPath,
         caption: html(failedCaption),
-      } as any);
-      console.log(`失败用户报告已发送到收藏夹: ${failedReportPath}`);
-    } catch (error) {
-      console.error("生成或发送失败报告失败:", error);
+      });
+      logger.info(`失败用户报告已发送到收藏夹: ${failedReportPath}`);
+    } catch (error: unknown) {
+      logger.error("生成或发送失败报告失败:", error);
     }
   }
 };

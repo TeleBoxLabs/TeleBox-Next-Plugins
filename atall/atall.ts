@@ -1,15 +1,12 @@
 import { Plugin } from "@utils/pluginBase";
 import type { MessageContext } from "@mtcute/dispatcher";
+import type { ChatMember } from "@mtcute/core";
 import { html } from "@mtcute/html-parser";
 import { getGlobalClient } from "@utils/globalClient";
 import { getPrefixes } from "@utils/pluginManager";
-
-// HTML转义函数
-const htmlEscape = (text: string): string => 
-  text.replace(/[&<>"']/g, m => ({ 
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', 
-    '"': '&quot;', "'": '&#x27;' 
-  }[m] || m));
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
+import { htmlEscape } from "@utils/htmlEscape";
 
 // 消息分割函数（限制调整为4000字符）
 const splitMessagesByMention = (mentions: string[], maxLength = 4000): string[] => {
@@ -80,7 +77,7 @@ class AtAllPlugin extends Plugin {
         });
 
         // 获取所有群组成员
-        const participants: any[] = [];
+        const participants: ChatMember[] = [];
         for await (const member of client.iterChatMembers(chatId, {})) {
           participants.push(member);
         }
@@ -132,14 +129,14 @@ class AtAllPlugin extends Plugin {
         const messageParts = splitMessagesByMention(mentionList, 4000);
         
         // 删除处理中消息
-        await msg.delete().catch(() => {});
+        await msg.delete().catch(() => { /* msg may already be deleted */ });
         
         // 发送所有消息部分
         for (let i = 0; i < messageParts.length; i++) {
           const part = messageParts[i];
-          const messageContent = `<b>@所有人:</b>\n${part}`;
+          const messageContent = `<b>@所有人:</b><br>${part}`;
           
-          const sendOpts: any = {};
+          const sendOpts: { replyTo?: number } = {};
           if (i === 0 && msg.id) sendOpts.replyTo = msg.id;
           await client.sendText(chatId, html(messageContent), sendOpts);
           
@@ -148,18 +145,19 @@ class AtAllPlugin extends Plugin {
           }
         }
 
-      } catch (error: any) {
-        console.error("[AtAll Plugin] Error:", error);
-        
+      } catch (error: unknown) {
+        logger.error("[AtAll Plugin] Error:", error);
+
+        const errMsg = getErrorMessage(error);
         let errorMessage = "❌ <b>发生错误:</b> ";
-        if (error.message?.includes("CHAT_ADMIN_REQUIRED")) {
+        if (errMsg.includes("CHAT_ADMIN_REQUIRED")) {
           errorMessage += "需要管理员权限来获取成员列表";
-        } else if (error.message?.includes("USER_NOT_PARTICIPANT")) {
+        } else if (errMsg.includes("USER_NOT_PARTICIPANT")) {
           errorMessage += "不是群组成员";
-        } else if (error.message?.includes("CHANNEL_PRIVATE")) {
+        } else if (errMsg.includes("CHANNEL_PRIVATE")) {
           errorMessage += "无法访问私有频道";
         } else {
-          errorMessage += htmlEscape(error.message || "未知错误");
+          errorMessage += htmlEscape(errMsg || "未知错误");
         }
         
         await msg.edit({ 

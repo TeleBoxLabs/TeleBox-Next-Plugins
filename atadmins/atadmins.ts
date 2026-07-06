@@ -1,19 +1,17 @@
 import { getPrefixes } from "@utils/pluginManager";
 import { Plugin } from "@utils/pluginBase";
 import type { MessageContext } from "@mtcute/dispatcher";
+import type { ChatMember, User } from "@mtcute/core/highlevel/types/index.js";
 import { html } from "@mtcute/html-parser";
 import { getGlobalClient } from "@utils/globalClient";
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
+import { hasRawType, isParticipantAdmin, isParticipantCreator } from "@utils/entityTypeGuards";
+import { htmlEscape } from "@utils/htmlEscape";
 
 // 获取命令前缀
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
-
-// HTML转义工具
-const htmlEscape = (text: string): string => 
-  text.replace(/[&<>"']/g, m => ({ 
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', 
-    '"': '&quot;', "'": '&#x27;' 
-  }[m] || m));
 
 // 帮助文档
 const help_text = `👮 <b>一键 AT 管理员</b>
@@ -80,10 +78,10 @@ class AtAdminsPlugin extends Plugin {
         // 执行AT管理员功能
         await this.handleAtAdmins(msg, args);
         
-      } catch (error: any) {
-        console.error("[atadmins] 插件执行失败:", error);
+      } catch (error: unknown) {
+        logger.error("[atadmins] 插件执行失败:", error);
         await msg.edit({
-          text: html(`❌ <b>操作失败:</b> ${htmlEscape(error.message)}`),
+          text: html(`❌ <b>操作失败:</b> ${htmlEscape(getErrorMessage(error))}`),
         });
       }
     }
@@ -119,7 +117,7 @@ class AtAdminsPlugin extends Plugin {
     try {
       // 检查是否在群组中
       const chat = await msg.getCompleteChat();
-      if (!chat || !((chat as any)._ === 'channel' || (chat as any)._ === 'chat')) {
+      if (!chat || (!hasRawType(chat, 'channel') && !hasRawType(chat, 'chat'))) {
         await msg.edit({ 
           text: html(`❌ <b>此命令只能在群组中使用</b><br><br>💡 请在群组中使用 <code>${mainPrefix}atadmins</code> 命令`), 
         });
@@ -127,9 +125,9 @@ class AtAdminsPlugin extends Plugin {
       }
 
       // 获取管理员列表
-      const participants: any[] = [];
+      const participants: Array<ChatMember | User> = [];
       for await (const member of client.iterChatMembers(msg.chat.id, {})) {
-        if ((member as any)._ === 'channelParticipantAdmin' || (member as any)._ === 'channelParticipantCreator' || (member as any).adminRights || (member as any).creator) {
+        if (isParticipantAdmin(member) || isParticipantCreator(member)) {
           participants.push(member);
         }
       }
@@ -139,23 +137,23 @@ class AtAdminsPlugin extends Plugin {
       let botCount = 0;
        
       for (const participant of participants) {
-        const user = participant.user || participant;
-        if (user && !user.deleted) {
-          if (user.bot) {
+        const member = ((participant as { user?: User }).user || participant) as User;
+        if (member && !member.isDeleted) {
+          if (member.isBot) {
             botCount++;
             continue; // 跳过机器人
           }
           
           adminCount++;
-          if (user.username) {
-            admins.push(`@${user.username}`);
+          if (member.username) {
+            admins.push(`@${member.username}`);
           } else {
-            const firstName = user.firstName || "";
-            const lastName = user.lastName || "";
+            const firstName = member.firstName || "";
+            const lastName = member.lastName || "";
             const fullName = `${firstName} ${lastName}`.trim() || "用户";
             // HTML转义用户名
             const escapedName = htmlEscape(fullName);
-            admins.push(`<a href="tg://user?id=${user.id}">${escapedName}</a>`);
+            admins.push(`<a href="tg://user?id=${member.id}">${escapedName}</a>`);
           }
         }
       }
@@ -171,7 +169,7 @@ class AtAdminsPlugin extends Plugin {
       const customMessage = args.join(" ").trim();
       const say = customMessage ? htmlEscape(customMessage) : "召唤本群所有管理员";
       
-      const header = `${say}：\n\n`;
+      const header = `${say}：<br><br>`;
       const chunks = this.chunkMentions(admins, header);
 
       // 逐条发送
@@ -189,29 +187,30 @@ class AtAdminsPlugin extends Plugin {
       scheduleTimer(async () => {
         try {
           await msg.delete({ revoke: true });
-        } catch (deleteError) {
-          console.warn("[atadmins] 删除原消息失败:", deleteError);
+        } catch (deleteError: unknown) {
+          logger.warn("[atadmins] 删除原消息失败:", deleteError);
         }
       }, 3000); // 3秒后删除
       
-    } catch (error: any) {
-      console.error("[atadmins] 获取管理员列表失败:", error);
-      
+    } catch (error: unknown) {
+      logger.error("[atadmins] 获取管理员列表失败:", error);
+
       // 详细错误处理
+      const errMsg = getErrorMessage(error);
       let errorText = "❌ <b>获取管理员列表失败</b>\n\n";
-      
-      if (error.message?.includes("CHAT_ADMIN_REQUIRED")) {
+
+      if (errMsg.includes("CHAT_ADMIN_REQUIRED")) {
         errorText += "💡 <b>原因:</b> 机器人需要管理员权限才能获取管理员列表";
-      } else if (error.message?.includes("CHANNEL_PRIVATE")) {
+      } else if (errMsg.includes("CHANNEL_PRIVATE")) {
         errorText += "💡 <b>原因:</b> 无法访问此群组的管理员信息";
-      } else if (error.message?.includes("FLOOD_WAIT")) {
-        const waitTime = error.message.match(/\d+/)?.[0] || "60";
+      } else if (errMsg.includes("FLOOD_WAIT")) {
+        const waitTime = errMsg.match(/\d+/)?.[0] || "60";
         errorText += `💡 <b>原因:</b> 请求过于频繁，请等待 ${waitTime} 秒后重试`;
       } else {
-        errorText += `💡 <b>错误详情:</b> ${htmlEscape(error.message || "未知错误")}`;
+        errorText += `💡 <b>错误详情:</b> ${htmlEscape(errMsg || "未知错误")}`;
       }
-      
-      await msg.edit({ 
+
+      await msg.edit({
         text: html(errorText),
       });
     }

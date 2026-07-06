@@ -3,8 +3,7 @@ import { Plugin } from "@utils/pluginBase";
 import type { MessageContext } from "@mtcute/dispatcher";
 import { html } from "@mtcute/html-parser";
 import { randomInt } from "crypto";
-
-const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+import { sleep } from "@utils/asyncHelpers";
 
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
@@ -178,8 +177,6 @@ class ZhijiaoPlugin extends Plugin {
       }
 
       const escapedJiaci = htmlEscape(jiaci);
-      const escapedInterpretation = htmlEscape(interpretation);
-      const escapedCombination = htmlEscape(combination);
       const tossDetailLines = tosses.map((toss, idx) =>
         formatTossLine(idx, toss)
       );

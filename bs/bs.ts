@@ -1,15 +1,16 @@
+import type { MessageContext } from "@mtcute/dispatcher";
 import { Plugin } from "@utils/pluginBase";
 import { getPrefixes } from "@utils/pluginManager";
 import { getGlobalClient } from "@utils/globalClient";
 import { createDirectoryInAssets } from "@utils/pathHelpers";
+import { logger } from "@utils/logger";
 import type { Low } from "lowdb";
 import { JSONFilePreset } from "lowdb/node";
 import * as path from "path";
-import type { MessageContext } from "@mtcute/dispatcher";
-import { html } from "@mtcute/html-parser";
+import { sleep } from "@utils/asyncHelpers";
+import { htmlEscape } from "@utils/htmlEscape";
 import { safeGetMessages, safeGetReplyMessage } from "@utils/safeGetMessages";
-
-const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+import type { ClientInternals } from "@utils/clientInternals";
 
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
@@ -56,7 +57,7 @@ async function getDB() {
     dbPromise = JSONFilePreset<BsDB>(filePath, {
       seq: String(defaultTargets.length),
       mode: MODE_SEQUENCE,
-      targets: defaultTargets
+      targets: defaultTargets,
     });
   }
   const db = await dbPromise;
@@ -64,7 +65,7 @@ async function getDB() {
   const data = (db.data ??= {
     seq: String(defaultTargets.length),
     mode: MODE_SEQUENCE,
-    targets: [...defaultTargets]
+    targets: [...defaultTargets],
   });
 
   if (!Array.isArray(data.targets)) {
@@ -113,48 +114,48 @@ async function formatEntity(
   const client = await getGlobalClient();
   if (!client) throw new Error("Telegram 客户端未初始化");
   if (!target) throw new Error("无效的目标");
-  let id: any;
-  let entity: any;
+  let id: number | undefined;
+  let entity: { id?: number; title?: string; firstName?: string; lastName?: string; username?: string; type?: string; bot?: boolean; deleted?: boolean; fake?: boolean; scam?: boolean; botBusiness?: boolean } | undefined;
   try {
-    entity = target?.className
+    entity = target?.type
       ? target
-      : ((await client?.getChat(target)) as any);
+      : (await (client as unknown as ClientInternals)?.resolvePeer(target)) as { id?: number; type?: string } | undefined;
     if (!entity) throw new Error("无法获取 entity");
     id = entity.id;
     if (!id) throw new Error("无法获取 entity id");
-  } catch (e: any) {
-    console.error(e);
+  } catch (e: unknown) {
+    logger.error("[bs] 获取 entity 失败:", e);
     if (throwErrorIfFailed)
       throw new Error(
-        `无法获取 ${target} 的 entity: ${e?.message || "未知错误"}`
+        `无法获取 ${target} 的 entity: ${e instanceof Error ? e.message : "未知错误"}`
       );
   }
   const displayParts: string[] = [];
 
-  if (entity?.title) displayParts.push(escapeHtml(entity.title));
-  if (entity?.firstName) displayParts.push(escapeHtml(entity.firstName));
-  if (entity?.lastName) displayParts.push(escapeHtml(entity.lastName));
+  if (entity?.title) displayParts.push(htmlEscape(entity.title));
+  if (entity?.firstName) displayParts.push(htmlEscape(entity.firstName));
+  if (entity?.lastName) displayParts.push(htmlEscape(entity.lastName));
   if (entity?.username)
     displayParts.push(
       mention
-        ? escapeHtml(`@${entity.username}`)
-        : `<code>@${escapeHtml(entity.username)}</code>`
+        ? htmlEscape(`@${entity.username}`)
+        : `<code>@${htmlEscape(entity.username)}</code>`
     );
 
-  if (id) {
+  if (id && entity) {
     displayParts.push(
-      entity?._ === "user"
+      entity.type === "user"
         ? `<a href="tg://user?id=${id}">${id}</a>`
         : `<a href="https://t.me/c/${id}">${id}</a>`
     );
-  } else if (!target?.className) {
-    displayParts.push(`<code>${escapeHtml(String(target))}</code>`);
+  } else if (!target?.type) {
+    displayParts.push(`<code>${htmlEscape(String(target))}</code>`);
   }
 
   return {
     id,
     entity,
-    display: displayParts.join(" ").trim()
+    display: displayParts.join(" ").trim(),
   };
 }
 
@@ -241,7 +242,7 @@ function buildEntityLink(entity: any): string | undefined {
       entity.peer?.chatId
   );
   if (cleaned) {
-    if (entity?._ === "user" || entity?.className === "User") {
+    if (entity.type === "user" || entity?.type === "user") {
       return `tg://user?id=${cleaned}`;
     }
     return `https://t.me/c/${cleaned}`;
@@ -267,7 +268,7 @@ function buildMessageLink(entity: any, messageId: number): string | undefined {
       entity.peer?.chatId
   );
   if (cleaned) {
-    if (entity?._ === "user" || entity?.className === "User") {
+    if (entity.type === "user" || entity?.type === "user") {
       return `tg://user?id=${cleaned}`;
     }
     return `https://t.me/c/${cleaned}/${messageId}`;
@@ -349,17 +350,17 @@ function buildReplyToForMessage(
     undefined;
 
   if (typeof topMsgId === "number") {
-    return { _: "inputReplyToMessage", replyToMsgId: message.id, topMsgId } as any;
+    return { replyToMsgId: message.id, topMsgId };
   }
 
-  return message.id;
+  return message.id ?? 0;
 }
 
 function renderTarget(target: TargetRecord): string {
   const display =
-    target.display?.trim() || `<code>${escapeHtml(target.target)}</code>`;
+    target.display?.trim() || `<code>${htmlEscape(target.target)}</code>`;
   const topic = target.topicId
-    ? ` | 话题: <code>${escapeHtml(target.topicId)}</code>`
+    ? ` | 话题: <code>${htmlEscape(target.topicId)}</code>`
     : "";
   return `[<code>${target.id}</code>] ${display}${topic}`;
 }
@@ -394,16 +395,18 @@ function getTargetLookup(target: TargetRecord): any {
     if (Number.isFinite(num)) return num;
     try {
       return BigInt(target.chatId);
-    } catch {}
+    } catch (e: unknown) {
+      logger.warn('[bs] chatId 非数字，返回原始值');
+    }
     return target.chatId;
   }
   return target.target;
 }
 
-function getRpcErrorMessage(error: any): string {
+function getRpcErrorMessage(error: unknown): string {
   if (!error) return "";
-  if (typeof error?.errorMessage === "string") return error.errorMessage;
-  if (typeof error?.message === "string") return error.message;
+  if (typeof error === "object" && error !== null && "errorMessage" in error && typeof (error as { errorMessage: unknown }).errorMessage === "string") return (error as { errorMessage: string }).errorMessage;
+  if (error instanceof Error) return error.message;
   return String(error);
 }
 
@@ -419,17 +422,21 @@ function isPermissionError(message: string): boolean {
   return codes.some((code) => message.includes(code));
 }
 
-function extractForwardedMessages(result: any): any[] {
-  const forwarded: any[] = [];
-  if ("updates" in result) {
+function extractForwardedMessages(result: { updates?: unknown[] }): Record<string, unknown>[] {
+  const forwarded: Record<string, unknown>[] = [];
+  if (result.updates) {
     for (const update of result.updates) {
       if (
-        update?._ === "updateNewMessage" ||
-        update?._ === "updateNewChannelMessage"
+        update != null &&
+        typeof update === "object" &&
+        "type" in update &&
+        ((update as { type: string }).type === "newMessage" ||
+          (update as { type: string }).type === "newChannelMessage") &&
+        "message" in update
       ) {
-        const { message } = update;
-        if (message && message._ === "message") {
-          forwarded.push(message);
+        const { message } = update as { message: unknown };
+        if (message && typeof message === "object") {
+          forwarded.push(message as Record<string, unknown>);
         }
       }
     }
@@ -445,11 +452,11 @@ async function forwardToTarget(options: {
 }) {
   const { client, fromPeer, target, messageIds } = options;
   const lookup = getTargetLookup(target);
-  let entity: any;
+  let entity: { id?: number; title?: string; firstName?: string; lastName?: string; username?: string; type?: string; bot?: boolean; deleted?: boolean; fake?: boolean; scam?: boolean; botBusiness?: boolean } | undefined;
   try {
-    entity = await client.getChat(lookup as any);
-  } catch (error) {
-    console.warn(`[bs] 获取对话 ${target.target} 失败`, error);
+    entity = await (client as unknown as ClientInternals).resolvePeer(lookup as string | number) as { id?: number; title?: string; firstName?: string; lastName?: string; username?: string; type?: string; bot?: boolean; deleted?: boolean; fake?: boolean; scam?: boolean; botBusiness?: boolean } | undefined;
+  } catch (error: unknown) {
+    logger.warn(`[bs] 获取对话 ${target.target} 失败`, error);
     return { success: false, error: getRpcErrorMessage(error) };
   }
 
@@ -464,7 +471,7 @@ async function forwardToTarget(options: {
 
   if (
     !target.display ||
-    target.display === `<code>${escapeHtml(target.target)}</code>`
+    target.display === `<code>${htmlEscape(target.target)}</code>`
   ) {
     const info = await formatEntity(entity).catch(() => null);
     if (info?.display) {
@@ -474,7 +481,7 @@ async function forwardToTarget(options: {
   }
 
   let retryFlood = false;
-  const toPeer = await client.getInputEntity(entity);
+  const toPeer = await (client as unknown as ClientInternals).resolvePeer(entity);
 
   while (true) {
     try {
@@ -485,15 +492,15 @@ async function forwardToTarget(options: {
         toPeer,
         ...(target.topicId
           ? { topMsgId: toInt(target.topicId) ?? undefined }
-          : {})
-      } as any);
+          : {}),
+      });
       return {
         success: true,
         entity,
         forwarded: extractForwardedMessages(result),
-        updated
+        updated,
       };
-    } catch (error: any) {
+    } catch (error: unknown) {
       const errorMessage = getRpcErrorMessage(error);
 
       if (errorMessage.startsWith("FLOOD_WAIT")) {
@@ -511,14 +518,10 @@ async function forwardToTarget(options: {
       }
 
       if (isPermissionError(errorMessage)) {
-        console.warn(
+        logger.warn(
           `[bs] 在目标 ${target.target} 没有发送权限: ${errorMessage}`
         );
         return { success: false, error: errorMessage };
-      }
-
-      if (typeof error?.errorMessage === "string") {
-        throw new Error(error.errorMessage);
       }
 
       throw new Error(errorMessage || "无法转发消息");
@@ -570,14 +573,14 @@ async function collectMessages(
   while (messageIds.length < desiredCount && currentId < startId + maxSearch) {
     try {
       const fetched = await safeGetMessages(client, peer, {
-        ids: [currentId]
+        ids: [currentId],
       });
       const candidate = Array.isArray(fetched) ? fetched[0] : fetched;
       if (candidate && candidate.id) {
         messageIds.push(candidate.id);
       }
-    } catch (error) {
-      console.warn(`[bs] 获取消息 ${currentId} 失败`, error);
+    } catch (error: unknown) {
+      logger.warn(`[bs] 获取消息 ${currentId} 失败`, error);
     }
     currentId += 1;
   }
@@ -611,7 +614,7 @@ async function sendSourceFeedback(options: {
       (typeof success.target.target === "string"
         ? success.target.target
         : "目标");
-    const targetName = escapeHtml(targetNameRaw);
+    const targetName = htmlEscape(targetNameRaw);
     const targetLink = buildEntityLink(success.entity);
     const targetHtml = targetLink
       ? `<a href="${escapeAttribute(targetLink)}">${targetName}</a>`
@@ -623,16 +626,12 @@ async function sendSourceFeedback(options: {
   if (!responses.length) return;
 
   try {
-    // await client.sendText(fromPeer, "")`,
-    //
-    //
-    //   replyTo: buildReplyToForMessage(replyMessage),
-    // });
     await msg.edit({
-      text: `亲爱的被观察者 您的 ${responses.join("\n")}`
+      text: `亲爱的被观察者 您的 ${responses.join("\n")}`,
+      linkPreview: false,
     });
-  } catch (error) {
-    console.warn("[bs] 回复原消息失败", error);
+  } catch (error: unknown) {
+    logger.warn("[bs] 回复原消息失败", error);
   }
 }
 
@@ -640,17 +639,17 @@ async function sendTargetFeedback(options: {
   client: any;
   replyMessage: any;
   successes: ForwardSuccess[];
-  sourceEntity: any;
+  sourceEntity: { id?: number; title?: string; firstName?: string; lastName?: string; username?: string; type?: string; bot?: boolean; deleted?: boolean; fake?: boolean; scam?: boolean; botBusiness?: boolean } | undefined;
   originalMessageIds: number[];
 }) {
   const { client, replyMessage, successes, sourceEntity, originalMessageIds } =
     options;
   if (!successes.length) return;
 
-  const originEntity = sourceEntity ?? (replyMessage as any).peerId ?? replyMessage.chat?.id;
+  const originEntity = sourceEntity ?? replyMessage.peerId;
   const sourceNameRaw = getEntityDisplayName(originEntity) ?? "来源对话";
   const sourceLink = buildEntityLink(originEntity);
-  const sourceName = escapeHtml(sourceNameRaw);
+  const sourceName = htmlEscape(sourceNameRaw);
   const sourceText = sourceLink
     ? `<a href="${escapeAttribute(sourceLink)}">${sourceName}</a>`
     : sourceName;
@@ -684,12 +683,14 @@ async function sendTargetFeedback(options: {
       ? toInt(success.target.topicId) ?? undefined
       : undefined;
 
-        try {
-      await client.sendText(success.entity, html(textParts.filter(Boolean).join("<br>")), {
+    try {
+      await client.sendText(success.entity, textParts.filter(Boolean).join("<br>"), {
+        linkPreview: false,
         replyTo: replyToMsgId,
-      } as any);
-    } catch (error) {
-      console.warn(
+        topMsgId,
+      });
+    } catch (error: unknown) {
+      logger.warn(
         `[bs] 在目标 ${success.target.target} 回复转发消息失败`,
         error
       );
@@ -697,21 +698,21 @@ async function sendTargetFeedback(options: {
   }
 }
 
-const helpResponse = `🛰️ <b>保送插件</b>\n\n${escapeHtml(helpText)}`;
+const helpResponse = `🛰️ <b>保送插件</b>\n\n${htmlEscape(helpText)}`;
 
 class BsPlugin extends Plugin {
 
-  description: string = `保送被回复的消息至指定目标<br><br>${helpText}`;
+  description: string = `保送被回复的消息至指定目标\n\n${helpText}`;
 
-  cmdHandlers: Record<string, (msg: MessageContext) => Promise<void>> = {
-    [pluginName]: async (msg: MessageContext) => {
+  cmdHandlers: Record<string, (msg: any) => Promise<void>> = {
+    [pluginName]: async (msg: any) => {
       const client = await getGlobalClient();
       if (!client) {
-        await msg.edit({ text: html`❌ <b>客户端未初始化</b>` });
+        await msg.edit({ text: "❌ <b>客户端未初始化</b>" });
         return;
       }
 
-      const text = msg.text || "";
+      const text = msg.message || msg.text || "";
       const lines = text.trim().split(/\r?\n/);
       const head = lines[0] || "";
       const parts = head.trim().split(/\s+/).filter(Boolean);
@@ -722,31 +723,32 @@ class BsPlugin extends Plugin {
         const count = command ? Number(command) : 1;
         if (!count || count <= 0) {
           await msg.edit({
-            text: html(`❌ <b>消息数必须是正整数</b><br>示例：<code>${commandName} 3</code>`)
+            text: `❌ <b>消息数必须是正整数</b>\n示例：<code>${commandName} 3</code>`,
+            linkPreview: false,
           });
           return;
         }
 
-        if (!(msg as any).isReply && !msg.replyToMessage) {
+        if (!msg.replyToMessage?.id) {
           await msg.edit({
-            text: html("❌ <b>请先回复需要保送的消息</b>")
+            text: "❌ <b>请先回复需要保送的消息</b>",
           });
           return;
         }
 
-        const replyMessage = await safeGetReplyMessage(msg);
+        const replyMessage = await safeGetReplyMessage(msg as unknown as Parameters<typeof safeGetReplyMessage>[0]);
         if (!replyMessage) {
           await msg.edit({
-            text: html("❌ <b>无法获取被回复的消息</b>")
+            text: "❌ <b>无法获取被回复的消息</b>",
           });
           return;
         }
 
         await msg.edit({
-          text: html("🚚 <b>正在保送消息...</b>")
+          text: "🚚 <b>正在保送消息...</b>",
         });
 
-        const peerForFetch = msg.chat.id ?? (replyMessage as any).chat?.id;
+        const peerForFetch = msg.chat?.id ?? (replyMessage as unknown as { chat?: { id?: number } }).chat?.id;
         const { messageIds } = await collectMessages(
           client,
           peerForFetch,
@@ -756,15 +758,15 @@ class BsPlugin extends Plugin {
 
         if (messageIds.length === 0) {
           await msg.edit({
-            text: html("❌ <b>未找到可转发的消息</b>\n请确认消息未被删除")
+            text: "❌ <b>未找到可转发的消息</b>\n请确认消息未被删除",
           });
           return;
         }
 
-        const fromPeer = await client.resolvePeer(msg.chat.id);
+        const fromPeer = await (msg as unknown as { getChat?: () => Promise<unknown> }).getChat?.();
         if (!fromPeer) {
           await msg.edit({
-            text: html("❌ <b>无法解析当前会话</b>")
+            text: "❌ <b>无法解析当前会话</b>",
           });
           return;
         }
@@ -793,7 +795,7 @@ class BsPlugin extends Plugin {
               client,
               fromPeer,
               target,
-              messageIds
+              messageIds,
             });
 
             if (result.updated) {
@@ -802,7 +804,7 @@ class BsPlugin extends Plugin {
 
             if (!result.success) {
               errors.push(
-                `${renderTarget(target)}: ${escapeHtml(
+                `${renderTarget(target)}: ${htmlEscape(
                   result.error || "未知错误"
                 )}`
               );
@@ -812,14 +814,15 @@ class BsPlugin extends Plugin {
             successes.push({
               target,
               forwarded: result.forwarded ?? [],
-              entity: result.entity
+              entity: result.entity,
             });
 
             if (mode === MODE_SEQUENCE) break;
-          } catch (error) {
-            const message = escapeHtml(getRpcErrorMessage(error));
+          } catch (error: unknown) {
+            const message = htmlEscape(getRpcErrorMessage(error));
             await msg.edit({
-              text: html(`❌ <b>保送失败</b>${message ? `<br>${message}` : ""}`)
+              text: `❌ <b>保送失败</b>${message ? `<br>${message}` : ""}`,
+              linkPreview: false,
             });
             return;
           }
@@ -828,8 +831,8 @@ class BsPlugin extends Plugin {
         if (metadataDirty) {
           try {
             await db.write();
-          } catch (error) {
-            console.warn("[bs] 写入对话元数据失败", error);
+          } catch (error: unknown) {
+            logger.warn("[bs] 写入对话元数据失败", error);
           }
         }
 
@@ -839,59 +842,43 @@ class BsPlugin extends Plugin {
               ? `失败原因：\n${errors.map((line) => `- ${line}`).join("\n")}`
               : "未找到可用的目标";
           await msg.edit({
-            text: html(`❌ ${errorText}`)
+            text: `❌ ${errorText}`,
+            linkPreview: false,
           });
           return;
         }
 
-        let sourceEntity: any;
+        let sourceEntity: { id?: number; title?: string; firstName?: string; lastName?: string; username?: string; type?: string; bot?: boolean; deleted?: boolean; fake?: boolean; scam?: boolean; botBusiness?: boolean } | undefined;
         try {
-          sourceEntity = await client.getChat(fromPeer);
-        } catch (error) {
-          console.warn("[bs] 获取来源会话失败", error);
+          sourceEntity = await (client as unknown as ClientInternals).resolvePeer(fromPeer) as { id?: number; title?: string; firstName?: string; lastName?: string; username?: string; type?: string; bot?: boolean; deleted?: boolean; fake?: boolean; scam?: boolean; botBusiness?: boolean } | undefined;
+        } catch (error: unknown) {
+          logger.warn("[bs] 获取来源会话失败", error);
         }
 
         await sendSourceFeedback({
           msg,
           client,
           fromPeer,
-          replyMessage,
+          replyMessage: replyMessage,
           successes,
-          messageCount: messageIds.length
+          messageCount: messageIds.length,
         });
 
         await sendTargetFeedback({
           client,
-          replyMessage,
+          replyMessage: replyMessage,
           successes,
           sourceEntity,
-          originalMessageIds: messageIds
+          originalMessageIds: messageIds,
         });
-
-        // if (mode === MODE_SEQUENCE) {
-        //   const { target } = successes[0];
-        //   await msg.edit({
-        //     text: `✅ 已保送至 ${renderTarget(target)}`,
-        //
-        //
-        //   });
-        // } else {
-        //   const list = successes
-        //     .map(({ target }) => `- ${renderTarget(target)}`)
-        //     .join("\n");
-        //   await msg.edit({
-        //     text: `✅ 已尝试保送至以下目标：\n${list}`,
-        //
-        //
-        //   });
-        // }
 
         return;
       }
 
       if (["help", "h", "说明"].includes(command)) {
         await msg.edit({
-          text: html(helpResponse)
+          text: helpResponse,
+          linkPreview: false,
         });
         return;
       }
@@ -901,7 +888,7 @@ class BsPlugin extends Plugin {
         const rawTarget = sanitizeTargetInput(args[1]);
         if (!rawTarget) {
           await msg.edit({
-            text: html(`❌ <b>请提供对话 ID 或 @名称</b>`)
+            text: `❌ <b>请提供对话 ID 或 @名称</b>`,
           });
           return;
         }
@@ -913,7 +900,7 @@ class BsPlugin extends Plugin {
 
         if (!targetInput) {
           await msg.edit({
-            text: html(`❌ <b>无效的目标</b>`)
+            text: `❌ <b>无效的目标</b>`,
           });
           return;
         }
@@ -926,21 +913,21 @@ class BsPlugin extends Plugin {
             target: targetInput,
             chatId: toStrInt(info?.id),
             topicId: sanitizeTargetInput(topicInput),
-            display: info?.display || `<code>${escapeHtml(targetInput)}</code>`,
+            display: info?.display || `<code>${htmlEscape(targetInput)}</code>`,
             createdAt: String(Date.now()),
-            updatedAt: String(Date.now())
+            updatedAt: String(Date.now()),
           };
           db.data.targets.push(record);
           await db.write();
 
           await msg.edit({
-            text: html(`✅ 目标 <code>${id}</code> 已添加`)
+            text: `✅ 目标 <code>${id}</code> 已添加`,
           });
-        } catch (error) {
+        } catch (error: unknown) {
           await msg.edit({
-            text: `❌ <b>无法解析目标</b>\n${escapeHtml(
+            text: `❌ <b>无法解析目标</b>\n${htmlEscape(
               getRpcErrorMessage(error)
-            )}`
+            )}`,
           });
         }
         return;
@@ -949,7 +936,8 @@ class BsPlugin extends Plugin {
       if (["ls", "list"].includes(command)) {
         const db = await getDB();
         await msg.edit({
-          text: html(buildListText(db.data.targets, db.data.mode || MODE_SEQUENCE))
+          text: buildListText(db.data.targets, db.data.mode || MODE_SEQUENCE),
+          linkPreview: false,
         });
         return;
       }
@@ -958,7 +946,7 @@ class BsPlugin extends Plugin {
         const targetId = args[1];
         if (!targetId) {
           await msg.edit({
-            text: html("❌ <b>请提供要删除的 ID</b>")
+            text: "❌ <b>请提供要删除的 ID</b>",
           });
           return;
         }
@@ -968,14 +956,14 @@ class BsPlugin extends Plugin {
         );
         if (idx === -1) {
           await msg.edit({
-            text: html(`❌ <b>目标 <code>${escapeHtml(targetId)}</code> 不存在</b>`)
+            text: `❌ <b>目标 <code>${htmlEscape(targetId)}</code> 不存在</b>`,
           });
           return;
         }
         db.data.targets.splice(idx, 1);
         await db.write();
         await msg.edit({
-          text: html(`✅ 目标 <code>${escapeHtml(targetId)}</code> 已移除`)
+          text: `✅ 目标 <code>${htmlEscape(targetId)}</code> 已移除`,
         });
         return;
       }
@@ -984,7 +972,7 @@ class BsPlugin extends Plugin {
         const targetId = args[1];
         if (!targetId) {
           await msg.edit({
-            text: html("❌ <b>请提供要禁用的 ID</b>")
+            text: "❌ <b>请提供要禁用的 ID</b>",
           });
           return;
         }
@@ -992,7 +980,7 @@ class BsPlugin extends Plugin {
         const target = db.data.targets.find((item) => item.id === targetId);
         if (!target) {
           await msg.edit({
-            text: html(`❌ <b>目标 <code>${escapeHtml(targetId)}</code> 不存在</b>`)
+            text: `❌ <b>目标 <code>${htmlEscape(targetId)}</code> 不存在</b>`,
           });
           return;
         }
@@ -1000,7 +988,7 @@ class BsPlugin extends Plugin {
         target.updatedAt = String(Date.now());
         await db.write();
         await msg.edit({
-          text: html(`✅ 目标 <code>${escapeHtml(targetId)}</code> 已禁用`)
+          text: `✅ 目标 <code>${htmlEscape(targetId)}</code> 已禁用`,
         });
         return;
       }
@@ -1009,7 +997,7 @@ class BsPlugin extends Plugin {
         const targetId = args[1];
         if (!targetId) {
           await msg.edit({
-            text: html("❌ <b>请提供要启用的 ID</b>")
+            text: "❌ <b>请提供要启用的 ID</b>",
           });
           return;
         }
@@ -1017,7 +1005,7 @@ class BsPlugin extends Plugin {
         const target = db.data.targets.find((item) => item.id === targetId);
         if (!target) {
           await msg.edit({
-            text: html(`❌ <b>目标 <code>${escapeHtml(targetId)}</code> 不存在</b>`)
+            text: `❌ <b>目标 <code>${htmlEscape(targetId)}</code> 不存在</b>`,
           });
           return;
         }
@@ -1025,7 +1013,7 @@ class BsPlugin extends Plugin {
         target.updatedAt = String(Date.now());
         await db.write();
         await msg.edit({
-          text: html(`✅ 目标 <code>${escapeHtml(targetId)}</code> 已启用`)
+          text: `✅ 目标 <code>${htmlEscape(targetId)}</code> 已启用`,
         });
         return;
       }
@@ -1036,15 +1024,16 @@ class BsPlugin extends Plugin {
           db.data.mode === MODE_SEQUENCE ? MODE_BROADCAST : MODE_SEQUENCE;
         await db.write();
         await msg.edit({
-          text: html(`✅ 模式已切换为 <b>${formatMode(db.data.mode)}</b>`)
+          text: `✅ 模式已切换为 <b>${formatMode(db.data.mode)}</b>`,
         });
         return;
       }
 
       await msg.edit({
-        text: html(`❓ <b>未知命令</b><br><br>${escapeHtml(helpText)}`)
+        text: `❓ <b>未知命令</b>\n\n${htmlEscape(helpText)}`,
+        linkPreview: false,
       });
-    }
+    },
   };
 }
 

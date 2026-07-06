@@ -6,8 +6,15 @@ import { JSONFilePreset } from "lowdb/node";
 import type { MessageContext } from "@mtcute/dispatcher";
 import { html } from "@mtcute/html-parser";
 import type { TelegramClient } from "@mtcute/node";
+import { User, Chat } from "@mtcute/node";
 import path from "path";
 import { safeGetMessages } from "@utils/safeGetMessages";
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
+import { hasRawType, getRawType } from "@utils/entityTypeGuards";
+import { Long } from "@mtcute/core";
+import type { tl } from "@mtcute/core";
+import type { MtcuteInputChannel, MtcuteInputUser, MtcuteInputPeer } from "@utils/mtcuteTypes";
 
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
@@ -26,7 +33,7 @@ const AVG_CACHE_PATH = path.join(
 );
 
 type TargetChat = {
-  entity: any;
+  entity: Chat;
   titleDisplay: string;
   username: string | null;
   isChannel: boolean;
@@ -34,7 +41,7 @@ type TargetChat = {
 };
 
 type AdminStat = {
-  user: any;
+  user: User;
   userId: string;
   username: string | null;
   name: string;
@@ -49,8 +56,8 @@ type AdminStat = {
 };
 
 type AdminCollection = {
-  allAdmins: any[];
-  visibleAdmins: any[];
+  allAdmins: User[];
+  visibleAdmins: User[];
   totalCount: number;
   botCount: number;
   nonBotCount: number;
@@ -183,13 +190,14 @@ function splitLongText(text: string, maxLength = MAX_MESSAGE_LENGTH): string[] {
 async function sendLongResult(msg: MessageContext, text: string): Promise<void> {
   const chunks = splitLongText(text);
   await msg.edit({
-    text: chunks[0] as any,
+    text: chunks[0],
     disableWebPreview: true,
-  } as any);
+  });
 
+  // 注意：消息必须按顺序逐条发送，不能并行（每条续消息依赖前一条发送完成以保持顺序）
   for (let index = 1; index < chunks.length; index++) {
     await msg.replyText(
-      `📋 <b>续 ${index}/${chunks.length - 1}</b>\n\n${chunks[index]}` as any,
+      html(`📋 <b>续 ${index}/${chunks.length - 1}</b><br><br>${chunks[index]}`),
     );
   }
 }
@@ -203,16 +211,17 @@ function formatAvgPerDay(value: number): string {
   return value.toFixed(2).replace(/\.?0+$/, "");
 }
 
-function getLastOnlineDays(user: any): number | null {
-  if (!user.status) return null;
-  const statusType = user.status?._;
+function getLastOnlineDays(user: User): number | null {
+  const rawStatus = user.raw?.status as { _?: string; wasOnline?: number } | undefined;
+  if (!rawStatus) return null;
+  const statusType = rawStatus._;
   if (statusType === "userStatusOnline" || statusType === "userStatusRecently") {
     return 0;
   }
   if (statusType === "userStatusOffline") {
-    if (!user.status.wasOnline) return null;
+    if (!rawStatus.wasOnline) return null;
     const days = Math.floor(
-      (Date.now() - Number(user.status.wasOnline) * 1000) / DAY_MS,
+      (Date.now() - Number(rawStatus.wasOnline) * 1000) / DAY_MS,
     );
     return Math.max(0, days);
   }
@@ -221,11 +230,11 @@ function getLastOnlineDays(user: any): number | null {
   return null;
 }
 
-function getUserIdString(user: any): string {
+function getUserIdString(user: User): string {
   return String(user.id);
 }
 
-function getUserDisplayName(user: any): string {
+function getUserDisplayName(user: User): string {
   const parts = [user.firstName || "", user.lastName || ""]
     .map((part) => part.trim())
     .filter(Boolean);
@@ -240,7 +249,7 @@ function buildTargetDisplay(target: TargetChat): string {
   }`;
 }
 
-function buildUserDisplay(user: any): string {
+function buildUserDisplay(user: User): string {
   const parts: string[] = [];
   const userId = getUserIdString(user);
   const displayName = getUserDisplayName(user).trim();
@@ -320,13 +329,13 @@ function normalizeErrorMessage(detail: string): string {
   return detail;
 }
 
-function toTargetChat(entity: any): TargetChat {
+function toTargetChat(entity: Chat): TargetChat {
   return {
     entity,
     titleDisplay: entity.title || "未命名对话",
     username:
-      (entity as any)?._ === "channel" && entity.username ? entity.username : null,
-    isChannel: (entity as any)?._ === "channel",
+      hasRawType(entity, "channel") && entity.username ? entity.username : null,
+    isChannel: hasRawType(entity, "channel"),
     storageKey: String(entity.id),
   };
 }
@@ -339,8 +348,8 @@ async function resolveTargetChat(
   if (!client) throw new Error("Telegram 客户端未初始化");
 
   if (!rawTarget) {
-    const entity = await (client as any).getChat(msg.chat.id);
-    const entityType = (entity as any)?._;
+    const entity = await client.getChat(msg.chat.id);
+    const entityType = getRawType(entity);
     if (entityType !== "chat" && entityType !== "channel") {
       throw new Error("当前对话不是群组、超级群或频道");
     }
@@ -351,8 +360,8 @@ async function resolveTargetChat(
   if (!target) throw new Error("目标对话不能为空");
 
   if (/^-?\d+$/.test(target)) {
-    const entity = await (client as any).getChat(Number(target));
-    const entityType = (entity as any)?._;
+    const entity = await client.getChat(Number(target));
+    const entityType = getRawType(entity);
     if (entityType !== "chat" && entityType !== "channel") {
       throw new Error("目标必须是群组、超级群或频道");
     }
@@ -360,8 +369,8 @@ async function resolveTargetChat(
   }
 
   if (target.startsWith("@")) {
-    const entity = await (client as any).getChat(target);
-    const entityType = (entity as any)?._;
+    const entity = await client.getChat(target);
+    const entityType = getRawType(entity);
     if (entityType !== "chat" && entityType !== "channel") {
       throw new Error("目标必须是群组、超级群或频道");
     }
@@ -382,33 +391,33 @@ async function getAdminCollection(
   if (target.isChannel) {
     const res: any = await client.call({
       _: 'channels.getParticipants',
-      channel: target.entity,
-      filter: { _: 'channelParticipantsAdmins' } as any,
+      channel: target.entity.raw as unknown as MtcuteInputChannel,
+      filter: { _: 'channelParticipantsAdmins' },
       offset: 0,
       limit: 200,
-      hash: 0 as any,
-    } as any);
+      hash: Long.fromNumber(0),
+    });
 
     const users: any[] = res?.users || [];
     allAdmins = users.filter(
-      (user: any) => (user as any)?._ === "user",
+      (user: any) => hasRawType(user, "user"),
     );
   } else {
     const res: any = await client.call({
       _: 'channels.getParticipants',
-      channel: target.entity,
-      filter: { _: 'channelParticipantsRecent' } as any,
+      channel: target.entity.raw as unknown as MtcuteInputChannel,
+      filter: { _: 'channelParticipantsRecent' },
       offset: 0,
       limit: 200,
-      hash: 0 as any,
-    } as any);
+      hash: Long.fromNumber(0),
+    });
 
     const participants: any[] = res?.participants || [];
     const users: any[] = res?.users || [];
 
     const adminParticipantUserIds = new Set<string>();
     for (const p of participants) {
-      const pType = (p as any)?._;
+      const pType = getRawType(p);
       if (pType === "chatParticipantAdmin" || pType === "chatParticipantCreator") {
         adminParticipantUserIds.add(String(p.userId));
       }
@@ -416,7 +425,7 @@ async function getAdminCollection(
 
     allAdmins = users.filter(
       (user: any) =>
-        (user as any)?._ === "user" && adminParticipantUserIds.has(String(user.id)),
+        hasRawType(user, "user") && adminParticipantUserIds.has(String(user.id)),
     );
   }
 
@@ -575,7 +584,7 @@ async function collectAdminStat(
   const lockedSeat = lockedSeatSet.has(userId);
   const name = getUserDisplayName(user);
   const onlineDays = getLastOnlineDays(user);
-  const participant = (user as any).participant as any;
+  const participant = (user as { participant?: { rank?: string } })?.participant;
 
   await setCachedUserInfo(target, user);
 
@@ -592,22 +601,22 @@ async function collectAdminStat(
       sortAvgPerDay = cachedEntry.avgPerDay;
       avgPerDayText = formatAvgPerDay(cachedEntry.avgPerDay);
     } else {
-      const fromEntity = await (client as any).resolvePeer(user.id);
+      const fromEntity = await client.resolvePeer(user.id);
       const searchResult: any = await client.call({
         _: 'messages.search',
-        peer: target.entity,
+        peer: target.entity.raw as unknown as MtcuteInputPeer,
         q: "",
-        filter: { _: 'inputMessagesFilterEmpty' } as any,
+        filter: { _: 'inputMessagesFilterEmpty' },
         minDate: Math.floor(Date.now() / 1000) - WEEK_SECONDS,
-        maxDate: undefined as any,
+        maxDate: 0,
         offsetId: 0,
         addOffset: 0,
         limit: 1,
         maxId: 0,
         minId: 0,
-        hash: 0 as any,
+        hash: Long.fromNumber(0),
         fromId: fromEntity,
-      } as any);
+      });
 
       const count = Number(
         "count" in searchResult
@@ -621,8 +630,8 @@ async function collectAdminStat(
         await setCachedAvgEntry(target, userId, sortAvgPerDay);
       }
     }
-  } catch (error) {
-    console.warn(`[admin_board] 获取最近一周消息数失败: ${userId}`, error);
+  } catch (error: unknown) {
+    logger.warn(`[admin_board] 获取最近一周消息数失败: ${userId}`, error);
   }
 
   let lastMessageText = "无记录";
@@ -634,22 +643,22 @@ async function collectAdminStat(
     });
 
     // Since safeGetMessages doesn't support fromUser, fall back to messages.search
-    const fromEntity = await (client as any).resolvePeer(user.id);
+    const fromEntity = await client.resolvePeer(user.id);
     const historyResult: any = await client.call({
       _: 'messages.search',
-      peer: target.entity,
+      peer: target.entity.raw as unknown as MtcuteInputPeer,
       q: "",
-      filter: { _: 'inputMessagesFilterEmpty' } as any,
+      filter: { _: 'inputMessagesFilterEmpty' },
       minDate: 0,
-      maxDate: undefined as any,
+      maxDate: 0,
       offsetId: 0,
       addOffset: 0,
       limit: 1,
       maxId: 0,
       minId: 0,
-      hash: 0 as any,
+      hash: Long.fromNumber(0),
       fromId: fromEntity,
-    } as any);
+    });
 
     const lastMsgs = historyResult?.messages || [];
     const dateValue = lastMsgs?.[0]?.date;
@@ -658,8 +667,8 @@ async function collectAdminStat(
       sortLastMessageTs = lastMessageDate.getTime();
       lastMessageText = formatDaysAgo(lastMessageDate);
     }
-  } catch (error) {
-    console.warn(`[admin_board] 获取最后发言时间失败: ${userId}`, error);
+  } catch (error: unknown) {
+    logger.warn(`[admin_board] 获取最后发言时间失败: ${userId}`, error);
   }
 
   return {
@@ -913,9 +922,9 @@ async function collectAdminStats(
   target: TargetChat,
 ): Promise<AdminStatsResult> {
   await msg.edit({
-    text: `🔍 正在获取 <b>${htmlEscape(target.titleDisplay)}</b> 的管理员列表...` as any,
+    text: `🔍 正在获取 <b>${htmlEscape(target.titleDisplay)}</b> 的管理员列表...`,
     disableWebPreview: true,
-  } as any);
+  });
 
   const adminCollection = await getAdminCollection(target);
   if (adminCollection.nonBotCount === 0) {
@@ -926,17 +935,22 @@ async function collectAdminStats(
   const stats: AdminStat[] = [];
   const admins = adminCollection.visibleAdmins;
 
-  for (let index = 0; index < admins.length; index++) {
-    if (index === 0 || (index + 1) % 5 === 0 || index === admins.length - 1) {
-      await msg.edit({
-        text: `📊 正在统计管理员排序简表...\n目标: <b>${htmlEscape(
-          target.titleDisplay,
-        )}</b>\n进度: <code>${index + 1}/${admins.length}</code>` as any,
-        disableWebPreview: true,
-      } as any);
-    }
+  // 分批并行处理，每批 5 个，减少总等待时间
+  const BATCH_SIZE = 5;
+  for (let i = 0; i < admins.length; i += BATCH_SIZE) {
+    const end = Math.min(i + BATCH_SIZE, admins.length);
+    await msg.edit({
+      text: `📊 正在统计管理员排序简表...\n目标: <b>${htmlEscape(
+        target.titleDisplay,
+      )}</b>\n进度: <code>${end}/${admins.length}</code>`,
+      disableWebPreview: true,
+    });
 
-    stats.push(await collectAdminStat(target, admins[index], lockedSeatSet));
+    const batch = admins.slice(i, end);
+    const batchResults = await Promise.all(
+      batch.map((admin) => collectAdminStat(target, admin, lockedSeatSet)),
+    );
+    stats.push(...batchResults);
   }
 
   return {
@@ -1067,9 +1081,9 @@ function parseTrimArgs(remainder: string): {
   };
 }
 
-function isCreatorUser(user: any): boolean {
-  const participant = (user as any).participant;
-  const pType = (participant as any)?._;
+function isCreatorUser(user: User): boolean {
+  const participant = (user as { participant?: unknown }).participant;
+  const pType = getRawType(participant);
   return (
     pType === "chatParticipantCreator" ||
     pType === "channelParticipantCreator"
@@ -1078,31 +1092,31 @@ function isCreatorUser(user: any): boolean {
 
 async function demoteAdminInTarget(
   target: TargetChat,
-  user: any,
+  user: User,
 ): Promise<void> {
   const client = await getGlobalClient();
   if (!client) throw new Error("Telegram 客户端未初始化");
 
-  const inputUser = await (client as any).resolvePeer(user.id);
+  const inputUser = await client.resolvePeer(user.id) as unknown as MtcuteInputUser;
 
   if (target.isChannel) {
-    const inputChannel = await (client as any).resolvePeer(target.entity.id);
+    const inputChannel = await client.resolvePeer(target.entity.id) as unknown as unknown as MtcuteInputChannel;
     await client.call({
       _: 'channels.editAdmin',
       channel: inputChannel,
       userId: inputUser,
-      adminRights: { _: 'chatAdminRights' } as any,
+      adminRights: { _: 'chatAdminRights' },
       rank: "",
-    } as any);
+    });
     return;
   }
 
   await client.call({
     _: 'messages.editChatAdmin',
-    chatId: (target.entity as any).id,
+    chatId: target.entity.id,
     userId: inputUser,
-    isAdmin: false as any,
-  } as any);
+    isAdmin: false,
+  });
 }
 
 function isPotentialUserIdentifier(text: string): boolean {
@@ -1161,7 +1175,7 @@ function parseSeatActionArgs(remainder: string): {
 async function findUserInChatParticipants(
   target: TargetChat,
   identifier: string,
-): Promise<any | undefined> {
+): Promise<User | undefined> {
   const client = await getGlobalClient();
   if (!client) throw new Error("Telegram 客户端未初始化");
 
@@ -1170,25 +1184,29 @@ async function findUserInChatParticipants(
 
   const res: any = await client.call({
     _: 'channels.getParticipants',
-    channel: target.entity,
-    filter: { _: 'channelParticipantsRecent' } as any,
+    channel: target.entity.raw as unknown as MtcuteInputChannel,
+    filter: { _: 'channelParticipantsRecent' },
     offset: 0,
     limit: 200,
-    hash: 0 as any,
-  } as any);
+    hash: Long.fromNumber(0),
+  });
 
   const users: any[] = res?.users || [];
-  return users.find((user: any) => {
-    if ((user as any)?._ !== "user") return false;
+  const found = users.find((user: any) => {
+    if (!hasRawType(user, "user")) return false;
     if (isNumeric) return String(user.id) === String(Number(identifier));
     return (user.username || "").toLowerCase() === username;
   });
+  if (found) {
+    return new User(found as tl.RawUser);
+  }
+  return undefined;
 }
 
 async function findUserInChannelParticipants(
   target: TargetChat,
   identifier: string,
-): Promise<any | undefined> {
+): Promise<User | undefined> {
   const client = await getGlobalClient();
   if (!client) throw new Error("Telegram 客户端未初始化");
 
@@ -1197,53 +1215,54 @@ async function findUserInChannelParticipants(
 
   if (username) {
     try {
-      const res: any = await client.call({
+      const res = await client.call({
         _: 'channels.getParticipants',
-        channel: target.entity,
-        filter: { _: 'channelParticipantsSearch', q: username } as any,
+        channel: target.entity.raw as unknown as MtcuteInputChannel,
+        filter: { _: 'channelParticipantsSearch', q: username } as tl.TypeChannelParticipantsFilter,
         offset: 0,
         limit: 200,
-        hash: 0 as any,
-      } as any);
+        hash: Long.fromNumber(0),
+      });
 
-      const users: any[] = res?.users || [];
-      const matched = users.find((user: any) => {
+      const rawRes = res as tl.channels.RawChannelParticipants;
+      const users = (rawRes.users ?? []).filter(
+        (user): user is tl.RawUser => hasRawType(user, "user"),
+      );
+      const matched = users.find((user) => {
         return (
-          (user as any)?._ === "user" &&
-          (user.username || "").toLowerCase() === username
+          (user.username ?? "").toLowerCase() === username
         );
       });
-      if (matched) return matched;
-    } catch {
-      // Ignore and continue to other fallbacks.
-    }
+      if (matched) return new User(matched);
+    } catch (e: unknown) { logger.warn(`[admin_board] Ignore and continue to other fallbacks.:`, e) }
   }
 
   if (!isNumeric) return undefined;
 
-  const inputChannel = await (client as any).resolvePeer(target.entity.id);
+  const inputChannel = await client.resolvePeer(target.entity.id) as unknown as unknown as MtcuteInputChannel;
   let offset = 0;
   const limit = 200;
 
   for (let index = 0; index < 5; index++) {
-    const result: any = await client.call({
+    const result = await client.call({
       _: 'channels.getParticipants',
       channel: inputChannel,
-      filter: { _: 'channelParticipantsRecent' } as any,
+      filter: { _: 'channelParticipantsRecent' } as tl.TypeChannelParticipantsFilter,
       offset,
       limit,
-      hash: 0 as any,
-    } as any);
+      hash: Long.fromNumber(0),
+    });
 
-    const users: any[] = (result?.users || []).filter(
-      (user: any) => (user as any)?._ === "user",
+    const rawResult = result as tl.channels.RawChannelParticipants;
+    const users = (rawResult.users ?? []).filter(
+      (user): user is tl.RawUser => hasRawType(user, "user"),
     );
     const matched = users.find(
-      (user: any) => String(user.id) === String(Number(identifier)),
+      (user) => String(user.id) === String(Number(identifier)),
     );
-    if (matched) return matched;
+    if (matched) return new User(matched);
 
-    const participants: any[] = result?.participants || [];
+    const participants = rawResult.participants ?? [];
     if (!participants.length) break;
     offset += participants.length;
   }
@@ -1254,7 +1273,7 @@ async function findUserInChannelParticipants(
 async function resolveUserForSeatAction(
   target: TargetChat,
   identifier: string,
-): Promise<any | undefined> {
+): Promise<User | undefined> {
   const client = await getGlobalClient();
   if (!client) throw new Error("Telegram 客户端未初始化");
 
@@ -1266,13 +1285,11 @@ async function resolveUserForSeatAction(
 
   for (const candidate of candidates) {
     try {
-      const entity = await (client as any).getChat(candidate);
-      if ((entity as any)?._ === "user") {
-        return entity;
+      const entity = await client.getChat(candidate);
+      if (hasRawType(entity, "user")) {
+        return entity as unknown as User;
       }
-    } catch {
-      // Ignore and continue to target-specific fallback.
-    }
+    } catch (e: unknown) { logger.warn(`[admin_board] Ignore and continue to target-specific fallback.:`, e) }
   }
 
   return target.isChannel
@@ -1292,9 +1309,9 @@ async function handleSeatAction(
     await msg.edit({
       text: `❌ 参数不足\n\n用法:\n<code>${htmlEscape(
         commandName,
-      )} ${action} 用户1,用户2 [对话id/@username]</code>` as any,
+      )} ${action} 用户1,用户2 [对话id/@username]</code>`,
       disableWebPreview: true,
-    } as any);
+    });
     return;
   }
 
@@ -1302,35 +1319,38 @@ async function handleSeatAction(
   await msg.edit({
     text: `🔍 正在解析要${action === "lock" ? "锁定" : "取消锁定"}席位的用户...\n${buildTargetDisplay(
       target,
-    )}` as any,
+    )}`,
     disableWebPreview: true,
-  } as any);
+  });
 
-  const resolvedUsers = new Map<string, any>();
+  const resolvedUsers = new Map<string, User>();
   const rawResolvedIds = new Set<string>();
   const failures: string[] = [];
 
-  for (const identifier of identifiers) {
-    try {
-      const user = await resolveUserForSeatAction(target, identifier);
-      if (!user) {
-        if (/^-?\d+$/.test(identifier.trim())) {
-          rawResolvedIds.add(String(Number(identifier.trim())));
-        } else {
-          failures.push(`${identifier}（未找到用户）`);
+  // 并行解析所有用户标识符
+  const results = await Promise.all(
+    identifiers.map(async (identifier) => {
+      try {
+        const user = await resolveUserForSeatAction(target, identifier);
+        if (!user) {
+          if (/^-?\\d+$/.test(identifier.trim())) {
+            return { type: "rawId" as const, value: String(Number(identifier.trim())) };
+          }
+          return { type: "failure" as const, value: `${identifier}（未找到用户）` };
         }
-        continue;
+        return { type: "user" as const, value: user };
+      } catch (error: unknown) {
+        if (/^-?\\d+$/.test(identifier.trim())) {
+          return { type: "rawId" as const, value: String(Number(identifier.trim())) };
+        }
+        return { type: "failure" as const, value: `${identifier}（${normalizeErrorMessage(getErrorMessage(error) || "解析失败")}）` };
       }
-      resolvedUsers.set(getUserIdString(user), user);
-    } catch (error: any) {
-      if (/^-?\d+$/.test(identifier.trim())) {
-        rawResolvedIds.add(String(Number(identifier.trim())));
-      } else {
-        failures.push(
-          `${identifier}（${normalizeErrorMessage(error?.message || "解析失败")}）`,
-        );
-      }
-    }
+    })
+  );
+  for (const r of results) {
+    if (r.type === "user") resolvedUsers.set(getUserIdString(r.value), r.value);
+    else if (r.type === "rawId") rawResolvedIds.add(r.value);
+    else failures.push(r.value);
   }
 
   const resolvedList = Array.from(resolvedUsers.values());
@@ -1360,13 +1380,12 @@ async function handleSeatAction(
     for (const user of resolvedList) {
       lines.push(`• ${buildUserDisplay(user)}`);
     }
-    for (const userId of Array.from(rawResolvedIds)) {
-      if (!resolvedUsers.has(userId)) {
-        const cachedUser = await getCachedUserInfo(target, userId);
-        lines.push(
-          `• ${buildUserDisplayFromCache(userId, cachedUser)} <code>（按 ID 直接记录）</code>`,
-        );
-      }
+    const uncachedUserIds = Array.from(rawResolvedIds).filter((userId) => !resolvedUsers.has(userId));
+    const cachedUsers = await Promise.all(uncachedUserIds.map((userId) => getCachedUserInfo(target, userId)));
+    for (let i = 0; i < uncachedUserIds.length; i++) {
+      lines.push(
+        `• ${buildUserDisplayFromCache(uncachedUserIds[i], cachedUsers[i])} <code>（按 ID 直接记录）</code>`,
+      );
     }
   }
 
@@ -1387,9 +1406,9 @@ async function handleClearCacheAction(
   const target = await resolveTargetChat(msg, targetArg);
 
   await msg.edit({
-    text: `🧹 正在清理周日均缓存...\n${buildTargetDisplay(target)}` as any,
+    text: `🧹 正在清理周日均缓存...\n${buildTargetDisplay(target)}`,
     disableWebPreview: true,
-  } as any);
+  });
 
   const removedCount = await clearAvgCache(target);
 
@@ -1399,9 +1418,9 @@ async function handleClearCacheAction(
       buildTargetDisplay(target),
       `清理条目: <code>${removedCount}</code>`,
       `说明: <code>已清理周日均和用户信息缓存，席位锁定数据不受影响</code>`,
-    ].join("\n") as any,
+    ].join("\n"),
     disableWebPreview: true,
-  } as any);
+  });
 }
 
 async function handleTrimAction(
@@ -1415,9 +1434,9 @@ async function handleTrimAction(
     await msg.edit({
       text: `❌ 参数不足\n\n<code>rm</code> 的人数参数是必填项。\n\n用法:\n<code>${htmlEscape(
         commandName,
-      )} rm 正整数 [对话id/@username]</code>` as any,
+      )} rm 正整数 [对话id/@username]</code>`,
       disableWebPreview: true,
-    } as any);
+    });
     return;
   }
 
@@ -1434,9 +1453,9 @@ async function handleTrimAction(
         `✂️ <b>无需处理</b>`,
         buildTargetDisplay(target),
         `说明: <code>没有可下掉的未锁定席位管理员</code>`,
-      ].join("\n") as any,
+      ].join("\n"),
       disableWebPreview: true,
-    } as any);
+    });
     return;
   }
 
@@ -1448,9 +1467,9 @@ async function handleTrimAction(
     await msg.edit({
       text: `✂️ 正在下掉倒数管理员...\n${buildTargetDisplay(
         target,
-      )}\n进度: <code>${index + 1}/${selected.length}</code>` as any,
+      )}\n进度: <code>${index + 1}/${selected.length}</code>`,
       disableWebPreview: true,
-    } as any);
+    });
 
     try {
       await demoteAdminInTarget(target, stat.user);
@@ -1459,10 +1478,10 @@ async function handleTrimAction(
           stat.avgPerDayText,
         )}</code>`,
       );
-    } catch (error: any) {
+    } catch (error: unknown) {
       failureLines.push(
         `• ${buildUserDisplay(stat.user)}（${htmlEscape(
-          normalizeErrorMessage(error?.message || "执行失败"),
+          normalizeErrorMessage(getErrorMessage(error) || "执行失败"),
         )}）`,
       );
     }
@@ -1502,9 +1521,9 @@ class AdminBoardPlugin extends Plugin {
       const client = await getGlobalClient();
       if (!client) {
         await msg.edit({
-          text: "❌ Telegram 客户端未初始化" as any,
+          text: "❌ Telegram 客户端未初始化",
           disableWebPreview: true,
-        } as any);
+        });
         return;
       }
 
@@ -1514,9 +1533,9 @@ class AdminBoardPlugin extends Plugin {
 
       if (!action || action === "help" || action === "h") {
         await msg.edit({
-          text: helpText as any,
+          text: helpText,
           disableWebPreview: true,
-        } as any);
+        });
         return;
       }
 
@@ -1540,9 +1559,9 @@ class AdminBoardPlugin extends Plugin {
             !/^[1-9]\d*$/.test(firstToken)
           ) {
             await msg.edit({
-              text: `❌ 参数错误\n\n<code>tail</code> 的人数参数必须是正整数` as any,
+              text: `❌ 参数错误\n\n<code>tail</code> 的人数参数必须是正整数`,
               disableWebPreview: true,
-            } as any);
+            });
             return;
           }
 
@@ -1570,18 +1589,18 @@ class AdminBoardPlugin extends Plugin {
         }
 
         await msg.edit({
-          text: `❌ 不支持的动作: <code>${htmlEscape(action)}</code>\n\n${helpText}` as any,
+          text: `❌ 不支持的动作: <code>${htmlEscape(action)}</code>\n\n${helpText}`,
           disableWebPreview: true,
-        } as any);
-      } catch (error: any) {
-        console.error(`[admin_board] ${action} failed:`, error);
+        });
+      } catch (error: unknown) {
+        logger.error(`[admin_board] ${action} failed:`, error);
 
-        const detail = normalizeErrorMessage(error?.message || String(error));
+        const detail = normalizeErrorMessage(getErrorMessage(error) || String(error));
 
         await msg.edit({
-          text: `❌ <b>执行失败</b>\n\n${htmlEscape(detail)}` as any,
+          text: `❌ <b>执行失败</b>\n\n${htmlEscape(detail)}`,
           disableWebPreview: true,
-        } as any);
+        });
       }
     },
   };

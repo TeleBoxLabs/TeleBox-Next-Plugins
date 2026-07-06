@@ -3,16 +3,25 @@ import type { MessageContext } from "@mtcute/dispatcher";
 import { html } from "@mtcute/html-parser";
 import { getGlobalClient } from "@utils/globalClient";
 import { getPrefixes } from "@utils/pluginManager";
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
+import { htmlEscape } from "@utils/htmlEscape";
+
+/** channels.getAdminedPublicChannels 返回的聊天实体 */
+interface PublicChannelEntity {
+  id: { toString(): string };
+  title?: string;
+  username?: string;
+  broadcast?: boolean;
+}
+
+/** channels.getAdminedPublicChannels 返回值 */
+interface AdminedPublicChannelsResult {
+  chats: PublicChannelEntity[];
+}
 
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
-
-// HTML转义函数（必需）
-const htmlEscape = (text: string): string => 
-  text.replace(/[&<>"']/g, m => ({ 
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', 
-    '"': '&quot;', "'": '&#x27;' 
-  }[m] || m));
 
 const codeTag = (text: string | number): string => `<code>${htmlEscape(String(text))}</code>`;
 
@@ -47,7 +56,7 @@ class ListUsernamesPlugin extends Plugin {
         });
 
         // 调用Telegram API获取公开频道
-        const result: any = await client.call({
+        const result: AdminedPublicChannelsResult = await client.call({
           _: 'channels.getAdminedPublicChannels'
         });
 
@@ -64,7 +73,7 @@ class ListUsernamesPlugin extends Plugin {
         let output = `📋 <b>属于我的公开群组/频道</b><br><br>`;
         output += `共找到 <b>${result.chats.length}</b> 个公开群组/频道：<br><br>`;
 
-        result.chats.forEach((chat: any, index: number) => {
+        result.chats.forEach((chat: PublicChannelEntity, index: number) => {
           const title = chat.title ? htmlEscape(chat.title) : "未知标题";
           const username = chat.username ? `@${chat.username}` : "无用户名";
           const chatType = chat.broadcast ? "📢 频道" : "👥 群组";
@@ -76,7 +85,7 @@ class ListUsernamesPlugin extends Plugin {
         });
 
         // 添加统计信息
-        const channelCount = result.chats.filter((chat: any) => chat.broadcast).length;
+        const channelCount = result.chats.filter((chat: PublicChannelEntity) => chat.broadcast).length;
         const groupCount = result.chats.length - channelCount;
         
         output += `📊 <b>统计信息：</b><br>`;
@@ -99,24 +108,25 @@ class ListUsernamesPlugin extends Plugin {
           await msg.edit({ text: html`${output}` });
         }
 
-      } catch (error: any) {
-        console.error("[listusernames] 错误:", error);
-        
+      } catch (error: unknown) {
+        logger.error("[listusernames] 错误:", error);
+        const errMsg = getErrorMessage(error);
+
         let errorMessage = "❌ <b>获取列表失败</b><br><br>";
-        
-        if (error.message?.includes("AUTH_KEY_UNREGISTERED")) {
+
+        if (errMsg.includes("AUTH_KEY_UNREGISTERED")) {
           errorMessage += "会话已失效，请重新登录";
-        } else if (error.message?.includes("FLOOD_WAIT")) {
-          const waitTime = parseInt(error.message.match(/\d+/)?.[0] || "60");
+        } else if (errMsg.includes("FLOOD_WAIT")) {
+          const waitTime = parseInt(errMsg.match(/\d+/)?.[0] || "60");
           errorMessage += `请求过于频繁，请等待 ${waitTime} 秒后重试`;
-        } else if (error.message?.includes("CHANNEL_PRIVATE")) {
+        } else if (errMsg.includes("CHANNEL_PRIVATE")) {
           errorMessage += "无法访问私有频道，请确保机器人有相应权限";
         } else {
-          errorMessage += `错误信息: ${htmlEscape(error.message || "未知错误")}`;
+          errorMessage += `错误信息: ${htmlEscape(errMsg || "未知错误")}`;
         }
 
-        await msg.edit({ 
-          text: html`${errorMessage}` 
+        await msg.edit({
+          text: html`${errorMessage}`
         });
       }
     }

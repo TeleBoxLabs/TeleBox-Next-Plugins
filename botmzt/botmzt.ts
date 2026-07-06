@@ -2,17 +2,13 @@ import { Plugin } from "@utils/pluginBase";
 import { getGlobalClient } from "@utils/globalClient";
 import { getPrefixes } from "@utils/pluginManager";
 import type { MessageContext } from "@mtcute/dispatcher";
+import type { TelegramClient } from "@mtcute/node";
 import { html } from "@mtcute/html-parser";
 import { Conversation } from "@mtcute/node";
-
-const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
-
-// HTML转义函数
-const htmlEscape = (text: string): string => 
-  text.replace(/[&<>"']/g, m => ({ 
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', 
-    '"': '&quot;', "'": '&#x27;' 
-  }[m] || m));
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
+import { sleep } from "@utils/asyncHelpers";
+import { htmlEscape } from "@utils/htmlEscape";
 
 // 获取命令前缀
 const prefixes = getPrefixes();
@@ -49,16 +45,14 @@ const help_text = `🎨 <b>妹子图片插件</b>
  * @param command 发送给机器人的命令
  * @returns 机器人的响应消息
  */
-async function getBotResponse(client: any, command: string): Promise<any | null> {
+async function getBotResponse(client: TelegramClient, command: string): Promise<import("@mtcute/core").Message | null> {
   try {
     const botPeer = await client.resolvePeer(BOT_USERNAME);
     
     // 解除对机器人的屏蔽（如果有的话）
     try {
       await client.call({ _: 'contacts.unblock', id: botPeer });
-    } catch (error) {
-      // 忽略解除屏蔽的错误，可能本来就没有屏蔽
-    }
+    } catch (error: unknown) { logger.warn(`[botmzt] 忽略解除屏蔽的错误，可能本来就没有屏蔽:`, error) }
 
     // 检查是否有对话历史，如果没有先发送 /start
     const history = await client.getHistory(botPeer, { limit: 3 });
@@ -80,13 +74,13 @@ async function getBotResponse(client: any, command: string): Promise<any | null>
       // 等待机器人响应
       const botResponse = await conv.waitForNewMessage(undefined, 15000);
       return botResponse;
-    } catch (e) {
+    } catch (_e: unknown) {
       return null;
     } finally {
       conv.stop();
     }
-  } catch (error) {
-    console.error(`[mztnew] 获取机器人响应失败:`, error);
+  } catch (error: unknown) {
+    logger.error(`[mztnew] 获取机器人响应失败:`, error);
     throw error;
   }
 }
@@ -118,7 +112,7 @@ async function sendCheckinCommand(msg: MessageContext): Promise<void> {
       const responseText = botResponse.text || "签到成功";
       
       await msg.edit({
-        text: html`✅ <b>签到完成</b><br><br>${responseText}`
+        text: html`✅ <b>签到完成</b><br><br>${htmlEscape(responseText)}`
       });
     } else {
       await msg.edit({
@@ -126,19 +120,20 @@ async function sendCheckinCommand(msg: MessageContext): Promise<void> {
       });
     }
 
-  } catch (error: any) {
-    console.error(`[mztnew] 签到失败:`, error);
-    
+  } catch (error: unknown) {
+    logger.error(`[mztnew] 签到失败:`, error);
+    const errMsg = getErrorMessage(error);
+
     // 处理特定错误
-    if (error.message?.includes("FLOOD_WAIT")) {
-      const waitTime = parseInt(error.message.match(/\d+/)?.[0] || "60");
+    if (errMsg.includes("FLOOD_WAIT")) {
+      const waitTime = parseInt(errMsg.match(/\d+/)?.[0] || "60");
       await msg.edit({
         text: html`⏳ <b>请求过于频繁</b><br><br>需要等待 ${waitTime} 秒后重试`
       });
       return;
     }
 
-    if (error.message?.includes("USER_BLOCKED")) {
+    if (errMsg.includes("USER_BLOCKED")) {
       await msg.edit({
         text: html`❌ <b>无法访问机器人</b><br><br>请先私聊 @${BOT_USERNAME} 并发送 /start`
       });
@@ -147,7 +142,7 @@ async function sendCheckinCommand(msg: MessageContext): Promise<void> {
 
     // 通用错误处理
     await msg.edit({
-      text: html`❌ <b>签到失败:</b> ${error.message || "未知错误"}`
+      text: html`❌ <b>签到失败:</b> ${errMsg || "未知错误"}`
     });
   }
 }
@@ -183,7 +178,7 @@ async function sendImageWithSpoiler(msg: MessageContext, command: string): Promi
     }
 
     // 检查是否有图片或文档
-    const rawMedia = (botResponse.raw as any)?.media;
+    const rawMedia = (botResponse.raw as { media?: { _?: string; photo?: { id: number; accessHash: number; fileReference: Buffer }; document?: { id: number; accessHash: number; fileReference: Buffer } } } | undefined)?.media;
     let inputMedia: any;
     
     if (rawMedia?._ === 'messageMediaPhoto' && rawMedia.photo) {
@@ -218,7 +213,7 @@ async function sendImageWithSpoiler(msg: MessageContext, command: string): Promi
       
       if (hasErrorKeyword) {
         await msg.edit({
-          text: html`❌ <b>机器人返回错误:</b> ${botResponse.text || "未知错误"}`
+          text: html`❌ <b>机器人返回错误:</b> ${htmlEscape(botResponse.text || "未知错误")}`
         });
       } else {
         await msg.edit({
@@ -252,27 +247,29 @@ async function sendImageWithSpoiler(msg: MessageContext, command: string): Promi
     // 将机器人的消息标记为已读
     try {
       const botPeer = await client.resolvePeer(BOT_USERNAME);
-      await client.call({ _: 'messages.readHistory', peer: botPeer } as any);
-    } catch (readError) {
-      console.error('[mztnew] 标记已读失败:', readError);
+      // TL-layer: messages.readHistory needs raw InputPeer
+      await client.call({ _: 'messages.readHistory', peer: botPeer } as never);
+    } catch (readError: unknown) {
+      logger.error('[mztnew] 标记已读失败:', readError);
     }
 
     // 删除原始命令消息
     await msg.delete();
 
-  } catch (error: any) {
-    console.error(`[mztnew] 发送图片失败:`, error);
-    
+  } catch (error: unknown) {
+    logger.error(`[mztnew] 发送图片失败:`, error);
+    const errMsg = getErrorMessage(error);
+
     // 处理特定错误
-    if (error.message?.includes("FLOOD_WAIT")) {
-      const waitTime = parseInt(error.message.match(/\d+/)?.[0] || "60");
+    if (errMsg.includes("FLOOD_WAIT")) {
+      const waitTime = parseInt(errMsg.match(/\d+/)?.[0] || "60");
       await msg.edit({
         text: html`⏳ <b>请求过于频繁</b><br><br>需要等待 ${waitTime} 秒后重试`
       });
       return;
     }
 
-    if (error.message?.includes("USER_BLOCKED")) {
+    if (errMsg.includes("USER_BLOCKED")) {
       await msg.edit({
         text: html`❌ <b>无法访问机器人</b><br><br>请先私聊 @${BOT_USERNAME} 并发送 /start`
       });
@@ -281,7 +278,7 @@ async function sendImageWithSpoiler(msg: MessageContext, command: string): Promi
 
     // 通用错误处理
     await msg.edit({
-      text: html`❌ <b>获取图片失败:</b> ${error.message || "未知错误"}`
+      text: html`❌ <b>获取图片失败:</b> ${errMsg || "未知错误"}`
     });
   }
 }
@@ -335,20 +332,18 @@ class MztNewPlugin extends Plugin {
         const deleteTimer = setTimeout(async () => {
           try {
             if (statusMsg) {
-              await (statusMsg as any).delete();
+              await (statusMsg as { delete?: () => Promise<unknown> }).delete?.();
             }
-          } catch (error) {
-            // 忽略删除错误
-          } finally {
+          } catch (error: unknown) { logger.warn(`[botmzt] 忽略删除错误:`, error) } finally {
             runtime.pendingDeleteTimers.delete(deleteTimer);
           }
         }, 30000);
         runtime.pendingDeleteTimers.add(deleteTimer);
 
-      } catch (error: any) {
-        console.error("[mztnew] 显示设置失败:", error);
+      } catch (error: unknown) {
+        logger.error("[mztnew] 显示设置失败:", error);
         await msg.edit({
-          text: html`❌ <b>显示设置失败:</b> ${error.message}`
+          text: html`❌ <b>显示设置失败:</b> ${htmlEscape(getErrorMessage(error))}`
         });
       }
     },

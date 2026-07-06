@@ -6,8 +6,12 @@ import { html } from "@mtcute/html-parser";
 import { getPrefixes } from "@utils/pluginManager";
 import { createDirectoryInAssets } from "@utils/pathHelpers";
 import { JSONFilePreset } from "lowdb/node";
+import type { Low } from "lowdb";
 import * as path from "path";
 import _ from "lodash";
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
+import { htmlEscape } from "@utils/htmlEscape";
 
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
@@ -143,11 +147,6 @@ class PanguSpacer {
 
 
 // HTML 转义函数
-const htmlEscape = (text: string): string => 
-  text.replace(/[&<>"']/g, m => ({ 
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', 
-    '"': '&quot;', "'": '&#x27;' 
-  }[m] || m));
 
 // 帮助文档
 const help_text = `⚙️ <b>pangu - 为消息添加「盘古之白」</b>
@@ -186,8 +185,7 @@ interface PanguConfig {
 // 插件主体
 class PanguPlugin extends Plugin {
   cleanup(): void {
-    // 引用重置：清空实例级 db / cache / manager 引用，便于 reload 后重新初始化。
-    this.db = null;
+    // 引用重置：db 由 reload 后重新初始化自动覆盖，无需显式清空。
   }
 
   async setup(): Promise<void> {
@@ -197,7 +195,7 @@ class PanguPlugin extends Plugin {
 
   name = "pangu";
   description: string = `📝 Pangu 消息格式化插件<br><br>${help_text}`;
-  private db: any;
+  private db!: Awaited<ReturnType<typeof JSONFilePreset<PanguConfig>>>;
   private prefixes: string[];
 
   constructor() {
@@ -258,7 +256,7 @@ class PanguPlugin extends Plugin {
   // 更新统计
   private updateStats(): void {
     const enabledChats = Object.values(this.db.data.chats)
-      .filter(v => v === true).length;
+      .filter(v => v).length;
     this.db.data.stats.enabledChats = enabledChats;
   }
 
@@ -537,10 +535,10 @@ class PanguPlugin extends Plugin {
           text: html`❌ 未知命令: <code>${htmlEscape(subCommand)}</code><br><br>${help_text}`
         });
 
-      } catch (error: any) {
-        console.error(`[pangu] 命令处理错误:`, error);
+      } catch (error: unknown) {
+        logger.error(`[pangu] 命令处理错误:`, error);
         await msg.edit({
-          text: html`❌ <b>处理失败:</b> ${htmlEscape(error.message || "未知错误")}`
+          text: html`❌ <b>处理失败:</b> ${htmlEscape(getErrorMessage(error) || "未知错误")}`
         });
       }
     }
@@ -550,7 +548,7 @@ class PanguPlugin extends Plugin {
   listenMessageHandler = async (msg: MessageContext, options?: { isEdited?: boolean }): Promise<void> => {
     try {
       if (!this.db) return;
-      const savedMessage = (msg as any).savedPeerId;
+      const savedMessage = (msg as { savedPeerId?: unknown }).savedPeerId;
       // 仅处理自己发出的消息 或 Saved Messages
       if (!(msg.isOutgoing || savedMessage)) return;
       
@@ -594,13 +592,13 @@ class PanguPlugin extends Plugin {
         try {
           await msg.edit({ text: formatted });
           await this.recordFormattedMessage();
-        } catch (error: any) {
+        } catch (error: unknown) {
           // 可能是消息被删除、网络问题等，记录日志即可
-          console.error(`[pangu] 消息编辑失败:`, error.message);
+          logger.error(`[pangu] 消息编辑失败:`, getErrorMessage(error));
         }
       }
-    } catch (error: any) {
-      console.error(`[pangu] 监听器错误:`, error);
+    } catch (error: unknown) {
+      logger.error(`[pangu] 监听器错误:`, error);
     }
   };
 

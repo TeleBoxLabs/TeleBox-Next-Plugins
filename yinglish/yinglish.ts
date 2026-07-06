@@ -4,17 +4,13 @@ import { getGlobalClient } from "@utils/globalClient";
 import type { MessageContext } from "@mtcute/dispatcher";
 import { html } from "@mtcute/html-parser";
 import { safeGetMessages } from "@utils/safeGetMessages";
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
+import { htmlEscape } from "@utils/htmlEscape";
 
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
 
-
-// HTML转义工具
-const htmlEscape = (text: string): string => 
-  text.replace(/[&<>"']/g, m => ({ 
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', 
-    '"': '&quot;', "'": '&#x27;' 
-  }[m] || m));
 
 class YinglishPlugin extends Plugin {
 
@@ -41,7 +37,6 @@ class YinglishPlugin extends Plugin {
         const lines = msg.text?.trim()?.split(/\r?\n/g) || [];
         const parts = lines?.[0]?.split(/\s+/) || [];
         const [, ...args] = parts; // 跳过命令本身
-        const sub = (args[0] || "").toLowerCase();
 
         let text = '';
         
@@ -63,7 +58,7 @@ class YinglishPlugin extends Plugin {
               });
               return;
             }
-          } catch (error) {
+          } catch (_e: unknown) {
             await msg.edit({
               text: html`❌ 获取回复消息失败`
             });
@@ -91,10 +86,10 @@ class YinglishPlugin extends Plugin {
           text: html`${result}`
         });
         
-      } catch (error: any) {
-        console.error('Yinglish conversion error:', error);
+      } catch (error: unknown) {
+        logger.error('Yinglish conversion error:', error);
         await msg.edit({
-          text: html`❌ <b>转换失败:</b> ${htmlEscape(error.message)}`
+          text: html`❌ <b>转换失败:</b> ${htmlEscape(getErrorMessage(error))}`
         });
       }
     }

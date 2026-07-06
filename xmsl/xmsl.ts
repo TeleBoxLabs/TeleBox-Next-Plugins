@@ -1,6 +1,7 @@
 import { Plugin } from '@utils/pluginBase';
 import { getPrefixes } from '@utils/pluginManager';
 import type { MessageContext } from "@mtcute/dispatcher";
+import type { Message, Photo, Document } from "@mtcute/node";
 import { html } from "@mtcute/html-parser";
 import axios from 'axios';
 import { createDirectoryInAssets, createDirectoryInTemp } from '@utils/pathHelpers';
@@ -10,10 +11,50 @@ import { JSONFilePreset } from 'lowdb/node';
 import { getGlobalClient } from '@utils/globalClient';
 import { execFile } from 'child_process';
 import { safeGetReplyMessage } from '@utils/safeGetMessages';
+import { logger } from '@utils/logger';
+import { getErrorMessage } from "@utils/errorHelpers";
 import { promisify } from 'util';
 
 const execFileAsync = promisify(execFile);
 const XMSL_TEMP_DIR = createDirectoryInTemp('xmsl');
+
+// OpenAI API types
+interface OpenAiMessage {
+  role: 'system' | 'user' | 'assistant';
+  content: string | OpenAiContentPart[];
+}
+
+interface OpenAiContentPart {
+  type: 'text' | 'image_url';
+  text?: string;
+  image_url?: { url: string };
+}
+
+interface OpenAiChatRequest {
+  model: string;
+  messages: OpenAiMessage[];
+  temperature?: number;
+}
+
+// Gemini API types
+interface GeminiPart {
+  text?: string;
+  inlineData?: { mimeType: string; data: string };
+}
+
+interface GeminiContent {
+  parts: GeminiPart[];
+}
+
+interface GeminiChatRequest {
+  contents: GeminiContent[];
+  generationConfig: {
+    temperature: number;
+  };
+  systemInstruction?: {
+    parts: { text: string }[];
+  };
+}
 
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
@@ -86,12 +127,12 @@ async function extractWebmFirstFrame(webmBuffer: Buffer): Promise<Buffer | null>
 			return fs.readFileSync(pngPath);
 		}
 		return null;
-	} catch (error) {
-		console.error('[xmsl] WebM 第一帧提取失败:', error);
+	} catch (error: unknown) {
+		logger.error('[xmsl] WebM 第一帧提取失败:', error);
 		return null;
 	} finally {
-		try { fs.unlinkSync(webmPath); } catch {}
-		try { fs.unlinkSync(pngPath); } catch {}
+		try { fs.unlinkSync(webmPath); } catch (e: unknown) { logger.error('[xmsl] cleanup webm failed:', e); }
+		try { fs.unlinkSync(pngPath); } catch (e: unknown) { logger.error('[xmsl] cleanup png failed:', e); }
 	}
 }
 
@@ -130,13 +171,13 @@ anim.save_animation(sys.argv[2])
 			return fs.readFileSync(pngPath);
 		}
 		return null;
-	} catch (error) {
-		console.error('[xmsl] TGS 第一帧提取失败:', error);
+	} catch (error: unknown) {
+		logger.error('[xmsl] TGS 第一帧提取失败:', error);
 		return null;
 	} finally {
-		try { fs.unlinkSync(tgsPath); } catch {}
-		try { fs.unlinkSync(gifPath); } catch {}
-		try { fs.unlinkSync(pngPath); } catch {}
+		try { fs.unlinkSync(tgsPath); } catch (e: unknown) { logger.error('[xmsl] cleanup tgs failed:', e); }
+		try { fs.unlinkSync(gifPath); } catch (e: unknown) { logger.error('[xmsl] cleanup gif failed:', e); }
+		try { fs.unlinkSync(pngPath); } catch (e: unknown) { logger.error('[xmsl] cleanup png failed:', e); }
 	}
 }
 
@@ -194,7 +235,7 @@ class XMSLPlugin extends Plugin {
 		apiKey: '',
 		model: 'gpt-4',
 	};
-	private db: any = null;
+	private db!: Awaited<ReturnType<typeof JSONFilePreset<XMSLConfig>>>;
 	private baseDir: string = '';
 
 	// 更新帮助文档，加入 .xm 别名说明
@@ -228,7 +269,7 @@ class XMSLPlugin extends Plugin {
 
 	constructor() {
 		super();
-		this.init().catch(console.error);
+		this.init().catch((e: unknown) => logger.error("[xmsl] init failed:", e));
 	}
 
 	private async init() {
@@ -283,7 +324,7 @@ class XMSLPlugin extends Plugin {
 	/**
 	 * 从消息中提取媒体信息
 	 */
-	private async extractMediaInfo(message: any): Promise<MediaInfo | null> {
+	private async extractMediaInfo(message: Message): Promise<MediaInfo | null> {
 		if (!message.media) return null;
 
 		const client = await getGlobalClient();
@@ -291,8 +332,9 @@ class XMSLPlugin extends Plugin {
 
 		try {
 			// 处理图片
-			if ((message.media as any)?._ === 'messageMediaPhoto') {
-				const buffer = await (client as any).downloadMedia(message.media, {});
+			if (message.media.type === 'photo') {
+				const photo = message.media as Photo;
+				const buffer = await client.downloadAsBuffer(photo);
 				if (buffer && Buffer.isBuffer(buffer)) {
 					const detectedMime = detectImageMime(buffer);
 					if (detectedMime) {
@@ -306,20 +348,19 @@ class XMSLPlugin extends Plugin {
 			}
 
 			// 处理文档类型（贴纸、图片文件等）
-			if ((message.media as any)?._ === 'messageMediaDocument') {
-				const doc = (message.media as any).document;
-				if ((doc as any)?._ !== 'document') return null;
-
+			if (message.media.type === 'document') {
+				const doc = message.media as Document;
+				const rawDoc = doc.raw;
 				const mimeType = doc.mimeType || '';
 
 				// 检测是否为贴纸
-				const isSticker = doc.attributes?.some(
-					(a: any) => (a as any)._ === 'documentAttributeSticker'
+				const isSticker = rawDoc.attributes?.some(
+					(attr) => attr._ === 'documentAttributeSticker'
 				);
 
 				// TGS 动态贴纸 - 尝试渲染第一帧
 				if (mimeType === TGS_MIME) {
-					const buffer = await (client as any).downloadMedia(message.media, {});
+					const buffer = await client.downloadAsBuffer(doc);
 					if (buffer && Buffer.isBuffer(buffer)) {
 						const pngBuffer = await extractTgsFirstFrame(buffer);
 						if (pngBuffer) {
@@ -336,7 +377,7 @@ class XMSLPlugin extends Plugin {
 
 				// 视频贴纸 (WebM) - 提取第一帧
 				if (mimeType === WEBM_MIME) {
-					const buffer = await (client as any).downloadMedia(message.media, {});
+					const buffer = await client.downloadAsBuffer(doc);
 					if (buffer && Buffer.isBuffer(buffer)) {
 						const pngBuffer = await extractWebmFirstFrame(buffer);
 						if (pngBuffer) {
@@ -354,7 +395,7 @@ class XMSLPlugin extends Plugin {
 				// 静态图片和贴纸
 				if (SUPPORTED_IMAGE_MIMES.includes(mimeType)) {
 					// 已知支持的图片格式，直接下载
-					const buffer = await (client as any).downloadMedia(message.media, {});
+					const buffer = await client.downloadAsBuffer(doc);
 					if (buffer && Buffer.isBuffer(buffer)) {
 						const detectedMime = detectImageMime(buffer);
 						if (detectedMime) {
@@ -367,9 +408,7 @@ class XMSLPlugin extends Plugin {
 					}
 				} else if (isSticker) {
 					// 其他贴纸类型（未知格式），尝试下载缩略图
-					const buffer = await (client as any).downloadMedia(message.media, {
-						thumb: 1
-					});
+					const buffer = await client.downloadAsBuffer(doc);
 					if (buffer && Buffer.isBuffer(buffer)) {
 						const detectedMime = detectImageMime(buffer);
 						if (detectedMime) {
@@ -382,8 +421,8 @@ class XMSLPlugin extends Plugin {
 					}
 				}
 			}
-		} catch (error) {
-			console.error('[xmsl] 媒体提取失败:', error);
+		} catch (error: unknown) {
+			logger.error('[xmsl] 媒体提取失败:', error);
 		}
 
 		return null;
@@ -416,28 +455,27 @@ class XMSLPlugin extends Plugin {
 						}
 
 						// 检查是否是转换失败的贴纸格式
-						if ((replyMsg.media as any)?._ === 'messageMediaDocument') {
-							const doc = (replyMsg.media as any).document;
-							if ((doc as any)?._ === 'document') {
-								if (doc.mimeType === TGS_MIME) {
-									await msg.edit({
-										text: html`❌ TGS 贴纸转换失败<br><br>
-需要安装: <code>pip3 install rlottie-python</code> 和 <code>ffmpeg</code>`,
-									});
-									return;
-								}
-								if (doc.mimeType === WEBM_MIME) {
-									await msg.edit({
-										text: html`❌ WebM 贴纸转换失败<br><br>
-需要安装: <code>ffmpeg</code>`,
-									});
-									return;
-								}
+						if (replyMsg.media?.type === 'document') {
+							const doc = replyMsg.media as Document;
+							const mimeType = doc.mimeType;
+							if (mimeType === TGS_MIME) {
+								await msg.edit({
+									text: html`❌ TGS 贴纸转换失败<br><br>
+						需要安装: <code>pip3 install rlottie-python</code> 和 <code>ffmpeg</code>`,
+								});
+								return;
 							}
-						}
+							if (mimeType === WEBM_MIME) {
+								await msg.edit({
+									text: html`❌ WebM 贴纸转换失败<br><br>
+						需要安装: <code>ffmpeg</code>`,
+								});
+								return;
+							}
 					}
-				} catch (error) {
-					console.error('[xmsl] 获取回复消息失败:', error);
+					}
+				} catch (error: unknown) {
+					logger.error('[xmsl] 获取回复消息失败:', error);
 				}
 			}
 
@@ -462,9 +500,9 @@ class XMSLPlugin extends Plugin {
 					await this.askAI(msg, args.join(' '));
 					break;
 			}
-		} catch (error: any) {
+		} catch (error: unknown) {
 			await msg.edit({
-				text: html`❌ 处理失败: ${error.message}`,
+				text: html`❌ 处理失败: ${this.htmlEscape(getErrorMessage(error))}`,
 			});
 		}
 	}
@@ -514,11 +552,11 @@ class XMSLPlugin extends Plugin {
 
 			await this.saveConfig();
 			await msg.edit({
-				text: html`✅ ${key} 已设置为: <code>${value}</code>`,
+				text: html`✅ ${this.htmlEscape(key)} 已设置为: <code>${this.htmlEscape(value)}</code>`,
 			});
-		} catch (error: any) {
+		} catch (error: unknown) {
 			await msg.edit({
-				text: html`❌ 设置失败: ${error.message}`,
+				text: html`❌ 设置失败: ${this.htmlEscape(getErrorMessage(error))}`,
 			});
 		}
 	}
@@ -586,34 +624,36 @@ model: <code>${this.config.model}</code><br>
 			// 检查token数量
 			const estimatedTokens = Math.ceil(answer.length / 4);
 			if (estimatedTokens > MAX_RESPONSE_TOKENS) {
-				answer = `⚠️ 回复过长(${estimatedTokens} tokens, 超过限制${MAX_RESPONSE_TOKENS})\n\n${answer.substring(
+				answer = `⚠️ 回复过长(${estimatedTokens} tokens, 超过限制${MAX_RESPONSE_TOKENS})<br><br>${answer.substring(
 					0,
 					1000
 				)}...`;
 			}
 
 			await msg.edit({
-				text: html(answer),
+				text: html(answer.replace(/\n/g, '<br>')),
 			});
-		} catch (error: any) {
-			console.error('[xmsl] API Error:', error);
+		} catch (error: unknown) {
+			logger.error('[xmsl] API Error:', error);
 			// 打印 API 返回的详细错误信息
-			if (error.response?.data) {
-				console.error('[xmsl] API Response:', JSON.stringify(error.response.data, null, 2));
+			const axiosErr = error as { response?: { status?: number; data?: unknown }; code?: string };
+			if (axiosErr.response?.data) {
+				logger.error('[xmsl] API Response:', JSON.stringify(axiosErr.response.data, null, 2));
 			}
 			let errorMsg = '❌ API 调用失败';
 
-			if (error.response?.status === 400) {
-				const apiError = error.response?.data?.error?.message || '请求格式错误';
+			if (axiosErr.response?.status === 400) {
+				const respData = axiosErr.response.data as { error?: { message?: string } } | undefined;
+				const apiError = respData?.error?.message || '请求格式错误';
 				errorMsg = `❌ API 请求错误: ${this.htmlEscape(apiError)}`;
-			} else if (error.response?.status === 401) {
+			} else if (axiosErr.response?.status === 401) {
 				errorMsg = '❌ API 密钥无效';
-			} else if (error.response?.status === 429) {
+			} else if (axiosErr.response?.status === 429) {
 				errorMsg = '❌ 请求过于频繁，请稍后重试';
-			} else if (error.code === 'ECONNREFUSED') {
+			} else if (axiosErr.code === 'ECONNREFUSED') {
 				errorMsg = '❌ 无法连接到 API 服务器';
-			} else if (error.message) {
-				errorMsg = `❌ ${this.htmlEscape(error.message)}`;
+			} else if (getErrorMessage(error)) {
+				errorMsg = `❌ ${this.htmlEscape(getErrorMessage(error))}`;
 			}
 
 			await msg.edit({
@@ -632,14 +672,14 @@ model: <code>${this.config.model}</code><br>
 			timeout: 60000,
 		});
 
-		const messages: any[] = [];
+		const messages: OpenAiMessage[] = [];
 		if (SYSTEM_PROMPT) {
 			messages.push({ role: 'system', content: SYSTEM_PROMPT });
 		}
 
 		// 构建用户消息内容
 		if (imageInfo) {
-			const content: any[] = [];
+			const content: OpenAiContentPart[] = [];
 			if (question) {
 				content.push({ type: 'text', text: question });
 			} else {
@@ -672,7 +712,7 @@ model: <code>${this.config.model}</code><br>
 		)}:generateContent`;
 
 		// 构建内容部分
-		const parts: any[] = [];
+		const parts: GeminiPart[] = [];
 		if (question) {
 			parts.push({ text: question });
 		} else if (imageInfo) {
@@ -688,7 +728,7 @@ model: <code>${this.config.model}</code><br>
 			});
 		}
 
-		const requestBody: any = {
+		const requestBody: GeminiChatRequest = {
 			contents: [{ parts }],
 			generationConfig: {
 				temperature: 0.7,
@@ -714,7 +754,7 @@ model: <code>${this.config.model}</code><br>
 		const responseParts = response.data?.candidates?.[0]?.content?.parts || [];
 		return (
 			responseParts
-				.map((p: any) => p.text || '')
+				.map((p: GeminiPart) => p.text || '')
 				.join('')
 				.trim() || '无法获取回复'
 		);

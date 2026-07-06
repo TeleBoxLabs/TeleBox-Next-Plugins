@@ -9,6 +9,8 @@ import { promisify } from "util";
 import path from "path";
 import { createDirectoryInAssets } from "@utils/pathHelpers";
 import { safeGetReplyMessage } from "@utils/safeGetMessages";
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
 
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
@@ -52,7 +54,7 @@ async function loadUserData(): Promise<AllUserData> {
     }
     if (changed) await saveUserData(parsed);
     return parsed;
-  } catch {
+  } catch (_e: unknown) {
     const initial: AllUserData = {
       users: {},
       roles: getInitialRoles(),
@@ -150,7 +152,7 @@ async function generateMusic(
     if (meta.cover) {
       const coverPath = path.join(cacheDir, `${meta.album}.jpg`);
       try { await fs.access(coverPath); }
-      catch {
+      catch (_e: unknown) {
         const coverRes = await axios.get(meta.cover, { responseType: "arraybuffer" });
         await fs.writeFile(coverPath, coverRes.data);
       }
@@ -178,11 +180,11 @@ async function generateMusic(
 
     await execPromise(cmd.join(" "));
     return finalFile;
-  } catch (e: any) {
-    console.error("生成音乐失败:", e.message || e);
+  } catch (e: unknown) {
+    logger.error("生成音乐失败:", getErrorMessage(e) || String(e));
     return null;
   } finally {
-    try { await fs.unlink(rawFile); } catch {}
+    try { await fs.unlink(rawFile); } catch (e: unknown) { logger.error('[t] cleanup raw file failed:', e); }
   }
 }
 
@@ -202,7 +204,7 @@ async function generateSpeechSimple(
     await fs.writeFile(mp3File, res.data);
     await execPromise(`ffmpeg -y -i "${mp3File}" -c:a libopus -b:a 64k -vbr on "${oggFile}"`);
     return { oggFile, mp3File };
-  } catch {
+  } catch (_e: unknown) {
     return null;
   }
 }
@@ -215,7 +217,7 @@ async function deleteCommandMessage(msg: MessageContext) {
     } else {
       await msg.delete();
     }
-  } catch {}
+  } catch (e: unknown) { logger.error('[t] generateSpeech failed:', e); }
 }
 
 // 文字转语音主处理
@@ -263,10 +265,10 @@ async function tts(msg: MessageContext) {
         file: file,
         fileName: file,
         caption: `${title} - ${artist}`,
-      } as any, {
+      }, {
         replyTo: replyToId,
       });
-      try { await fs.unlink(file); } catch {}
+      try { await fs.unlink(file); } catch (e: unknown) { logger.error('[t] cleanup file failed:', e); }
       await deleteCommandMessage(msg); // 发送后删命令
     } else {
       await msg.edit({ text: "❌ 生成失败" });
@@ -294,10 +296,10 @@ async function tts(msg: MessageContext) {
     await client.sendMedia(msg.chat.id, {
       type: 'voice',
       file: r.oggFile,
-    } as any, {
+    }, {
       replyTo: replyToId,
     });
-    try { await fs.unlink(r.oggFile); await fs.unlink(r.mp3File); } catch {}
+    try { await Promise.all([fs.unlink(r.oggFile), fs.unlink(r.mp3File)]); } catch (e: unknown) { logger.error('[t] cleanup audio files failed:', e); }
     await deleteCommandMessage(msg); // 发送后删命令
   } else {
     await msg.edit({ text: "❌ 生成失败" });

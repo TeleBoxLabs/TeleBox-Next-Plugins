@@ -1,22 +1,20 @@
 // plugins/lu_bs.ts
 import { Plugin } from "@utils/pluginBase";
 import type { MessageContext } from "@mtcute/dispatcher";
+import type { TelegramClient } from "@mtcute/node";
+import type { InputFileLike } from "@mtcute/core";
 import { html } from "@mtcute/html-parser";
 import { getGlobalClient } from "@utils/globalClient";
 import { getPrefixes } from "@utils/pluginManager";
 import { JSONFilePreset } from "lowdb/node";
 import { createDirectoryInAssets } from "@utils/pathHelpers";
 import * as path from "path";
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
+import { htmlEscape } from "@utils/htmlEscape";
 
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
-
-// HTML转义函数
-const htmlEscape = (text: string): string => 
-  text.replace(/[&<>"']/g, m => ({ 
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', 
-    '"': '&quot;', "'": '&#x27;' 
-  }[m] || m));
 
 // 帮助文本
 const HELP_TEXT = `🕒 <b>鲁小迅整点报时</b>
@@ -38,7 +36,6 @@ const HELP_TEXT = `🕒 <b>鲁小迅整点报时</b>
 
 class LuBsPlugin extends Plugin {
   cleanup(): void {
-    this.db = null;
     this.stickerSet = null;
   }
 
@@ -47,8 +44,12 @@ class LuBsPlugin extends Plugin {
     await this.loadStickerSet();
   }
 
-  private db: any = null;
-  private stickerSet: any = null;
+  private db!: Awaited<ReturnType<typeof JSONFilePreset<{ subscriptions: string[]; lastMessages: Record<string, number> }>>>;
+  private stickerSet: { documents: { id: number | bigint; access_hash?: unknown; file_reference?: unknown }[] } | null = null;
+
+  /**
+   * TL RPC return type for messages.getStickerSet - { _: 'messages.stickerSet', set, packs, keywords, documents }
+   */
   private readonly PLUGIN_NAME = "lu_bs";
   
   description = HELP_TEXT;
@@ -58,7 +59,7 @@ class LuBsPlugin extends Plugin {
     hourlyReport: {
       cron: "0 * * * *", // 每小时整点
       description: "鲁小迅整点报时",
-      handler: async (client: any) => {
+      handler: async (client: TelegramClient) => {
         await this.sendHourlyStickers(client);
       }
     }
@@ -71,9 +72,9 @@ class LuBsPlugin extends Plugin {
   // 初始化数据库
   private async initDB() {
     const dbPath = path.join(createDirectoryInAssets(this.PLUGIN_NAME), "subscriptions.json");
-    this.db = await JSONFilePreset(dbPath, { 
-      subscriptions: [],
-      lastMessages: {} // 存储最后发送的消息ID，用于删除
+    this.db = await JSONFilePreset(dbPath, {
+      subscriptions: [] as string[],
+      lastMessages: {} as Record<string, number>
     });
   }
 
@@ -84,24 +85,24 @@ class LuBsPlugin extends Plugin {
       if (!client) return;
 
       // 使用mtcute raw API获取贴纸包
-      this.stickerSet = await client.call({
+      this.stickerSet = (await client.call({
         _: 'messages.getStickerSet',
         stickerset: {
           _: 'inputStickerSetShortName',
           shortName: "luxiaoxunbs"
         },
         hash: 0
-      });
+      })) as unknown as { documents: { id: number | bigint; access_hash?: unknown; file_reference?: unknown }[] };
       
-      console.log(`[${this.PLUGIN_NAME}] 贴纸包加载成功`);
-    } catch (error) {
-      console.error(`[${this.PLUGIN_NAME}] 贴纸包加载失败:`, error);
+      logger.info(`[${this.PLUGIN_NAME}] 贴纸包加载成功`);
+    } catch (error: unknown) {
+      logger.error(`[${this.PLUGIN_NAME}] 贴纸包加载失败:`, error);
       this.stickerSet = null;
     }
   }
 
   // 获取当前小时对应的贴纸
-  private async getHourSticker(): Promise<any> {
+  private async getHourSticker(): Promise<{ id: bigint | number; access_hash?: unknown; file_reference?: unknown } | null> {
     if (!this.stickerSet) {
       await this.loadStickerSet();
     }
@@ -128,12 +129,12 @@ class LuBsPlugin extends Plugin {
   }
 
   // 发送整点贴纸
-  private async sendHourlyStickers(client: any) {
+  private async sendHourlyStickers(client: TelegramClient) {
     if (!this.db) await this.initDB();
     
     const sticker = await this.getHourSticker();
     if (!sticker) {
-      console.error(`[${this.PLUGIN_NAME}] 无法获取贴纸`);
+      logger.error(`[${this.PLUGIN_NAME}] 无法获取贴纸`);
       return;
     }
 
@@ -146,37 +147,40 @@ class LuBsPlugin extends Plugin {
         if (lastMsgId) {
           try {
             await client.deleteMessagesById(chatId, [lastMsgId], { revoke: true });
-          } catch (error) {
-            // 忽略删除失败的情况（消息可能已过期）
-          }
+          } catch (error: unknown) { logger.warn(`[lu_bs] 忽略删除失败的情况（消息可能已过期）:`, error) }
         }
 
-        // 发送新贴纸
+        // 发送新贴纸 - mtcute 风格：使用 type: 'document' + TL InputDocument 对象
+        // Note: API returns snake_case fields; mtcute TL types expect camelCase
+        const inputDoc = {
+          _: 'inputDocument' as const,
+          id: sticker.id,
+          accessHash: sticker.access_hash,
+          fileReference: sticker.file_reference,
+        };
+        // Cast needed: InputFileLike doesn't include TypeInputDocument in public types,
+        // but mtcute runtime does handle TL InputDocument objects for resending
         const message = await client.sendMedia(chatId, {
-          _: 'inputMediaDocument',
-          id: {
-            _: 'inputDocument',
-            id: sticker.id,
-            access_hash: sticker.access_hash,
-            file_reference: sticker.file_reference,
-          }
+          type: 'document',
+          file: inputDoc as unknown as InputFileLike,
         });
 
         // 记录新消息ID，用于下次删除
         this.db.data.lastMessages[chatId] = message.id;
         await this.db.write();
 
-        console.log(`[${this.PLUGIN_NAME}] 已发送整点报时到 ${chatId}`);
-      } catch (error) {
-        console.error(`[${this.PLUGIN_NAME}] 发送失败到 ${chatId}:`, error);
+        logger.info(`[${this.PLUGIN_NAME}] 已发送整点报时到 ${chatId}`);
+      } catch (error: unknown) {
+        logger.error(`[${this.PLUGIN_NAME}] 发送失败到 ${chatId}:`, error);
         
         // 如果发送失败，可能是聊天不存在或没有权限，移除订阅
-        if ((error as any).message?.includes("CHAT_WRITE_FORBIDDEN") || 
-            (error as any).message?.includes("CHAT_NOT_FOUND")) {
+        const errMsg = getErrorMessage(error);
+        if (errMsg.includes("CHAT_WRITE_FORBIDDEN") ||
+            errMsg.includes("CHAT_NOT_FOUND")) {
           this.db.data.subscriptions = this.db.data.subscriptions.filter((id: string) => id !== chatId);
           delete this.db.data.lastMessages[chatId];
           await this.db.write();
-          console.log(`[${this.PLUGIN_NAME}] 已移除无效订阅: ${chatId}`);
+          logger.info(`[${this.PLUGIN_NAME}] 已移除无效订阅: ${chatId}`);
         }
       }
     }
@@ -201,13 +205,15 @@ class LuBsPlugin extends Plugin {
       
       // 群组/频道需要检查管理员权限（chat.type is already narrowed to "chat"）
       {
-        const channelPeer = await client.resolvePeer(chat.id) as any;
-        const senderPeer = await client.resolvePeer(sender.id);
+        const [channelPeer, senderPeer] = await Promise.all([
+          client.resolvePeer(chat.id),
+          client.resolvePeer(sender.id),
+        ]);
         const result = await client.call({
           _: 'channels.getParticipant',
           channel: channelPeer,
           participant: senderPeer
-        }) as any;
+        } as never) as unknown as { participant?: { _?: string } };
         const participant = result?.participant;
         if (!participant) return false;
         const pType = participant._;
@@ -220,8 +226,8 @@ class LuBsPlugin extends Plugin {
       }
       
       return false;
-    } catch (error) {
-      console.error(`[${this.PLUGIN_NAME}] 权限检查失败:`, error);
+    } catch (error: unknown) {
+      logger.error(`[${this.PLUGIN_NAME}] 权限检查失败:`, error);
       return false;
     }
   }
@@ -261,9 +267,9 @@ class LuBsPlugin extends Plugin {
             await msg.edit({ text: html(HELP_TEXT) });
             break;
         }
-      } catch (error: any) {
+      } catch (error: unknown) {
         await msg.edit({
-          text: html`❌ <b>错误:</b> ${htmlEscape(error.message || "未知错误")}`,
+          text: html`❌ <b>错误:</b> ${htmlEscape(getErrorMessage(error) || "未知错误")}`,
         });
       }
     }

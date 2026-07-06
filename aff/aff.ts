@@ -6,6 +6,7 @@ import { JSONFilePreset } from "lowdb/node";
 import { createDirectoryInAssets } from "@utils/pathHelpers";
 import * as path from "path";
 import { safeGetReplyMessage } from "@utils/safeGetMessages";
+import { logger } from "@utils/logger";
 
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
@@ -24,15 +25,14 @@ interface DBData {
 
 class AffPlugin extends Plugin {
   cleanup(): void {
-    // 引用重置：清空实例级 db / cache / manager 引用，便于 reload 后重新初始化。
-    this.db = null;
+    // 引用重置：db 由 reload 后重新初始化自动覆盖，无需显式清空。
   }
 
   async setup(): Promise<void> {
     await this.initDB();
   }
 
-  private db: any = null;
+  private db!: Awaited<ReturnType<typeof JSONFilePreset<DBData>>>;
   private readonly PLUGIN_NAME = "aff";
   
   // 插件描述
@@ -151,14 +151,14 @@ class AffPlugin extends Plugin {
       // 无效参数
       await msg.edit({
         text: html(`❌ <b>无效的参数</b><br><br>` +
-              `💡 使用方法：\n` +
-              `• <code>${mainPrefix}aff</code> - 发送/列表\n` +
-              `• <code>${mainPrefix}aff &lt;序号&gt;</code> - 发送指定条目\n` +
-              `• <code>${mainPrefix}aff save</code> - 保存回复\n` +
+              `💡 使用方法：<br>` +
+              `• <code>${mainPrefix}aff</code> - 发送/列表<br>` +
+              `• <code>${mainPrefix}aff &lt;序号&gt;</code> - 发送指定条目<br>` +
+              `• <code>${mainPrefix}aff save</code> - 保存回复<br>` +
               `• <code>${mainPrefix}aff remove &lt;序号&gt;</code> - 删除条目`),
       });
 
-    } catch (error: any) {
+    } catch (error: unknown) {
       await this.handleError(msg, error);
     }
   }
@@ -297,10 +297,10 @@ class AffPlugin extends Plugin {
   }
 
   // 错误处理
-  private async handleError(msg: MessageContext, error: any): Promise<void> {
-    console.error(`[${this.PLUGIN_NAME}] Error:`, error);
+  private async handleError(msg: MessageContext, error: unknown): Promise<void> {
+    logger.error(`[${this.PLUGIN_NAME}] Error:`, error);
     
-    const errorMsg = this.htmlEscape(error?.message || String(error) || "未知错误");
+    const errorMsg = this.htmlEscape(error instanceof Error ? error.message : String(error) || "未知错误");
     
     await msg.edit({
       text: html`❌ <b>操作失败：</b>${errorMsg}`,

@@ -50,7 +50,7 @@ class HttpCatPlugin extends Plugin {
           replyTo: msg.id,
         });
         await msg.delete();
-      } catch (error) {
+      } catch (error: unknown) {
         await msg.edit({ text: `获取图片失败: ${error}` });
       }
     },

@@ -2,6 +2,8 @@ import { Plugin } from "@utils/pluginBase";
 import { getGlobalClient } from "@utils/globalClient";
 import type { MessageContext } from "@mtcute/dispatcher";
 import { getPrefixes } from "@utils/pluginManager";
+import { logger } from "@utils/logger";
+import type { tl } from "@mtcute/core";
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
 
@@ -97,12 +99,13 @@ class ClearStickerPlugin extends Plugin {
           
           for (const message of history) {
             if (message.media) {
-              const raw = (message as any).raw;
-              if (raw?.media?._ === 'messageMediaDocument') {
-                const document = raw.media.document;
+              // raw is RawMessage | RawMessageService; only RawMessage has .media
+              const rawMsg = message.raw as tl.RawMessage | null;
+              if (rawMsg?.media?._ === 'messageMediaDocument') {
+                const document = rawMsg.media.document;
                 if (document?._ === 'document') {
-                  const isSticker = document.attributes?.some((attr: any) => 
-                    attr._ === 'documentAttributeSticker'
+                  const isSticker = document.attributes?.some(
+                    (attr: tl.TypeDocumentAttribute) => attr._ === 'documentAttributeSticker'
                   );
                   
                   if (isSticker) {
@@ -131,8 +134,8 @@ class ClearStickerPlugin extends Plugin {
               await msg.edit({
                 text: progressText
               });
-            } catch (deleteError) {
-              console.error("Failed to delete sticker messages:", deleteError);
+            } catch (deleteError: unknown) {
+              logger.error("Failed to delete sticker messages:", deleteError);
             }
           }
 
@@ -149,8 +152,8 @@ class ClearStickerPlugin extends Plugin {
           // 节流，避免触发限制
           await new Promise(resolve => setTimeout(resolve, 1200));
           
-        } catch (historyError) {
-          console.error("Failed to get chat history:", historyError);
+        } catch (historyError: unknown) {
+          logger.error("Failed to get chat history:", historyError);
           hasMore = false;
         }
       }
@@ -169,15 +172,13 @@ class ClearStickerPlugin extends Plugin {
 
           scheduleTimer(async () => {
             try {
-              if (finalMsg && typeof (finalMsg as any).delete === 'function') {
-                await msg.delete();
-              }
-            } catch (error) {
-              console.error("Failed to delete result message:", error);
+              await msg.delete();
+            } catch (error: unknown) {
+              logger.error("Failed to delete result message:", error);
             }
           }, 3000);
-        } catch (error) {
-          console.error("Failed to edit final message:", error);
+        } catch (error: unknown) {
+          logger.error("Failed to edit final message:", error);
         }
       } else {
         await msg.edit({
@@ -185,8 +186,8 @@ class ClearStickerPlugin extends Plugin {
         });
       }
       
-    } catch (error) {
-      console.error("ClearSticker plugin error:", error);
+    } catch (error: unknown) {
+      logger.error("ClearSticker plugin error:", error);
       await msg.edit({
         text: "❌ 清理贴纸消息时出现错误。"
       });

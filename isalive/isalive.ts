@@ -2,8 +2,22 @@ import { getPrefixes } from "@utils/pluginManager";
 import { Plugin } from "@utils/pluginBase";
 import { getGlobalClient } from "@utils/globalClient";
 import type { MessageContext } from "@mtcute/dispatcher";
+import type { User, Chat } from "@mtcute/node";
+import type { MtcuteLong } from "@utils/mtcuteTypes";
 import { html } from "@mtcute/html-parser";
 import { safeGetMessages } from "@utils/safeGetMessages";
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
+import {
+  getUserStatus,
+  hasUserStatus,
+  getUserWasOnline,
+  isUserDeleted,
+  getRawType,
+  getTitle,
+  getUsername,
+  getUserId,
+} from "@utils/entityTypeGuards";
 
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
@@ -37,55 +51,58 @@ function codeTag(text: string | number): string {
   return `<code>${htmlEscape(String(text))}</code>`;
 }
 async function formatEntity(
-  target: any,
+  target: unknown,
   mention?: boolean,
   throwErrorIfFailed?: boolean
 ) {
   const client = await getGlobalClient();
   if (!client) throw new Error("Telegram 客户端未初始化");
   if (!target) throw new Error("无效的目标");
-  let id: any;
-  let entity: any;
+  let id: number | undefined;
+  let entity: Chat | User | null = null;
   try {
-    entity = (target as any)?._
-      ? target
-      : ((await client?.getChat(target)) as any);
+    if (getRawType(target)) {
+      entity = target as Chat | User;
+    } else {
+      entity = await client.getChat(target as string | number);
+    }
     if (!entity) throw new Error("无法获取 entity");
-    id = entity.id;
+    id = getUserId(entity);
     if (!id) throw new Error("无法获取 entity id");
-  } catch (e: any) {
-    console.error(e);
+  } catch (e: unknown) {
+    logger.error(e);
     if (throwErrorIfFailed)
       throw new Error(
-        `无法获取 ${target} 的 entity: ${e?.message || "未知错误"}`
+        `无法获取 ${target} 的 entity: ${getErrorMessage(e)}`
       );
   }
   const displayParts: string[] = [];
 
-  if (entity?.title) displayParts.push(entity.title);
-  if (entity?.firstName) displayParts.push(entity.firstName);
-  if (entity?.lastName) displayParts.push(entity.lastName);
+  const title = getTitle(entity);
+  const entityRaw = (entity as User | Chat & { raw?: { firstName?: string; lastName?: string } }).raw as { firstName?: string; lastName?: string } | undefined;
+  if (title) displayParts.push(title);
+  if (entityRaw?.firstName) displayParts.push(entityRaw.firstName);
+  if (entityRaw?.lastName) displayParts.push(entityRaw.lastName);
 
   return {
     id,
     entity,
-    username: entity?.username || null,
+    username: getUsername(entity) || null,
     display: displayParts.join(" ").trim(),
   };
 }
-function getLastOnlineDays(user: any): number | null {
-  if (!(user as any).status) return null;
-  if (
-    (user as any).status?._ === 'userStatusOnline' ||
-    (user as any).status?._ === 'userStatusRecently'
-  ) {
+function getLastOnlineDays(user: unknown): number | null {
+  const status = getUserStatus(user);
+  if (!status) return null;
+  if (hasUserStatus(user, 'userStatusOnline') || hasUserStatus(user, 'userStatusRecently')) {
     return 0;
   }
-  if ((user as any).status?._ === 'userStatusOffline') {
-    if ((user as any).status?.wasOnline) {
-      const wasOnlineTs = (user as any).status?.wasOnline instanceof Date
-        ? (user as any).status.wasOnline.getTime()
-        : Number((user as any).status?.wasOnline || 0) * 1000;
+  if (hasUserStatus(user, 'userStatusOffline')) {
+    const wasOnline = getUserWasOnline(user);
+    if (wasOnline) {
+      const wasOnlineTs = wasOnline instanceof Date
+        ? wasOnline.getTime()
+        : Number(wasOnline) * 1000;
       const days = Math.floor(
         (Date.now() - wasOnlineTs) /
         (1000 * 60 * 60 * 24)
@@ -94,28 +111,30 @@ function getLastOnlineDays(user: any): number | null {
     }
     return null;
   }
-  if ((user as any).status?._ === 'userStatusLastWeek') {
+  if (hasUserStatus(user, 'userStatusLastWeek')) {
     return 7;
   }
-  if ((user as any).status?._ === 'userStatusLastMonth') {
+  if (hasUserStatus(user, 'userStatusLastMonth')) {
     return 30;
   }
   return null;
 }
 
-function getLastOnlineDateTime(user: any): string | null {
-  if (!(user as any).status) return null;
-  if ((user as any).status?._ === 'userStatusOnline') {
+function getLastOnlineDateTime(user: unknown): string | null {
+  const status = getUserStatus(user);
+  if (!status) return null;
+  if (hasUserStatus(user, 'userStatusOnline')) {
     return "在线";
   }
-  if ((user as any).status?._ === 'userStatusRecently') {
+  if (hasUserStatus(user, 'userStatusRecently')) {
     return "最近上线";
   }
-  if ((user as any).status?._ === 'userStatusOffline') {
-    if ((user as any).status?.wasOnline) {
-      const wasOnlineTs = (user as any).status?.wasOnline instanceof Date
-        ? (user as any).status.wasOnline.getTime()
-        : Number((user as any).status?.wasOnline || 0) * 1000;
+  if (hasUserStatus(user, 'userStatusOffline')) {
+    const wasOnline = getUserWasOnline(user);
+    if (wasOnline) {
+      const wasOnlineTs = wasOnline instanceof Date
+        ? wasOnline.getTime()
+        : Number(wasOnline) * 1000;
       const date = new Date(wasOnlineTs);
       return date.toLocaleString("zh-CN", {
         timeZone: "Asia/Shanghai",
@@ -130,40 +149,45 @@ function getLastOnlineDateTime(user: any): string | null {
     }
     return null;
   }
-  if ((user as any).status?._ === 'userStatusLastWeek') {
+  if (hasUserStatus(user, 'userStatusLastWeek')) {
     return "一周内";
   }
-  if ((user as any).status?._ === 'userStatusLastMonth') {
+  if (hasUserStatus(user, 'userStatusLastMonth')) {
     return "一个月内";
   }
   return null;
 }
 
 // 获取用户状态图标
-function getStatusIcon(user: any): string {
-  if ((user as any).deleted) return "💀";
-  if ((user as any).scam || (user as any).fake) return "⚠️";
-  if ((user as any).bot) return "🤖";
-  if ((user as any).verified) return "✅";
-  if ((user as any).premium) return "⭐";
+function getStatusIcon(user: User): string {
+  if (isUserDeleted(user)) return "💀";
+  const raw = user.raw as { scam?: boolean; fake?: boolean; bot?: boolean; verified?: boolean; premium?: boolean };
+  if (raw?.scam || raw?.fake) return "⚠️";
+  if (raw?.bot) return "🤖";
+  if (raw?.verified) return "✅";
+  if (raw?.premium) return "⭐";
 
   // 在线状态图标
-  if ((user as any).status?._ === 'userStatusOnline') return "🟢";
-  if ((user as any).status?._ === 'userStatusRecently') return "🟡";
-  if ((user as any).status?._ === 'userStatusOffline') return "⚪";
+  if (hasUserStatus(user, 'userStatusOnline')) return "🟢";
+  if (hasUserStatus(user, 'userStatusRecently')) return "🟡";
+  if (hasUserStatus(user, 'userStatusOffline')) return "⚪";
   return "⚫";
 }
 
 // 生成趣味评语
 function generateComment(
-  user: any,
+  user: User,
   lastOnlineDays: number | null,
   lastMessageDate: Date | null
 ): string {
   const comments: string[] = [];
+  const raw = user.raw as {
+    deleted?: boolean; bot?: boolean; scam?: boolean; fake?: boolean;
+    verified?: boolean; premium?: boolean; restricted?: boolean; support?: boolean;
+  };
 
   // 特殊账号状态优先
-  if ((user as any).deleted) {
+  if (isUserDeleted(user)) {
     const deletedComments = [
       "这号已经凉透了 💀",
       "人走茶凉，账号注销",
@@ -176,7 +200,7 @@ function generateComment(
     return comments.join("\n├ ");
   }
 
-  if ((user as any).bot) {
+  if (raw?.bot) {
     const botComments = [
       "我是机器人，不需要睡觉 🤖",
       "24小时待命中~",
@@ -287,13 +311,13 @@ async function findUserFromGroups(
     try {
       const dialogs = await client.getDialogs(params);
       for (const dialog of dialogs || []) {
-        const key = `${(dialog as any).id}`;
+        const key = `${(dialog as { id?: number }).id}`;
         if (!dialogMap.has(key)) {
           dialogMap.set(key, dialog);
         }
       }
-    } catch (error) {
-      console.error("findUserFromGroups getDialogs error:", error);
+    } catch (error: unknown) {
+      logger.error("findUserFromGroups getDialogs error:", error);
     }
   };
 
@@ -302,28 +326,27 @@ async function findUserFromGroups(
     await collectDialogs({ folderId: 1 });
 
     for (const dialog of dialogMap.values()) {
+      const entityRaw = (dialog as { entity?: { raw?: { _?: string } } }).entity;
+      const entityType = entityRaw?.raw?._;
       // 只检查群组和超级群组
-      if (
-        (dialog.entity as any)?._ === 'chat' ||
-        (dialog.entity as any)?._ === 'channel'
-      ) {
+      if (entityType === 'chat' || entityType === 'channel') {
         try {
-          const participants = await (client as any).getParticipants(dialog.entity, {
+          const participants = await client.getChatMembers(dialog.entity, {
             limit: 200,
           });
           for (const participant of participants) {
-            if (Number((participant as any).id) === userId) {
-              return participant as any;
+            if (Number((participant as { id?: number }).id) === userId) {
+              return participant;
             }
           }
-        } catch {
+        } catch (_e: unknown) {
           // 跳过无法获取成员的群组
           continue;
         }
       }
     }
-  } catch (e) {
-    console.error("findUserFromGroups error:", e);
+  } catch (e: unknown) {
+    logger.error("findUserFromGroups error:", e);
   }
   return null;
 }
@@ -353,7 +376,7 @@ class IsAlivePlugin extends Plugin {
           return;
         }
 
-        let entity: any = null;
+        let entity: User | Chat | null = null;
 
         // 立即显示查询状态
         await msg.edit({
@@ -365,33 +388,38 @@ class IsAlivePlugin extends Plugin {
             const userId = Number(input);
             // 先尝试常规方式获取
             try {
-              entity = (await (client as any).getChat(userId)) as any;
-            } catch {
+              entity = await client.getChat(userId) as User | Chat;
+            } catch (_e: unknown) {
               // 常规方式失败，尝试从群组成员中查找
               await msg.edit({
                 text: html`🔍 正在从群组成员中查找用户...`,
               });
-              entity = await findUserFromGroups(client, userId);
+              entity = await findUserFromGroups(client, userId) as User | Chat | null;
             }
           } else {
             const username = input.startsWith("@") ? input : `@${input}`;
-            entity = (await (client as any).getChat(username)) as any;
+            entity = await client.getChat(username) as User | Chat;
           }
-        } catch (error: any) {
+        } catch (error: unknown) {
           await msg.edit({
-            text: html`❌ 无法解析用户: ${error?.message || String(error)}<br><i>提示: 使用 UID 查询需要你与该用户有过交互（私聊、同群等）</i>`,
+            text: html`❌ 无法解析用户: ${htmlEscape(getErrorMessage(error))}<br><i>提示: 使用 UID 查询需要你与该用户有过交互（私聊、同群等）</i>`,
           });
           return;
         }
 
-        if (!entity || (entity as any)._ !== 'user') {
+        if (!entity || getRawType(entity) !== 'user') {
           await msg.edit({
             text: html`❌ 查询失败，提供的用户名或ID可能不存在或有误。`,
           });
           return;
         }
 
-        const user = entity as any;
+        const user = entity as User;
+        const userRaw = user.raw as {
+          verified?: boolean; premium?: boolean; bot?: boolean;
+          scam?: boolean; fake?: boolean; restricted?: boolean; support?: boolean; deleted?: boolean;
+          id?: number;
+        };
 
         // 基本信息
         const entityInfo = await formatEntity(user);
@@ -405,18 +433,24 @@ class IsAlivePlugin extends Plugin {
         let lastMessageTime: string | null = null;
         let lastMessageDate: Date | null = null;
         try {
-          const chatId = (msg as any).chatId;
+          const chatId = msg.chat.id;
           if (chatId) {
-            const messages = await safeGetMessages(client, chatId, {
-              fromUser: (user as any).id,
+            const searchResult: any = await client.call({
+              _: 'messages.getHistory',
+              peer: await client.resolvePeer(chatId),
               limit: 1,
-            } as any);
-            if (messages && messages.length > 0 && (messages[0] as any).date) {
-              const date = (messages[0] as any).date instanceof Date
-                ? (messages[0] as any).date
-                : new Date((messages[0] as any).date * 1000);
-              lastMessageDate = date;
-              lastMessageTime = date.toLocaleString("zh-CN", {
+              offsetId: 0,
+              offsetDate: 0,
+              addOffset: 0,
+              maxId: 0,
+              minId: 0,
+              hash: 0 as unknown as MtcuteLong,
+            });
+            const msgs = (searchResult?.messages || []).filter((m: any) => Number(m?.fromId?.userId || m?.peerId?.userId) === Number(userRaw.id));
+            const messages = msgs.length > 0 ? msgs : [];
+            if (messages && messages.length > 0 && messages[0].date) {
+              lastMessageDate = messages[0].date;
+              lastMessageTime = messages[0].date.toLocaleString("zh-CN", {
                 timeZone: "Asia/Shanghai",
                 year: "numeric",
                 month: "2-digit",
@@ -428,7 +462,7 @@ class IsAlivePlugin extends Plugin {
               });
             }
           }
-        } catch {
+        } catch (_e: unknown) {
           lastMessageTime = null;
           lastMessageDate = null;
         }
@@ -444,7 +478,7 @@ class IsAlivePlugin extends Plugin {
         if (entityInfo.username) {
           lines.push(`├ 用户名: ${codeTag(`@${entityInfo.username}`)}`);
         }
-        lines.push(`└ 用户ID: <a href="tg://user?id=${(user as any).id}">${(user as any).id}</a>`);
+        lines.push(`└ 用户ID: <a href="tg://user?id=${userRaw.id}">${userRaw.id}</a>`);
         lines.push(`<b>📡 在线状态</b>`);
         lines.push(`├ 状态: ${codeTag(lastOnlineDateTime ?? "未知")}`);
         lines.push(`└ 天数: ${codeTag(lastOnlineDays === null ? "未知" : lastOnlineDays + " 天")}`);
@@ -454,14 +488,14 @@ class IsAlivePlugin extends Plugin {
 
         // 账号属性
         const attrs: string[] = [];
-        if ((user as any).verified) attrs.push("✅ 官方认证");
-        if ((user as any).premium) attrs.push("⭐ Premium");
-        if ((user as any).bot) attrs.push("🤖 机器人");
-        if ((user as any).scam) attrs.push("⚠️ 诈骗账号");
-        if ((user as any).fake) attrs.push("⚠️ 虚假账号");
-        if ((user as any).restricted) attrs.push("🚫 受限账号");
-        if ((user as any).deleted) attrs.push("💀 已销号");
-        if ((user as any).support) attrs.push("🛟 官方客服");
+        if (userRaw?.verified) attrs.push("✅ 官方认证");
+        if (userRaw?.premium) attrs.push("⭐ Premium");
+        if (userRaw?.bot) attrs.push("🤖 机器人");
+        if (userRaw?.scam) attrs.push("⚠️ 诈骗账号");
+        if (userRaw?.fake) attrs.push("⚠️ 虚假账号");
+        if (userRaw?.restricted) attrs.push("🚫 受限账号");
+        if (isUserDeleted(user)) attrs.push("💀 已销号");
+        if (userRaw?.support) attrs.push("🛟 官方客服");
 
         if (attrs.length === 0) attrs.push("普通用户");
 
@@ -478,7 +512,7 @@ class IsAlivePlugin extends Plugin {
         }
 
         await msg.edit({
-          text: html(lines.join("\n")),
+          text: html(lines.join("<br>")),
         });
       },
     };

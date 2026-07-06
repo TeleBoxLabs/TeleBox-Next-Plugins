@@ -9,13 +9,9 @@ import path from "path";
 import { promises as fs } from "fs";
 import { JSONFilePreset } from "lowdb/node";
 import axios from "axios";
-
-// HTML转义（每个插件必须实现）
-const htmlEscape = (text: string): string => 
-  text.replace(/[&<>"']/g, m => ({ 
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', 
-    '"': '&quot;', "'": '&#x27;' 
-  }[m] || m));
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
+import { htmlEscape } from "@utils/htmlEscape"; 
 
 // 获取命令前缀
 const prefixes = getPrefixes();
@@ -36,6 +32,10 @@ const CONFIG_KEYS = {
 const DEFAULT_CONFIG = {
     [CONFIG_KEYS.PROXY_HOST]: "i.pximg.net"
 };
+
+interface ZprConfig {
+    [CONFIG_KEYS.PROXY_HOST]: string;
+}
 
 const baseHeaders = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36 Edg/127.0.2651.74"
@@ -78,7 +78,7 @@ function scheduleAbort(controller: AbortController, ms: number, label: string): 
 
 // 配置管理器
 class ZprConfigManager {
-    private static db: any = null;
+    private static db: Awaited<ReturnType<typeof JSONFilePreset<ZprConfig>>> | null = null;
     private static initialized = false;
     private static configPath: string;
     private static backupPath: string;
@@ -94,47 +94,44 @@ class ZprConfigManager {
             // 尝试从备份恢复损坏的配置
             await this.validateAndRestore();
             
-            this.db = await JSONFilePreset<Record<string, any>>(
+            this.db = await JSONFilePreset<ZprConfig>(
                 this.configPath,
                 { ...DEFAULT_CONFIG }
             );
             this.initialized = true;
-            console.log("[zpr] 配置初始化成功");
-        } catch (error) {
-            console.error("[zpr] 初始化配置失败:", error);
+            logger.info("[zpr] 配置初始化成功");
+        } catch (error: unknown) {
+            logger.error("[zpr] 初始化配置失败:", error);
             await this.handleInitError();
         }
     }
 
     private static async validateAndRestore(): Promise<void> {
         try {
-            const configExists = await fs.access(this.configPath).then(() => true).catch(() => false);
-            if (!configExists) return;
+            try { await fs.access(this.configPath); } catch (_e: unknown) { logger.debug("[zpr] 配置文件不存在，跳过验证"); return; }
 
             const configContent = await fs.readFile(this.configPath, 'utf8');
             JSON.parse(configContent); // 验证JSON格式
-        } catch (error) {
-            console.warn("[zpr] 配置文件损坏，尝试从备份恢复");
+        } catch (_e: unknown) {
+            logger.warn("[zpr] 配置文件损坏，尝试从备份恢复");
             await this.restoreFromBackup();
         }
     }
 
     private static async restoreFromBackup(): Promise<void> {
         try {
-            const backupExists = await fs.access(this.backupPath).then(() => true).catch(() => false);
-            if (backupExists) {
-                await fs.copyFile(this.backupPath, this.configPath);
-                console.log("[zpr] 从备份恢复配置成功");
-            }
-        } catch (error) {
-            console.error("[zpr] 备份恢复失败:", error);
+            try { await fs.access(this.backupPath); } catch (_e: unknown) { logger.debug("[zpr] 备份文件不存在，跳过恢复"); return; }
+            await fs.copyFile(this.backupPath, this.configPath);
+            logger.info("[zpr] 从备份恢复配置成功");
+        } catch (error: unknown) {
+            logger.error("[zpr] 备份恢复失败:", error);
             await this.createDefaultConfig();
         }
     }
 
     private static async createDefaultConfig(): Promise<void> {
         await fs.writeFile(this.configPath, JSON.stringify(DEFAULT_CONFIG, null, 2));
-        console.log("[zpr] 创建默认配置");
+        logger.info("[zpr] 创建默认配置");
     }
 
     private static async handleInitError(): Promise<void> {
@@ -159,24 +156,22 @@ class ZprConfigManager {
 
     private static async createBackup(): Promise<void> {
         try {
-            const configExists = await fs.access(this.configPath).then(() => true).catch(() => false);
-            if (configExists) {
-                await fs.copyFile(this.configPath, this.backupPath);
-                console.log("[zpr] 配置备份创建成功");
-            }
-        } catch (error) {
-            console.warn("[zpr] 创建备份失败:", error);
+            try { await fs.access(this.configPath); } catch (_e: unknown) { logger.debug("[zpr] 配置文件不存在，跳过备份创建"); return; }
+            await fs.copyFile(this.configPath, this.backupPath);
+            logger.info("[zpr] 配置备份创建成功");
+        } catch (error: unknown) {
+            logger.warn("[zpr] 创建备份失败:", error);
         }
     }
 
     private static async writeConfigWithRetry(): Promise<boolean> {
         for (let attempt = 1; attempt <= 5; attempt++) {
             try {
-                await this.db.write();
-                console.log("[zpr] 配置保存成功");
+                await this.db!.write();
+                logger.info("[zpr] 配置保存成功");
                 return true;
-            } catch (writeError: any) {
-                console.error(`[zpr] 第${attempt}次写入失败:`, writeError);
+            } catch (writeError: unknown) {
+                logger.error(`[zpr] 第${attempt}次写入失败:`, writeError);
                 if (attempt === 5) {
                     // 最后一次失败，尝试恢复备份
                     await this.restoreFromBackup();
@@ -204,13 +199,13 @@ class ZprConfigManager {
     static async setProxyHost(host: string): Promise<boolean> {
         await this.ensureInitialized();
         if (!this.db) {
-            console.error("[zpr] 数据库未初始化");
+            logger.error("[zpr] 数据库未初始化");
             return false;
         }
 
         // 防止并发写入
         if (this.isWriting) {
-            console.log("[zpr] 配置正在写入中，请稍后");
+            logger.info("[zpr] 配置正在写入中，请稍后");
             return false;
         }
 
@@ -218,7 +213,7 @@ class ZprConfigManager {
         try {
             // 验证输入参数
             if (!host || typeof host !== 'string') {
-                console.error("[zpr] 无效的代理地址");
+                logger.error("[zpr] 无效的代理地址");
                 return false;
             }
 
@@ -230,8 +225,8 @@ class ZprConfigManager {
 
             // 写入配置，增强重试机制
             return await this.writeConfigWithRetry();
-        } catch (error) {
-            console.error("[zpr] 设置代理失败:", error);
+        } catch (error: unknown) {
+            logger.error("[zpr] 设置代理失败:", error);
             return false;
         } finally {
             this.isWriting = false;
@@ -299,8 +294,8 @@ interface MediaGroup {
 const editHtmlMessage = async (msg: MessageContext, text: string) => {
     try {
         await msg.edit({ text: html(text) });
-    } catch (error) {
-        console.warn("[zpr] 消息编辑失败:", error);
+    } catch (error: unknown) {
+        logger.warn("[zpr] 消息编辑失败:", error);
     }
 };
 
@@ -311,13 +306,14 @@ const handle404Error = (proxyHost: string, failedProxies: string[]) => {
 };
 
 // 辅助函数：检查是否为超时错误
-const isTimeoutError = (error: any): boolean => {
-    return error.code === 'ECONNABORTED' || 
-           error.message?.includes('timeout') ||
-           error.message?.includes('canceled') ||
-           error.message?.includes('cancelled') ||
-           error.name === 'AbortError' ||
-           error.code === 'ETIMEDOUT';
+const isTimeoutError = (error: unknown): boolean => {
+    const err = error as { code?: string; name?: string };
+    return err.code === 'ECONNABORTED' || 
+           getErrorMessage(error)?.includes('timeout') ||
+           getErrorMessage(error)?.includes('canceled') ||
+           getErrorMessage(error)?.includes('cancelled') ||
+           err.name === 'AbortError' ||
+           err.code === 'ETIMEDOUT';
 };
 
 interface DownloadResult {
@@ -362,13 +358,13 @@ async function downloadSingleImage(
                 });
                 
                 if (imgResponse.status === 200) {
-                    await fs.writeFile(filePath, imgResponse.data as any);
+                    await fs.writeFile(filePath, Buffer.from(imgResponse.data));
                     
                     return {
                         mediaGroup: {
                             type: 'photo',
                             media: filePath,
-                            caption: `<b>🎨 ${htmlEscape(title)}</b>\n\n🆔 <b>作品ID:</b> <a href="https://www.pixiv.net/artworks/${pid}">${pid}</a>\n🔗 <b>原图:</b> <a href="${htmlEscape(urls.original)}">高清查看</a>\n📐 <b>尺寸:</b> <code>${width}×${height}</code>\n\n<i>📡 来源: Pixiv</i>`,
+                            caption: `<b>🎨 ${htmlEscape(title)}</b><br><br>🆔 <b>作品ID:</b> <a href="https://www.pixiv.net/artworks/${pid}">${pid}</a><br>🔗 <b>原图:</b> <a href="${htmlEscape(urls.original)}">高清查看</a><br>📐 <b>尺寸:</b> <code>${width}×${height}</code><br><br><i>📡 来源: Pixiv</i>`,
                             hasSpoiler: r18 === 1
                         },
                         usedProxy: proxyHost,
@@ -387,19 +383,20 @@ async function downloadSingleImage(
                 clearImgTimeout();
             }
             
-        } catch (error: any) {
-            if (error.response && error.response.status === 404) {
+        } catch (error: unknown) {
+            const err = error as { response?: { status?: number } };
+            if (err.response && err.response.status === 404) {
                 has404Error = handle404Error(proxyHost, failedProxies);
                 continue; // 尝试下一个代理
             }
             
             // 检查是否为超时错误
             if (isTimeoutError(error)) {
-                lastError = `连接超时: ${error.message}`;
+                lastError = `连接超时: ${getErrorMessage(error)}`;
                 hadNetworkFailures = true;  // 标记遇到了网络错误
                 failedProxies.push(proxyHost);
             } else {
-                lastError = error.message;
+                lastError = getErrorMessage(error);
                 hadNetworkFailures = true;  // 其他网络错误也标记
                 failedProxies.push(proxyHost);
             }
@@ -520,18 +517,18 @@ async function getResult(message: MessageContext, r18 = 0, tag = "", num = 1): P
             try {
                 await editHtmlMessage(message, `📡 更新默认代理为: ${bestProxy}`);
                 await ZprConfigManager.setProxyHost(bestProxy);
-                console.log(`[zpr] 已切换到更稳定的代理: ${bestProxy}`);
-            } catch (err) {
-                console.warn(`[zpr] 更新默认代理失败:`, err);
+                logger.info(`[zpr] 已切换到更稳定的代理: ${bestProxy}`);
+            } catch (err: unknown) {
+                logger.warn(`[zpr] 更新默认代理失败:`, err);
             }
         }
         
-        console.log(`[zpr] 成功下载 ${successfulDownloads.length}/${result.length} 张图片`);
+        logger.info(`[zpr] 成功下载 ${successfulDownloads.length}/${result.length} 张图片`);
         return [successfulDownloads, des];
         
-    } catch (error: any) {
-        console.error("[zpr] API请求失败:", error);
-        return [null, `API请求失败: ${error.message || "未知错误"}`];
+    } catch (error: unknown) {
+        logger.error("[zpr] API请求失败:", error);
+        return [null, `API请求失败: ${getErrorMessage(error) || "未知错误"}`];
     }
 }
 
@@ -571,8 +568,8 @@ class ZprPlugin extends Plugin {
                     if (args.length === 1) {
                         // 查看当前反代设置
                         const currentProxy = await ZprConfigManager.getProxyHost();
-                        await editHtmlMessage(msg, `🔗 <b>当前反代设置</b>\n\n<b>当前地址:</b> <code>${htmlEscape(currentProxy)}</code>\n\n<b>可用地址:</b>\n${Object.entries(PROXY_HOSTS).map(([key, value]) => 
-`• <code>${htmlEscape(value)}</code> - ${htmlEscape(key)}`).join('\n')}\n\n<b>使用方法:</b>\n<code>${mainPrefix}zpr proxy [地址]</code> - 设置反代地址`);
+                        await editHtmlMessage(msg, `🔗 <b>当前反代设置</b><br><br><b>当前地址:</b> <code>${htmlEscape(currentProxy)}</code><br><br><b>可用地址:</b><br>${Object.entries(PROXY_HOSTS).map(([key, value]) => 
+`• <code>${htmlEscape(value)}</code> - ${htmlEscape(key)}`).join('<br>')}<br><br><b>使用方法:</b><br><code>${mainPrefix}zpr proxy [地址]</code> - 设置反代地址`);
                         return;
                     }
                     
@@ -581,16 +578,16 @@ class ZprPlugin extends Plugin {
                     const validHosts = Object.values(PROXY_HOSTS);
                     
                     if (!validHosts.includes(newProxy)) {
-                        await editHtmlMessage(msg, `❌ <b>无效的反代地址</b>\n\n<b>可用地址:</b>\n${Object.entries(PROXY_HOSTS).map(([key, value]) => 
-`• <code>${value}</code> - ${key}`).join('\n')}`);
+                        await editHtmlMessage(msg, `❌ <b>无效的反代地址</b><br><br><b>可用地址:</b><br>${Object.entries(PROXY_HOSTS).map(([key, value]) => 
+`• <code>${value}</code> - ${key}`).join('<br>')}`);
                         return;
                     }
                     
                     const success = await ZprConfigManager.setProxyHost(newProxy);
                     if (success) {
-                        await editHtmlMessage(msg, `✅ <b>反代地址已更新</b>\n\n<b>新地址:</b> <code>${htmlEscape(newProxy)}</code>\n\n设置已保存，下次获取图片时将使用新的反代地址。`);
+                        await editHtmlMessage(msg, `✅ <b>反代地址已更新</b><br><br><b>新地址:</b> <code>${htmlEscape(newProxy)}</code><br><br>设置已保存，下次获取图片时将使用新的反代地址。`);
                     } else {
-                        await editHtmlMessage(msg, "❌ <b>设置失败</b>\n\n无法保存配置，请稍后重试。");
+                        await editHtmlMessage(msg, "❌ <b>设置失败</b><br><br>无法保存配置，请稍后重试。");
                     }
                     return;
                 }
@@ -634,7 +631,7 @@ class ZprPlugin extends Plugin {
                 
                 try {
                     await editHtmlMessage(msg, "📤 传送中。。。");
-                } catch {}
+                } catch (e: unknown) { logger.error('[zpr] edit message failed:', e); }
                 
                 try {
                     // 逐个发送图片文件
@@ -650,10 +647,10 @@ class ZprPlugin extends Plugin {
                                 replyTo: msg.replyToMessage?.id ?? undefined
                             });
 
-                        } catch (error: any) {
-                            const errorMsg = error.message?.includes("CHAT_SEND_MEDIA_FORBIDDEN")
+                        } catch (error: unknown) {
+                            const errorMsg = getErrorMessage(error)?.includes("CHAT_SEND_MEDIA_FORBIDDEN")
                                 ? "此群组不允许发送媒体。"
-                                : htmlEscape(`发送失败: ${error.message || "未知错误"}`);
+                                : htmlEscape(`发送失败: ${getErrorMessage(error) || "未知错误"}`);
                             
                             await editHtmlMessage(msg, `❌ <b>发送失败:</b> ${errorMsg}`);
                             throw error; // 继续抛出错误以中断循环
@@ -661,23 +658,23 @@ class ZprPlugin extends Plugin {
                             // 无论发送是否成功，都尝试清理临时文件
                             try {
                                 await fs.unlink(item.media);
-                                console.log(`[zpr] 成功清理临时文件: ${item.media}`);
+                                logger.info(`[zpr] 成功清理临时文件: ${item.media}`);
                             } catch (err: unknown) {
-                                console.warn(`[zpr] 清理图片文件失败: ${item.media}`, err);
+                                logger.warn(`[zpr] 清理图片文件失败: ${item.media}`, err);
                             }
                         }
                     }
 
                     try {
                         await msg.delete();
-                    } catch {}
-                } catch (error: any) {
-                    console.error("[zpr] 插件执行失败:", error);
-                    await editHtmlMessage(msg, `❌ <b>插件执行失败:</b> ${htmlEscape(error.message || "未知错误")}`);
+                    } catch (e: unknown) { logger.error('[zpr] delete message failed:', e); }
+                } catch (error: unknown) {
+                    logger.error("[zpr] 插件执行失败:", error);
+                    await editHtmlMessage(msg, `❌ <b>插件执行失败:</b> ${htmlEscape(getErrorMessage(error) || "未知错误")}`);
                 }
-            } catch (error: any) {
-                console.error("[zpr] 插件执行失败:", error);
-                await editHtmlMessage(msg, `❌ <b>插件执行失败:</b> ${htmlEscape(error.message || "未知错误")}`);
+            } catch (error: unknown) {
+                logger.error("[zpr] 插件执行失败:", error);
+                await editHtmlMessage(msg, `❌ <b>插件执行失败:</b> ${htmlEscape(getErrorMessage(error) || "未知错误")}`);
             }
         }
     };

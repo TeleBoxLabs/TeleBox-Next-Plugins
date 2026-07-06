@@ -8,6 +8,8 @@ import * as yaml from "js-yaml";
 import * as cheerio from "cheerio";
 import dayjs from "dayjs";
 import { safeGetReplyMessage } from "@utils/safeGetMessages";
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
 
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
@@ -143,15 +145,15 @@ async function getNodeInfo(url: string): Promise<{ node_count: number | string, 
     
     // 1. 尝试解析 YAML (Clash/Surge)
     try {
-      const config = yaml.load(res.data);
-      if (config && (config as any).proxies) {
-        const proxies = (config as any).proxies;
+      const config = yaml.load(res.data) as { proxies?: { type?: string; name?: string }[] } | null | undefined;
+      if (config?.proxies) {
+        const proxies = config.proxies;
         const typeCount: Record<string, number> = {};
         const regions: Record<string, number> = {};
         let totalNodes = proxies.length;
         let identified = 0;
         for (const proxy of proxies) {
-          const type = proxy.type?.toLowerCase();
+          const type = proxy.type?.toLowerCase() ?? 'unknown';
           typeCount[type] = (typeCount[type] || 0) + 1;
           const nameLow = proxy.name?.toLowerCase() || '';
           for (const [region, keys] of REGION_RULES) {
@@ -169,8 +171,8 @@ async function getNodeInfo(url: string): Promise<{ node_count: number | string, 
           regions: Object.fromEntries(Object.entries(regions).filter(([, v]) => v > 0))
         };
       }
-    } catch { /* 忽略 YAML 解析错误 */ }
-    
+    } catch (e: unknown) { logger.warn('YAML 解析失败', e) }
+
     // 2. 尝试解析 Base64 (V2Ray/Shadowsocks 原始链接)
     try {
       const decoded = Buffer.from(res.data, 'base64').toString();
@@ -205,9 +207,9 @@ async function getNodeInfo(url: string): Promise<{ node_count: number | string, 
         type_count: Object.fromEntries(Object.entries(typeCount).filter(([, v]) => v > 0)),
         regions: Object.fromEntries(Object.entries(regions).filter(([, v]) => v > 0)),
       };
-    } catch { /* 忽略 Base64 解析错误 */ }
+    } catch (e: unknown) { logger.warn('subinfo: parseSubscription failed', e); }
     return null;
-  } catch { return null; }
+  } catch (e: unknown) { logger.warn('subinfo: parseSubscription outer catch', e); return null; }
 }
 
 // 判断订阅周期类型 (单次/月付/长期)
@@ -267,10 +269,10 @@ async function getWebsiteInfo(url: string): Promise<{ website: string | null; we
     let response;
     try {
       response = await axios.get(baseUrl + '/auth/login', { headers, timeout: 5000, maxRedirects: 5 });
-    } catch {
+    } catch (_e: unknown) {
       try {
         response = await axios.get(baseUrl, { headers, timeout: 5000, maxRedirects: 5 });
-      } catch {
+      } catch (_e: unknown) {
         return { website: baseUrl, websiteName: "连接失败" };
       }
     }
@@ -289,9 +291,7 @@ async function getWebsiteInfo(url: string): Promise<{ website: string | null; we
       return { website: baseUrl, websiteName: title || null };
     }
 
-  } catch (e) {
-    // 忽略错误
-  }
+  } catch (e: unknown) { logger.warn(`[subinfo] 忽略错误:`, e) }
   return { website: null, websiteName: null };
 }
 
@@ -332,7 +332,7 @@ class SubinfoPlugin extends Plugin {
       });
       REMOTE_CONFIG_MAPPINGS = mappings;
       return Object.keys(REMOTE_CONFIG_MAPPINGS).length;
-    } catch (error) {
+    } catch (_e: unknown) {
       // 忽略加载失败
       return 0;
     }
@@ -362,9 +362,7 @@ class SubinfoPlugin extends Plugin {
           if (namePart) return decodeURIComponent(Buffer.from(namePart, 'binary').toString('utf-8'));
         }
       }
-    } catch {
-      // 忽略解析错误
-    }
+    } catch (e: unknown) { logger.warn(`[subinfo] 忽略解析错误:`, e) }
     return null;
   }
 
@@ -456,14 +454,17 @@ class SubinfoPlugin extends Plugin {
         if (expireTs && Date.now() > expireTs * 1000) { status = "过期"; statusEmoji = "❌"; }
 
         // 获取节点信息
-        try { result.nodeInfo = await getNodeInfo(url); } catch { result.nodeInfo = null; }
+        try { result.nodeInfo = await getNodeInfo(url); } catch (e: unknown) {
+          logger.warn('[subinfo] 获取节点信息失败:', url, e);
+          result.nodeInfo = null;
+        }
 
         return {
             ...result, success: true, status, statusEmoji, upload, download, total, used, remain, percent, expireTs, startTs
         };
 
-    } catch (err: any) {
-        result.errorMessage = err.message || '未知错误';
+    } catch (err: unknown) {
+        result.errorMessage = getErrorMessage(err) || '未知错误';
         return result;
     }
   }
@@ -483,8 +484,8 @@ class SubinfoPlugin extends Plugin {
     if (msg.replyToMessage?.id) {
       try {
         const replyMsg = await safeGetReplyMessage(msg);
-        if (replyMsg) sourceText = (replyMsg.text ?? '') + ' ' + ((replyMsg as any).caption ?? '');
-      } catch { /* 忽略 */ }
+        if (replyMsg) sourceText = (replyMsg.text ?? '') + ' ' + ((replyMsg as { caption?: string }).caption ?? '');
+      } catch (e: unknown) { logger.warn('获取回复消息失败', e) }
     }
     if (cleanParts.length > 0) sourceText += ' ' + cleanParts.join(' ');
     sourceText = sourceText.trim();
@@ -514,8 +515,12 @@ class SubinfoPlugin extends Plugin {
     const blockquoteTag = (text: string) => isTxtOutput ? `\n> ${text.trim().replace(/\n/g, '\n> ')}\n` : `<blockquote expandable>${text}</blockquote>`;
     const separator = isTxtOutput ? '\n' + '='.repeat(40) + '\n' : '\n\n' + '='.repeat(30) + '\n\n';
 
-    for (const url of urls) {
-      const result = await this.processSubscription(url);
+    // 并行处理所有订阅链接（各链接查询相互独立，使用 Promise.all 加速）
+    const results = await Promise.all(urls.map(url => this.processSubscription(url)));
+
+    for (let i = 0; i < urls.length; i++) {
+      const url = urls[i];
+      const result = results[i];
 
       if (!result.success && result.errorMessage === "无流量统计信息") {
           let output = `订阅链接: ${codeTag(url)}\n机场名称: ${codeTag(result.configName)}\n**无流量统计信息**`;
@@ -624,9 +629,9 @@ class SubinfoPlugin extends Plugin {
         fileBuffer.name = fileName;
         
         try {
-            await client.sendMedia(msg.chat.id, { type: "document" as const, file: fileBuffer, fileName: `subinfo_report_${dateStr}.txt` } as any, { caption: `✅ 订阅查询报告 (共 ${urls.length} 个链接)\n${statsText.trim()}` } as any);
+            await client.sendMedia(msg.chat.id, { type: "document" as const, file: fileBuffer, fileName: `subinfo_report_${dateStr}.txt` }, { caption: `✅ 订阅查询报告 (共 ${urls.length} 个链接)\n${statsText.trim()}` });
             await msg.delete();
-        } catch (e) {
+        } catch (_e: unknown) {
               const preview = isTxtOutput
                 ? splitLongMessage(resultText, 1024)[0]
                 : htmlEscape(splitLongMessage(resultText, 1024)[0]);
@@ -635,8 +640,9 @@ class SubinfoPlugin extends Plugin {
     } else {
         const messageParts = splitLongMessage(resultText, 4090);
         await msg.edit({ text: messageParts[0], disableWebPreview: true });
+        // 注意：消息分片必须按顺序逐条发送，不能并行（handleSub 详细模式，保持消息顺序）
         for (let i = 1; i < messageParts.length; i++) {
-            await client.sendText(msg.chat.id, html`${messageParts[i]}`, { replyTo: msg.id } as any);
+            await client.sendText(msg.chat.id, html`${messageParts[i]}`, { replyTo: msg.id });
         }
     }
   }
@@ -656,8 +662,8 @@ class SubinfoPlugin extends Plugin {
     if (msg.replyToMessage?.id) {
       try {
         const replyMsg = await safeGetReplyMessage(msg);
-        if (replyMsg) sourceText = (replyMsg.text ?? '') + ' ' + ((replyMsg as any).caption ?? '');
-      } catch { /* 忽略 */ }
+        if (replyMsg) sourceText = (replyMsg.text ?? '') + ' ' + ((replyMsg as { caption?: string }).caption ?? '');
+      } catch (e: unknown) { logger.warn('获取回复消息失败', e) }
     }
     if (cleanParts.length > 0) sourceText += ' ' + cleanParts.join(' ');
     sourceText = sourceText.trim();
@@ -687,8 +693,12 @@ class SubinfoPlugin extends Plugin {
     const boldTag = (text: string) => isTxtOutput ? `**${format(text)}**` : `<b>${htmlEscape(text)}</b>`;
     const separator = isTxtOutput ? '\n' + '-'.repeat(30) + '\n' : '\n\n' + '='.repeat(30) + '\n\n';
 
-    for (const url of urls) {
-        const result = await this.processSubscription(url);
+    // 并行处理所有订阅链接（各链接查询相互独立，使用 Promise.all 加速）
+    const results = await Promise.all(urls.map(url => this.processSubscription(url)));
+
+    for (let i = 0; i < urls.length; i++) {
+      const url = urls[i];
+      const result = results[i];
         let outputText = '';
 
         if (!result.success) {
@@ -751,9 +761,9 @@ class SubinfoPlugin extends Plugin {
         fileBuffer.name = fileName;
         
         try {
-            await client.sendMedia(msg.chat.id, { type: "document" as const, file: fileBuffer, fileName: `cha_report_${dateStr}.txt` } as any, { caption: `✅ 简洁订阅查询报告 (共 ${urls.length} 个链接)` } as any);
+            await client.sendMedia(msg.chat.id, { type: "document" as const, file: fileBuffer, fileName: `cha_report_${dateStr}.txt` }, { caption: `✅ 简洁订阅查询报告 (共 ${urls.length} 个链接)` });
             await msg.delete(); 
-        } catch (e) {
+        } catch (_e: unknown) {
               const preview = isTxtOutput
                 ? splitLongMessage(finalOutput, 1024)[0]
                 : htmlEscape(splitLongMessage(finalOutput, 1024)[0]);
@@ -762,8 +772,9 @@ class SubinfoPlugin extends Plugin {
     } else {
         const messageParts = splitLongMessage(finalOutput || "未获取到任何信息", 4090);
         await msg.edit({ text: messageParts[0], disableWebPreview: true });
+        // 注意：消息分片必须按顺序逐条发送，不能并行（handleCha 简洁模式，保持消息顺序）
         for (let i = 1; i < messageParts.length; i++) {
-            await client.sendText(msg.chat.id, html`${messageParts[i]}`, { replyTo: msg.id } as any);
+            await client.sendText(msg.chat.id, html`${messageParts[i]}`, { replyTo: msg.id });
         }
     }
   }

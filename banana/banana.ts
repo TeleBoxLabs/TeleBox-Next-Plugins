@@ -7,8 +7,11 @@ import { getPrefixes } from "@utils/pluginManager";
 import { createDirectoryInAssets } from "@utils/pathHelpers";
 import { safeGetReplyMessage } from "@utils/safeGetMessages";
 import { getGlobalClient } from "@utils/globalClient";
+import { getErrorMessage } from "@utils/errorHelpers";
+import type { MtcuteFileLocation } from "@utils/mtcuteTypes";
 import { html } from "@mtcute/html-parser";
 import type { MessageContext } from "@mtcute/dispatcher";
+import type { MessageMedia } from "@mtcute/core";
 
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
@@ -17,6 +20,30 @@ const mainPrefix = prefixes[0];
 interface BananaConfig {
   apiKey: string;
   maxBytes: number;
+}
+
+// Gemini API response types
+interface GeminiInlinePart {
+  text?: string;
+  inline_data?: { data?: string; mime_type?: string; mimeType?: string };
+  inlineData?: { data?: string; mime_type?: string; mimeType?: string };
+  data?: string;
+  mime_type?: string;
+  mimeType?: string;
+}
+
+interface GeminiCandidate {
+  content?: { parts?: GeminiInlinePart[] };
+  finishReason?: string;
+}
+
+interface GeminiPromptFeedback {
+  blockReason?: string;
+}
+
+interface GeminiResponseData {
+  candidates?: GeminiCandidate[];
+  promptFeedback?: GeminiPromptFeedback;
 }
 
 const FIXED_MODEL = "gemini-3-pro-image-preview";
@@ -55,9 +82,10 @@ const formatBytes = (bytes: number): string => {
 function estimateMediaSizeBytes(message: MessageContext | import("@mtcute/node").Message): number {
   const media = message.media;
   if (!media) return 0;
-  // mtcute FileLocation-derived types have optional fileSize
-  if (typeof (media as any).fileSize === "number") {
-    return (media as any).fileSize;
+  // mtcute FileLocation-derived types have optional fileSize on .raw
+  const raw = (media as unknown as { raw?: { fileSize?: number } })?.raw;
+  if (typeof raw?.fileSize === "number") {
+    return raw.fileSize;
   }
   return 0;
 }
@@ -139,7 +167,7 @@ function normalizeMaxBytes(bytes: number | string | null | undefined): number {
 
 async function resolveMaxImageBytes(): Promise<number> {
   const stored = await getConfigValue("maxBytes");
-  return normalizeMaxBytes(stored as any);
+  return normalizeMaxBytes(stored);
 }
 
 function maskKey(key: string): string {
@@ -148,11 +176,11 @@ function maskKey(key: string): string {
   return `${key.slice(0, 4)}***${key.slice(-4)}`;
 }
 
-function resolveMimeType(media: any): string {
+function resolveMimeType(media: MessageMedia): string {
   // mtcute media types
   if (media?.type === "photo") return "image/jpeg";
-  if (typeof media?.mimeType === "string" && media.mimeType.startsWith("image/")) {
-    return media.mimeType;
+  if (typeof (media as { mimeType?: string })?.mimeType === "string" && (media as { mimeType?: string }).mimeType?.startsWith("image/")) {
+    return (media as { mimeType?: string }).mimeType!;
   }
   return "image/png";
 }
@@ -293,8 +321,8 @@ async function handleImageEdit(
 
   let mediaBuffer: Buffer | null = null;
   try {
-    mediaBuffer = Buffer.from(await client.downloadAsBuffer(replyMsg.media as any));
-  } catch (error) {
+    mediaBuffer = Buffer.from(await client.downloadAsBuffer(replyMsg.media as MtcuteFileLocation));
+  } catch (error: unknown) {
     await msg.edit({ text: `❌ 图片下载失败: ${error}` });
     return;
   }
@@ -336,26 +364,27 @@ async function handleImageEdit(
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${FIXED_MODEL}:generateContent?key=${encodeURIComponent(apiKey)}`;
 
-  let responseData: any;
+  let responseData: GeminiResponseData | undefined;
   try {
     const response = await axios.post(url, requestBody, { timeout: 120000 });
     responseData = response.data;
-  } catch (error: any) {
+  } catch (error: unknown) {
     if (axios.isAxiosError(error)) {
-      const status = error.response?.status;
-      const message = error.response?.data?.error?.message || error.message;
+      const axiosErr = error as { response?: { status?: number; data?: { error?: { message?: string } } } };
+      const status = axiosErr.response?.status;
+      const message = axiosErr.response?.data?.error?.message || getErrorMessage(error);
       await msg.edit({
         text: `❌ Gemini 请求失败 (${status ?? "网络错误"}): ${message}`,
       });
     } else {
-      await msg.edit({ text: `❌ 请求失败: ${(error as Error).message}` });
+      await msg.edit({ text: `❌ 请求失败: ${getErrorMessage(error)}` });
     }
     return;
   }
 
-  const candidates: any[] = responseData?.candidates || [];
+  const candidates: GeminiCandidate[] = (responseData as GeminiResponseData | undefined)?.candidates || [];
   if (!candidates.length) {
-    const blockReason = responseData?.promptFeedback?.blockReason;
+    const blockReason = (responseData as GeminiResponseData | undefined)?.promptFeedback?.blockReason;
     if (blockReason) {
       await msg.edit({ text: `❌ 请求被阻止: ${blockReason}` });
     } else {
@@ -370,11 +399,11 @@ async function handleImageEdit(
     return;
   }
 
-  const inlineParts: any[] = [];
+  const inlineParts: Array<{ data?: string; mime_type?: string; mimeType?: string }> = [];
   const textParts: string[] = [];
 
   for (const candidate of candidates) {
-    const parts: any[] = candidate?.content?.parts || [];
+    const parts: GeminiInlinePart[] = candidate?.content?.parts || [];
     for (const part of parts) {
       // Support both snake_case and camelCase responses
       const inlineData = part?.inline_data || part?.inlineData;
@@ -430,7 +459,7 @@ async function handleImageEdit(
   if (sent) {
     try {
       await msg.delete();
-    } catch (error) {
+    } catch (_e: unknown) {
       await msg.edit({ text: captionHtml });
     }
   } else {

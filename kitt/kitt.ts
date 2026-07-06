@@ -3,6 +3,8 @@ import _ from "lodash";
 import { getPrefixes } from "@utils/pluginManager";
 import { Plugin } from "@utils/pluginBase";
 import type { MessageContext } from "@mtcute/dispatcher";
+import type { MtcuteMessageContext } from "@utils/mtcuteTypes";
+import type { User, Chat } from "@mtcute/node";
 import { html, thtml } from "@mtcute/html-parser";
 import { createDirectoryInAssets } from "@utils/pathHelpers";
 import { cronManager } from "@utils/cronManager";
@@ -10,15 +12,16 @@ import * as cron from "cron";
 import { JSONFilePreset } from "lowdb/node";
 import * as path from "path";
 import { getGlobalClient } from "@utils/globalClient";
-import { reviveEntities } from "@utils/tlRevive";
 import {
   dealCommandPluginWithMessage,
   getCommandFromMessage,
 } from "@utils/pluginManager";
 import dayjs from "dayjs";
 import { safeGetReplyMessage } from "@utils/safeGetMessages";
-
-const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+import { logger } from "@utils/logger";
+import { getRawType, getTitle, getUsername, getUserId } from "@utils/entityTypeGuards";
+import { getErrorMessage } from "@utils/errorHelpers";
+import { sleep } from "@utils/asyncHelpers";
 
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
@@ -32,7 +35,7 @@ const filePath = path.join(
   `${pluginName}_config.json`
 );
 
-function htmlEscape(value: any): string {
+function htmlEscape(value: unknown): string {
   return String(value ?? "")
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
@@ -40,11 +43,11 @@ function htmlEscape(value: any): string {
     .replace(/"/g, "&quot;");
 }
 
-function codeTag(value: any): string {
+function codeTag(value: unknown): string {
   return `<code>${htmlEscape(value)}</code>`;
 }
 
-function attrEscape(value: any): string {
+function attrEscape(value: unknown): string {
   return htmlEscape(value).replace(/'/g, "&#39;");
 }
 
@@ -54,26 +57,28 @@ function getRemarkFromMsg(msg: MessageContext | string, n: number): string {
     .trim();
 }
 
+interface KittTask {
+  id: string;
+  remark?: string;
+  match: string;
+  action: string;
+  status?: string;
+}
+
 async function getDB() {
   const db = await JSONFilePreset(filePath, {
-    tasks: [] as Array<{
-      id: string;
-      remark?: string;
-      match: string;
-      action: string;
-      status?: string;
-    }>,
+    tasks: [] as KittTask[],
     index: "0",
   });
   return db;
 }
 
-function toInt(value: any): number | undefined {
+function toInt(value: unknown): number | undefined {
   const n = Number(value);
   return Number.isFinite(n) ? Math.trunc(n) : undefined;
 }
 
-function toStrInt(value: any): string | undefined {
+function toStrInt(value: unknown): string | undefined {
   const n = Number(value);
   return Number.isFinite(n) ? String(Math.trunc(n)) : undefined;
 }
@@ -85,48 +90,53 @@ function formatDate(date: Date): string {
 }
 
 async function formatEntity(
-  target: any,
+  target: string | number | { id?: number } | User | Chat,
   mention?: boolean,
   throwErrorIfFailed?: boolean
 ) {
   const client = await getGlobalClient();
   if (!client) throw new Error("Telegram 客户端未初始化");
   if (!target) throw new Error("无效的目标");
-  let id: any;
-  let entity: any;
+  let id: number | undefined;
+  let entity: User | Chat | null = null;
   try {
+    const isEntity = (t: typeof target): t is User | Chat =>
+      typeof t === 'object' && t !== null && 'id' in t && typeof (t as User | Chat).type === 'string';
     entity =
-      typeof target !== "string" && target?.id
+      isEntity(target)
         ? target
-        : ((await client?.getChat(target)) as any);
+        : await client?.getChat(target as string | number) as User | Chat;
     if (!entity) throw new Error("无法获取 entity");
-    id = entity.id;
+    id = getUserId(entity) ?? undefined;
     if (!id) throw new Error("无法获取 entity id");
-  } catch (e: any) {
-    console.error(e);
+  } catch (e: unknown) {
+    logger.error(e);
     if (throwErrorIfFailed)
       throw new Error(
-        `无法获取 ${target} 的 entity: ${e?.message || "未知错误"}`
+        `无法获取 ${target} 的 entity: ${getErrorMessage(e) || "未知错误"}`
       );
   }
   const displayParts: string[] = [];
 
-  if (entity?.title) displayParts.push(htmlEscape(entity.title));
-  if (entity?.firstName) displayParts.push(htmlEscape(entity.firstName));
-  if (entity?.lastName) displayParts.push(htmlEscape(entity.lastName));
-  if (entity?.username)
+  const entityTitle = getTitle(entity);
+  const entityUsername = getUsername(entity);
+  const entityRaw = entity ? (entity as { raw?: { firstName?: string; lastName?: string } }).raw : undefined;
+  if (entityTitle) displayParts.push(htmlEscape(entityTitle));
+  if (entityRaw?.firstName) displayParts.push(htmlEscape(entityRaw.firstName));
+  if (entityRaw?.lastName) displayParts.push(htmlEscape(entityRaw.lastName));
+  if (entityUsername)
     displayParts.push(
-      mention ? htmlEscape(`@${entity.username}`) : codeTag(`@${entity.username}`)
+      mention ? htmlEscape(`@${entityUsername}`) : codeTag(`@${entityUsername}`)
     );
 
   if (id) {
     displayParts.push(
-      (entity as any)._ === 'user'
+      getRawType(entity) === 'user'
         ? `<a href="tg://user?id=${attrEscape(id)}">${htmlEscape(id)}</a>`
         : `<a href="https://t.me/c/${attrEscape(id)}">${htmlEscape(id)}</a>`
     );
-  } else if (!target?._) {
-    displayParts.push(codeTag(target));
+  } else if (typeof target === 'string' || typeof target === 'number') {
+    displayParts.push(codeTag(String(target)));
   }
 
   return {
@@ -147,10 +157,10 @@ function tryParseRegex(input: string): RegExp {
   return new RegExp(trimmed);
 }
 
-function buildCopy(task: any): string {
+function buildCopy(task: KittTask): string {
   return `${commandName} add ${task.remark}\n${task.match}\n${task.action}`;
 }
-function buildCopyCommand(task: any): string {
+function buildCopyCommand(task: KittTask): string {
   const cmd = buildCopy(task);
   return cmd?.includes("\n") ? `<pre>${htmlEscape(cmd)}</pre>` : codeTag(cmd);
 }
@@ -160,7 +170,7 @@ async function run(text: string, msg: MessageContext, trigger?: MessageContext) 
   if (!client) return;
   const sudoMsg = await client.sendText(msg.chat.id, text, {
     replyTo: (msg.replyToMessage?.id ?? undefined) as number | undefined,
-  }) as any;
+  }) as MtcuteMessageContext;
   if (cmd && sudoMsg)
     await dealCommandPluginWithMessage({ cmd, msg: sudoMsg, trigger: msg });
 }
@@ -248,13 +258,13 @@ const help_text = [
   "",
   `<pre>${commandName} add 一键强制更新并退出重启`,
   `return !msg.forwardInfo && ['a', 'b'].includes(msg.sender?.username) && msg.text === '${mainPrefix}${mainPrefix}'`,
-  `await run('${mainPrefix}update -f', msg); await run('${mainPrefix}dme 1', msg); try { await msg.delete() } catch (e) {}; await run('${mainPrefix}exit', msg)</pre>`,
+  `await run('${mainPrefix}update -f', msg); await run('${mainPrefix}dme 1', msg); try { await msg.delete() } catch (e: unknown) { logger.warn('[kitt] 删除消息失败:', e) }; await run('${mainPrefix}exit', msg)</pre>`,
   "",
   `- <code>username</code> 为 <code>a</code> 或 <code>b</code> 的用户可使用 <code>,,</code> 一键更新已安装的远程插件`,
   "",
   `<pre>${commandName} add 一键更新已安装的远程插件`,
   `return !msg.forwardInfo && ['a', 'b'].includes(msg.sender?.username) && msg.text === ',,'`,
-  `await run('${mainPrefix}tpm update', msg); await run('${mainPrefix}dme 1', msg); try { await msg.delete() } catch (e) {};</pre>`,
+  `await run('${mainPrefix}tpm update', msg); await run('${mainPrefix}dme 1', msg); try { await msg.delete() } catch (e: unknown) { logger.warn('[kitt] 删除消息失败:', e) };</pre>`,
   "",
   "▎管理",
   `<code>${commandName} ls</code>, <code>${commandName} list</code>: 列出所有任务`,
@@ -407,20 +417,20 @@ class KittPlugin extends Plugin {
         let matched;
         try {
           matched = await exec(match, msg, undefined, options);
-        } catch (e) {
-          console.error(
+        } catch (e: unknown) {
+          logger.error(
             `[KITT] 任务 ${id}${remark ? ` ${remark}` : ""} 匹配时出错:`,
             e
           );
         }
         if (matched) {
           try {
-            console.log(
+            logger.info(
               `[KITT] 任务 ${id}${remark ? ` ${remark}` : ""} 匹配成功`
             );
             await exec(action, msg, undefined, options);
-          } catch (e) {
-            console.error(
+          } catch (e: unknown) {
+            logger.error(
               `[KITT] 任务 ${id}${remark ? ` ${remark}` : ""} 执行时出错:`,
               e
             );

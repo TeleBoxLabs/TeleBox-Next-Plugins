@@ -78,7 +78,7 @@ async function quoteMsgs(msg: MessageContext): Promise<void> {
           throw new Error(`${botName}: 未收到响应`);
         }
         return response;
-      } catch (error) {
+      } catch (error: unknown) {
         throw new Error(`${botName}: ${error}`);
       }
     })()
@@ -90,15 +90,11 @@ async function quoteMsgs(msg: MessageContext): Promise<void> {
     
     await client.sendText(msg.chat.id, response.text || "");
     await msg.delete();
-  } catch (error) {
-    const errors: string[] = [];
-    for (let i = 0; i < botPromises.length; i++) {
-      try {
-        await botPromises[i];
-      } catch (err) {
-        errors.push(String(err));
-      }
-    }
+  } catch (_e: unknown) {
+    const settled = await Promise.allSettled(botPromises);
+    const errors = settled
+      .filter((r): r is PromiseRejectedResult => r.status === 'rejected')
+      .map((r) => String(r.reason));
     throw new Error(`所有机器人都失败了:\n${errors.join("\n")}`);
   }
 }
@@ -107,7 +103,7 @@ async function handleQutoe(msg: MessageContext): Promise<void> {
   try {
     await msg.edit({ text: "🔄 正在生成语录表情包..." });
     await quoteMsgs(msg);
-  } catch (error) {
+  } catch (error: unknown) {
     await msg.edit({
       text: `❌ 生成语录表情包错误：${error}`,
     });

@@ -3,12 +3,17 @@ import path from "path";
 import type { Low } from "lowdb";
 import { JSONFilePreset } from "lowdb/node";
 import { Plugin } from "@utils/pluginBase";
+import type { MtcuteFileDownloadLocation } from "@utils/mtcuteTypes";
 import { getPrefixes } from "@utils/pluginManager";
 import { createDirectoryInAssets } from "@utils/pathHelpers";
 import type { MessageContext } from "@mtcute/dispatcher";
 import { html } from "@mtcute/html-parser";
 import { getGlobalClient } from "@utils/globalClient";
 import { safeGetReplyMessage } from "@utils/safeGetMessages";
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
+import { sleep } from "@utils/asyncHelpers";
+import { htmlEscape } from "@utils/htmlEscape";
 
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
@@ -32,22 +37,6 @@ type CodexResponseResult = {
 };
 
 type StatusUpdater = (text: string) => Promise<void>;
-
-const sleep = (ms: number): Promise<void> =>
-  new Promise((resolve) => setTimeout(resolve, ms));
-
-const htmlEscape = (input: string): string =>
-  input.replace(
-    /[&<>"']/g,
-    (ch) =>
-      ({
-        "&": "&amp;",
-        "<": "&lt;",
-        ">": "&gt;",
-        '"': "&quot;",
-        "'": "&#x27;",
-      })[ch] || ch,
-  );
 
 const expandableBlock = (input: string): string =>
   `<blockquote expandable>${htmlEscape(input)}</blockquote>`;
@@ -92,12 +81,13 @@ async function getBearerToken(): Promise<string> {
   return await getStoredToken();
 }
 
-function getImageMimeType(message: any): string {
-  const documentMime = (message.media as any)?.document?.mimeType;
+function getImageMimeType(message: unknown): string {
+  const msg = message as { media?: { document?: { mimeType?: string }; photo?: unknown } | null };
+  const documentMime = msg?.media?.document?.mimeType;
   if (typeof documentMime === "string" && documentMime.startsWith("image/")) {
     return documentMime;
   }
-  if ((message.media as any)?.photo) {
+  if (msg?.media?.photo) {
     return "image/jpeg";
   }
   return "image/png";
@@ -116,7 +106,7 @@ async function downloadReplyImage(
     throw new Error("无法获取客户端实例");
   }
 
-  const buffer = await client.downloadAsBuffer(replyMsg.media as any) as Buffer;
+  const buffer = await client.downloadAsBuffer(replyMsg.media as MtcuteFileDownloadLocation) as Buffer;
 
   if (!buffer?.length) {
     throw new Error("未能获取参考图数据");
@@ -205,26 +195,29 @@ async function callCodexImage(
         for (const dataLine of dataLines) {
           if (dataLine === "[DONE]") continue;
 
-          let payloadObj: any;
+          let payloadObj: unknown;
           try {
             payloadObj = JSON.parse(dataLine);
-          } catch {
+          } catch (_e: unknown) {
             continue;
           }
 
-          const eventType = payloadObj?.type;
+          const evt = payloadObj as Record<string, unknown> | null;
+          const eventType = evt?.type as string | undefined;
           if (eventType === "response.created") {
-            responseId = payloadObj?.response?.id || responseId;
-            status = payloadObj?.response?.status || status;
+            const resp = evt?.response as Record<string, unknown> | null;
+            responseId = (resp?.id as string) || responseId;
+            status = (resp?.status as string) || status;
           } else if (
             eventType === "response.image_generation_call.partial_image"
           ) {
-            imageBase64 = payloadObj?.partial_image_b64 || imageBase64;
-            revisedPrompt = payloadObj?.revised_prompt || revisedPrompt;
-            status = payloadObj?.status || status;
+            imageBase64 = (evt?.partial_image_b64 as string) || imageBase64;
+            revisedPrompt = (evt?.revised_prompt as string) || revisedPrompt;
+            status = (evt?.status as string) || status;
           } else if (eventType === "response.completed") {
-            status = payloadObj?.response?.status || status;
-            responseId = payloadObj?.response?.id || responseId;
+            const resp2 = evt?.response as Record<string, unknown> | null;
+            status = (resp2?.status as string) || status;
+            responseId = (resp2?.id as string) || responseId;
           }
         }
 
@@ -249,22 +242,23 @@ async function callCodexImage(
       let imageBase64: string | null = null;
       let revisedPrompt: string | null = null;
 
-      const visit = (value: any): void => {
+      const visit = (value: unknown): void => {
         if (!value || typeof value !== "object") return;
+        const obj = value as Record<string, unknown>;
         if (
-          typeof value.partial_image_b64 === "string" &&
-          value.partial_image_b64
+          typeof obj.partial_image_b64 === "string" &&
+          obj.partial_image_b64
         ) {
-          imageBase64 = value.partial_image_b64;
+          imageBase64 = obj.partial_image_b64;
         }
-        if (typeof value.revised_prompt === "string" && value.revised_prompt) {
-          revisedPrompt = value.revised_prompt;
+        if (typeof obj.revised_prompt === "string" && obj.revised_prompt) {
+          revisedPrompt = obj.revised_prompt;
         }
-        if (Array.isArray(value)) {
-          for (const item of value) visit(item);
+        if (Array.isArray(obj)) {
+          for (const item of obj) visit(item);
           return;
         }
-        for (const nested of Object.values(value)) {
+        for (const nested of Object.values(obj)) {
           if (nested && typeof nested === "object") visit(nested);
         }
       };
@@ -277,7 +271,8 @@ async function callCodexImage(
         status: typeof data.status === "string" ? data.status : null,
         responseId: typeof data.id === "string" ? data.id : responseId,
       };
-    } catch {
+    } catch (e: unknown) {
+      logger.debug('[codex_image] readStreamResult parse failed:', e);
       return null;
     }
   };
@@ -352,9 +347,9 @@ async function handleCximg(msg: MessageContext): Promise<void> {
   let referenceImage: { buffer: Buffer; mimeType: string } | null = null;
   try {
     referenceImage = await downloadReplyImage(msg);
-  } catch (error: any) {
+  } catch (error: unknown) {
     await msg.edit({
-      text: html(`❌ 参考图下载失败：${htmlEscape(error.message || String(error))}`),
+      text: html(`❌ 参考图下载失败：${htmlEscape(getErrorMessage(error) || String(error))}`),
     });
     return;
   }
@@ -381,7 +376,7 @@ async function handleCximg(msg: MessageContext): Promise<void> {
       await msg.edit({
         text: `${phaseText}\n⏱️ 已耗时：${elapsed}`,
       });
-    } catch {}
+    } catch (e: unknown) { logger.warn('[codex_image] edit progress msg failed:', e) }
   };
 
   const heartbeat = (async () => {
@@ -400,28 +395,29 @@ async function handleCximg(msg: MessageContext): Promise<void> {
       updateProgressStatus,
       deadlineAt,
     );
-  } catch (error: any) {
+  } catch (error: unknown) {
     heartbeatStopped = true;
-    await heartbeat.catch(() => {});
+    await heartbeat.catch(() => { /* heartbeat cancel, non-critical */ });
     const elapsed = formatDuration(Date.now() - startedAt);
     if (axios.isAxiosError(error)) {
+      const axiosErr = error as { response?: { status?: number; data?: unknown } };
       const detail =
-        typeof error.response?.data === "string"
-          ? error.response.data.slice(0, 500)
-          : error.message;
+        typeof axiosErr.response?.data === "string"
+          ? (axiosErr.response.data as string).slice(0, 500)
+          : getErrorMessage(error);
       await msg.edit({
-        text: html(`❌ Codex 请求失败 (${error.response?.status || "网络错误"}）：${htmlEscape(detail)}<br>⏱️ 耗时：${elapsed}`),
+        text: html(`❌ Codex 请求失败 (${axiosErr.response?.status || "网络错误"}）：${htmlEscape(detail)}<br>⏱️ 耗时：${elapsed}`),
       });
     } else {
       await msg.edit({
-        text: html(`❌ 生成失败：${htmlEscape(error.message || String(error))}<br>⏱️ 耗时：${elapsed}`),
+        text: html(`❌ 生成失败：${htmlEscape(getErrorMessage(error) || String(error))}<br>⏱️ 耗时：${elapsed}`),
       });
     }
     return;
   }
 
   heartbeatStopped = true;
-  await heartbeat.catch(() => {});
+  await heartbeat.catch(() => { /* heartbeat cancel, non-critical */ });
   const elapsed = formatDuration(Date.now() - startedAt);
 
   if (!result.imageBase64) {
@@ -434,14 +430,14 @@ async function handleCximg(msg: MessageContext): Promise<void> {
   const imageBuffer = Buffer.from(result.imageBase64, "base64");
   const fileName = `codex_image_${Date.now()}.png`;
   const caption = [
-    `<b>提示词:</b>\n${expandableBlock(prompt)}`,
+    `<b>提示词:</b><br>${expandableBlock(prompt)}`,
     `<b>耗时:</b> ${htmlEscape(elapsed)}`,
     result.revisedPrompt
-      ? `<b>修订提示词:</b>\n${expandableBlock(result.revisedPrompt)}`
+      ? `<b>修订提示词:</b><br>${expandableBlock(result.revisedPrompt)}`
       : "",
   ]
     .filter(Boolean)
-    .join("\n");
+    .join("<br>");
 
   const client = await getGlobalClient();
   if (!client) {
@@ -455,12 +451,13 @@ async function handleCximg(msg: MessageContext): Promise<void> {
     file: imageBuffer,
     fileName,
     caption: html(caption),
+  }, {
     replyTo: replyMsg?.id || msg.id,
-  } as any);
+  });
 
   try {
     await msg.delete();
-  } catch {
+  } catch (_e: unknown) {
     await msg.edit({ text: "✅ 图片生成完成" });
   }
 }

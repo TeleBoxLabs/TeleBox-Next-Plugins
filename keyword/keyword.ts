@@ -1,9 +1,12 @@
 import { Plugin } from "@utils/pluginBase";
 import { getGlobalClient } from "@utils/globalClient";
-import { TelegramClient } from "@mtcute/node";
-import type { MessageContext } from "@mtcute/dispatcher";
-import { html } from "@mtcute/html-parser";
 import { createDirectoryInAssets } from "@utils/pathHelpers";
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
+import { htmlEscape } from "@utils/htmlEscape";
+import { html } from "@mtcute/html-parser";
+import type { ClientInternals } from "@utils/clientInternals";
+import type { MessageContext } from "@mtcute/dispatcher";
 import path from "path";
 import Database from "better-sqlite3";
 import {
@@ -94,15 +97,16 @@ class KeywordTask {
     return text;
   }
 
-  checkNeedReply(message: MessageContext): boolean {
+  checkNeedReply(message: any): boolean {
+    const media = message.media as Record<string, unknown> | undefined;
     const text =
-      message.text ||
-      ((message as any).media && "caption" in (message as any).media
-        ? String((message as any).media.caption || "")
+      message.message ||
+      (media && "caption" in media
+        ? String((media as { caption?: string }).caption || "")
         : "");
     if (!text) return false;
 
-    if (this.ignore_forward && message.forward) {
+    if (this.ignore_forward && message.fwdFrom) {
       return false;
     }
 
@@ -113,7 +117,7 @@ class KeywordTask {
       try {
         const regex = new RegExp(key, this.case ? "g" : "gi");
         return regex.test(messageText);
-      } catch {
+      } catch (_e: unknown) {
         return false;
       }
     }
@@ -130,12 +134,12 @@ class KeywordTask {
     return this.exact && messageText === key;
   }
 
-  replaceReply(message: MessageContext): string {
+  replaceReply(message: any): string {
     let text = this.msg;
 
-    if (message.sender?.id) {
-      const userId = Number(message.sender.id);
-      const sender = message.sender as any;
+    if (message.fromId && "userId" in message.fromId) {
+      const userId = Number(message.fromId.userId);
+      const sender = message.sender as { firstName?: string; first_name?: string };
       const firstName = sender?.firstName || sender?.first_name || "User";
       text = text.replace(
         "$mention",
@@ -158,25 +162,30 @@ class KeywordTask {
     return text;
   }
 
-  async processKeyword(message: MessageContext): Promise<void> {
+  async processKeyword(message: any): Promise<void> {
     try {
       const text = this.replaceReply(message);
       const client = await getGlobalClient();
 
-      let sentMsg: MessageContext | null = null;
+      let sentMsg: any = null;
       try {
+        const sendOptions: any = {
+          message: text,
+          parseMode: "html",
+        };
+
         if (this.reply && message.id) {
-          sentMsg = await message.replyText(html(text)) as any;
-        } else {
-          sentMsg = await client.sendText(message.chat.id, html(text)) as any;
+          sendOptions.replyTo = message.id;
         }
+
+        sentMsg = await (client as unknown as ClientInternals).sendMessage(message.peerId, sendOptions);
 
         const cmd = await getCommandFromMessage(text);
 
         if (cmd && sentMsg)
-          await dealCommandPluginWithMessage({ cmd, msg: sentMsg });
-      } catch (error) {
-        console.error("Reply message error:", error);
+          await dealCommandPluginWithMessage({ cmd, msg: sentMsg as unknown as MessageContext });
+      } catch (error: unknown) {
+        logger.error("Reply message error:", error);
       }
 
       if (this.delete) {
@@ -185,21 +194,21 @@ class KeywordTask {
             const sourceTimer = setTimeout(async () => {
               pendingDeleteTimers.delete(sourceTimer);
               try {
-                await client.deleteMessagesById(message.chat.id, [message.id], {
+                await client.deleteMessagesById(message.peerId as unknown as import("@mtcute/core").InputPeerLike, [message.id!], {
                   revoke: true,
                 });
-              } catch (error) {
-                console.error("Delayed delete message error:", error);
+              } catch (error: unknown) {
+                logger.error("Delayed delete message error:", error);
               }
             }, this.source_delay_delete * 1000);
             pendingDeleteTimers.add(sourceTimer);
           } else {
-            await client.deleteMessagesById(message.chat.id, [message.id], {
+            await client.deleteMessagesById(message.peerId as unknown as import("@mtcute/core").InputPeerLike, [message.id!], {
               revoke: true,
             });
           }
-        } catch (error) {
-          console.error("Delete message error:", error);
+        } catch (error: unknown) {
+          logger.error("Delete message error:", error);
         }
       }
 
@@ -207,17 +216,17 @@ class KeywordTask {
         const replyTimer = setTimeout(async () => {
           pendingDeleteTimers.delete(replyTimer);
           try {
-            await client.deleteMessagesById(message.chat.id, [(sentMsg as any)!.id], {
+            await client.deleteMessagesById(message.peerId as unknown as import("@mtcute/core").InputPeerLike, [sentMsg.id!], {
               revoke: true,
             });
-          } catch (error) {
-            console.error("Delayed delete reply error:", error);
+          } catch (error: unknown) {
+            logger.error("Delayed delete reply error:", error);
           }
         }, this.delay_delete * 1000);
         pendingDeleteTimers.add(replyTimer);
       }
-    } catch (error) {
-      console.error("Process keyword error:", error);
+    } catch (error: unknown) {
+      logger.error("Process keyword error:", error);
     }
   }
 
@@ -296,7 +305,7 @@ class KeywordTask {
   }
 }
 
-let db = new Database(
+let db: InstanceType<typeof Database> | null = new Database(
   path.join(createDirectoryInAssets("keyword"), "keyword.db")
 );
 if (db) {
@@ -328,14 +337,6 @@ if (db) {
   `);
 }
 
-function htmlEscape(text: string): string {
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#x27;");
-}
 
 function codeTag(text: string | number): string {
   return `<code>${htmlEscape(String(text))}</code>`;
@@ -365,7 +366,7 @@ class KeywordAlias {
     const stmt = db.prepare(
       "SELECT to_cid FROM keyword_alias WHERE from_cid = ?"
     );
-    const row = stmt.get(fromCid) as any;
+    const row = stmt.get(fromCid) as { to_cid: number } | undefined;
     return row ? row.to_cid : undefined;
   }
 }
@@ -471,7 +472,24 @@ class KeywordTasks {
     if (!db) return;
 
     const stmt = db.prepare("SELECT * FROM keyword_tasks");
-    const rows = stmt.all() as any[];
+    interface RawKeywordRow {
+      task_id: number;
+      cid: number;
+      key: string;
+      msg: string;
+      include: number;
+      regexp: number;
+      exact: number;
+      case_sensitive: number;
+      ignore_forward: number;
+      reply: number;
+      delete_msg: number;
+      ban: number;
+      restrict: number;
+      delay_delete: number;
+      source_delay_delete: number;
+    }
+    const rows = stmt.all() as RawKeywordRow[];
 
     this.tasks = rows.map(
       (row) =>
@@ -505,7 +523,7 @@ class KeywordTasks {
     return this.tasks.filter((task) => task.cid === cid);
   }
 
-  async checkAndReply(message: MessageContext): Promise<void> {
+  async checkAndReply(message: any): Promise<void> {
     try {
       const chatId = getChatId(message);
       if (!chatId || chatId === 0) return;
@@ -513,6 +531,7 @@ class KeywordTasks {
       const aliasId = keywordAlias.get(chatId);
       if (aliasId) {
         const aliasTasks = this.getTasksForChat(aliasId);
+        // 顺序执行：任务可能修改消息状态，需要按优先级依次检查
         for (const task of aliasTasks) {
           if (task.checkNeedReply(message)) {
             await task.processKeyword(message);
@@ -521,13 +540,14 @@ class KeywordTasks {
       }
 
       const tasks = this.getTasksForChat(chatId);
+      // 顺序执行：后续任务依赖前序任务的处理结果
       for (const task of tasks) {
         if (task.checkNeedReply(message)) {
           await task.processKeyword(message);
         }
       }
-    } catch (error) {
-      console.error("Check and reply error:", error);
+    } catch (error: unknown) {
+      logger.error("Check and reply error:", error);
     }
   }
 }
@@ -539,19 +559,19 @@ function toNumber(value: any): number {
   return 0;
 }
 
-function getChatId(msg: MessageContext): number {
+function getChatId(msg: any): number {
   try {
     if (msg.chat?.id) {
       return Number(msg.chat.id);
-    } else if ((msg as any).peerId) {
-      return Number((msg as any).peerId.toString());
-    } else if ((msg as any).chatId) {
-      return Number((msg as any).chatId.toString());
+    } else if (msg.peerId) {
+      return Number(msg.peerId.toString());
+    } else if (msg.chatId) {
+      return Number(msg.chatId.toString());
     } else {
       return 0;
     }
-  } catch (error) {
-    console.error("Get chat ID error:", error);
+  } catch (error: unknown) {
+    logger.error("Get chat ID error:", error);
     return 0;
   }
 }
@@ -574,9 +594,9 @@ function parseTaskIds(idsStr: string): number[] {
   return result;
 }
 
-const keyword = async (msg: MessageContext) => {
+const keyword = async (msg: any) => {
   try {
-    const messageText = msg.text || "";
+    const messageText = msg.message || "";
     const args = messageText.split(" ").slice(1) || [];
     const spaceIndex = messageText.indexOf(" ");
     const fullArgs =
@@ -680,7 +700,8 @@ reply delete ban3600</code>
 如需更多帮助，请参考 TeleBox 官方文档或联系管理员。`;
 
       await msg.edit({
-        text: html(helpText),
+        text: helpText,
+        parseMode: "html",
       });
       return;
     }
@@ -690,7 +711,8 @@ reply delete ban3600</code>
         const chatId = getChatId(msg);
         const taskList = keywordTasks.printAllTasks(false, chatId);
         await msg.edit({
-          text: html(`<b>当前聊天的关键词任务：</b><br><br>${taskList}`),
+          text: `<b>当前聊天的关键词任务：</b>\n\n${taskList}`,
+          parseMode: "html",
         });
         return;
       } else if (args[0] === "alias") {
@@ -698,7 +720,8 @@ reply delete ban3600</code>
         const aliasId = keywordAlias.get(chatId);
         if (aliasId) {
           await msg.edit({
-            text: html(`🔗 当前群组继承自：<code>${aliasId}</code>`),
+            text: `🔗 当前群组继承自：<code>${aliasId}</code>`,
+            parseMode: "html",
           });
         } else {
           await msg.edit({
@@ -716,18 +739,21 @@ reply delete ban3600</code>
           const result = keywordTasks.removeByIds(idList);
           keywordTasks.saveToDB();
           await msg.edit({
-            text: html(`✅ 已删除任务成功 <code>${result.success}</code> 个，失败 <code>${result.failed}</code> 个。`),
+            text: `✅ 已删除任务成功 <code>${result.success}</code> 个，失败 <code>${result.failed}</code> 个。`,
+            parseMode: "html",
           });
-        } catch (error: any) {
+        } catch (error: unknown) {
           await msg.edit({
-            text: html(`❌ <b>参数错误:</b> ${htmlEscape(error.message || error)}`),
+            text: `❌ <b>参数错误:</b> ${htmlEscape(getErrorMessage(error))}`,
+            parseMode: "html",
           });
         }
         return;
       } else if (args[0] === "list" && args[1] === "all") {
         const taskList = keywordTasks.printAllTasks(true);
         await msg.edit({
-          text: html(`<b>所有关键词任务：</b><br><br>${taskList}`),
+          text: `<b>所有关键词任务：</b>\n\n${taskList}`,
+          parseMode: "html",
         });
         return;
       } else if (args[0] === "alias") {
@@ -748,13 +774,15 @@ reply delete ban3600</code>
             const cid = parseInt(args[1]);
             keywordAlias.add(chatId, cid);
             await msg.edit({
-              text: html(`✅ 已添加继承：<code>${cid}</code>`),
+              text: `✅ 已添加继承：<code>${cid}</code>`,
+              parseMode: "html",
             });
-          } catch (error: any) {
+          } catch (error: unknown) {
             await msg.edit({
-              text: html(`❌ <b>参数错误:</b> ${htmlEscape(
-                error.message || "请输入正确的参数"
-              )}`),
+              text: `❌ <b>参数错误:</b> ${htmlEscape(
+                getErrorMessage(error) || "请输入正确的参数"
+              )}`,
+              parseMode: "html",
             });
           }
         }
@@ -766,14 +794,14 @@ reply delete ban3600</code>
     try {
       if (msg.chat?.id) {
         chatId = Number(msg.chat.id);
-      } else if ((msg as any).peerId) {
-        chatId = Number((msg as any).peerId.toString());
-      } else if ((msg as any).chatId) {
-        chatId = Number((msg as any).chatId.toString());
+      } else if (msg.peerId) {
+        chatId = Number(msg.peerId.toString());
+      } else if (msg.chatId) {
+        chatId = Number(msg.chatId.toString());
       } else {
         chatId = 0;
       }
-    } catch (error) {
+    } catch (error: unknown) {
       chatId = 0;
     }
 
@@ -805,17 +833,19 @@ reply delete ban3600</code>
       keywordTasks.add(task);
       keywordTasks.saveToDB();
       await msg.edit({
-        text: html(`✅ 已添加关键词任务，ID 为 <code>${task.task_id}</code>。`),
+        text: `✅ 已添加关键词任务，ID 为 <code>${task.task_id}</code>。`,
+        parseMode: "html",
       });
-    } catch (error: any) {
+    } catch (error: unknown) {
       await msg.edit({
-        text: html(`❌ <b>参数错误:</b> ${htmlEscape(error.message || error)}`),
+        text: `❌ <b>参数错误:</b> ${htmlEscape(getErrorMessage(error))}`,
+        parseMode: "html",
       });
     }
-  } catch (error: any) {
-    console.error("Keyword plugin error:", error);
+  } catch (error: unknown) {
+    logger.error("Keyword plugin error:", error);
     await msg.edit({
-      text: `❌ 操作失败：${error.message || error}`,
+      text: `❌ 操作失败：${getErrorMessage(error)}`,
     });
   }
 };
@@ -829,37 +859,38 @@ class KeywordPlugin extends Plugin {
     try {
       if (db && typeof db.close === "function") {
         db.close();
-        db = null as any;
+        db = null;
       }
-    } catch (error) {
-      console.error("Failed to close keyword DB:", error);
-      db = null as any;
+    } catch (error: unknown) {
+      logger.error("Failed to close keyword DB:", error);
+      db = null;
     }
   }
 
   description: string = `关键词回复管理`;
-  cmdHandlers: Record<string, (msg: MessageContext) => Promise<void>> = {
+  cmdHandlers: Record<string, (msg: any) => Promise<void>> = {
     keyword,
   };
-  listenMessageHandler?: ((msg: MessageContext, options?: { isEdited?: boolean }) => Promise<void>) | undefined =
-    async (message) => {
+  listenMessageHandler?: (msg: any) => Promise<void> =
+    async (message: any) => {
       try {
+        const media = message.media as Record<string, unknown> | undefined;
         const text =
-          message.text ||
-          ((message as any).media && "caption" in (message as any).media
-            ? String((message as any).media.caption || "")
+          message.message ||
+          (media && "caption" in media
+            ? String((media as { caption?: string }).caption || "")
             : "");
         if (!text) {
           return;
         }
 
-        if (message.isOutgoing) {
+        if ((message as { out?: boolean }).out) {
           return;
         }
 
-        await keywordTasks.checkAndReply(message);
-      } catch (error) {
-        console.error("Process keyword message error:", error);
+        await keywordTasks.checkAndReply(message as unknown as Parameters<typeof keywordTasks.checkAndReply>[0]);
+      } catch (error: unknown) {
+        logger.error("Process keyword message error:", error);
       }
     };
 }
@@ -867,24 +898,25 @@ class KeywordPlugin extends Plugin {
 export default new KeywordPlugin();
 
 export async function processKeywordMessage(
-  message: MessageContext
+  message: any
 ): Promise<void> {
   try {
+    const media = message.media as Record<string, unknown> | undefined;
     const text =
-      message.text ||
-      ((message as any).media && "caption" in (message as any).media
-        ? String((message as any).media.caption || "")
+      message.message ||
+      (media && "caption" in media
+        ? String((media as { caption?: string }).caption || "")
         : "");
     if (!text) {
       return;
     }
 
-    if (message.isOutgoing) {
+    if (message.out) {
       return;
     }
 
     await keywordTasks.checkAndReply(message);
-  } catch (error) {
-    console.error("Process keyword message error:", error);
+  } catch (error: unknown) {
+    logger.error("Process keyword message error:", error);
   }
 }

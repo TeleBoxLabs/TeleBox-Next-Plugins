@@ -2,10 +2,14 @@ import { Plugin } from "@utils/pluginBase";
 import sharp from "sharp";
 import axios from "axios";
 import type { MessageContext } from "@mtcute/dispatcher";
-import type { Message } from "@mtcute/node";
+import type { Message, TelegramClient } from "@mtcute/node";
+import type { tl } from "@mtcute/core";
+import type { MtcuteInputUser } from "@utils/mtcuteTypes";
 import { getPrefixes } from "@utils/pluginManager";
 import { safeGetReplyMessage } from "@utils/safeGetMessages";
 import { getGlobalClient } from "@utils/globalClient";
+import { logger } from "@utils/logger";
+import type { UsersGetFullUserResult } from "@utils/clientInternals";
 
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
@@ -86,7 +90,7 @@ async function loadConfigResource(url: string, forceUpdate = false) {
       .replace("${branch}", branch);
 
     config = fullConfig.resources;
-    console.log(
+    logger.info(
       `配置加载成功，当前分支: ${branch}, 资源基础URL: ${resourceBaseUrl}`
     );
   };
@@ -101,7 +105,7 @@ async function loadConfigResource(url: string, forceUpdate = false) {
 }
 
 loadConfigResource(baseConfigURL).catch(() => {
-  console.log("初始配置加载失败，将在首次使用时重试");
+  logger.info("初始配置加载失败，将在首次使用时重试");
 });
 
 async function sendStickerList(msg: MessageContext) {
@@ -187,40 +191,41 @@ async function iconMaskedFor(params: {
   };
 }
 
-async function downloadProfilePhotoForId(client: any, userId: number): Promise<Buffer | null> {
+async function downloadProfilePhotoForId(client: TelegramClient, userId: number): Promise<Buffer | null> {
   try {
-    const peer = await client.resolvePeer(userId) as any;
+    const peer = await client.resolvePeer(userId) as unknown as { _: string; user_id?: number | string; access_hash?: number | string };
     const fullUser = await client.call({
       _: 'users.getFullUser',
-      id: peer,
-    }) as any;
+      id: peer as unknown as MtcuteInputUser,
+    }) as unknown as UsersGetFullUserResult;
     const photo = fullUser?.full_user?.photo;
     if (!photo || photo._ !== 'userProfilePhoto') return null;
-    const location = {
-      _: 'inputPeerPhotoFileLocation' as const,
+    const location: Record<string, unknown> = {
+      _: 'inputPeerPhotoFileLocation',
       big: false,
       peer: peer,
-      photo_id: photo.photo_id,
+      photoId: photo.photo_id,
     };
-    const buffer = await client.downloadAsBuffer(location);
+    const buffer = await client.downloadAsBuffer(location as unknown as Parameters<typeof client.downloadAsBuffer>[0]);
     return Buffer.from(buffer);
-  } catch (err) {
-    console.error("[eat] downloadProfilePhoto failed:", err);
+  } catch (err: unknown) {
+    logger.error("[eat] downloadProfilePhoto failed:", err);
     return null;
   }
 }
 
 async function downloadProfilePhoto(msg: MessageContext): Promise<Buffer | null> {
   const replied = await safeGetReplyMessage(msg);
-  const fromId = (replied as any)?.sender?.id;
-  if (!fromId) {
+  // Message.sender is a Peer object with id
+  const senderId = replied?.sender && 'id' in replied.sender ? (replied.sender as { id: number }).id : undefined;
+  if (!senderId) {
     await msg.edit({ text: "无法获取对方头像" });
     return null;
   }
 
   const client = await getGlobalClient();
   if (!client) return null;
-  return downloadProfilePhotoForId(client, fromId);
+  return downloadProfilePhotoForId(client, senderId);
 }
 
 async function downloadMedia(msg: MessageContext): Promise<Buffer | null> {
@@ -229,13 +234,15 @@ async function downloadMedia(msg: MessageContext): Promise<Buffer | null> {
     await msg.edit({ text: "请回复一条图片消息" });
     return null;
   }
-  if (!(replied as any).media) {
+  if (!replied.media) {
     await msg.edit({ text: "请回复一条图片消息" });
     return null;
   }
   const client = await getGlobalClient();
   if (!client) return null;
-  const buf = await client.downloadAsBuffer((replied as any).media) as Buffer | undefined;
+  // downloadAsBuffer accepts FileDownloadLocation; Video/Document extend FileLocation
+  const media = replied.media;
+  const buf = await client.downloadAsBuffer(media as Parameters<typeof client.downloadAsBuffer>[0]) as Buffer | undefined;
   if (!buf) return null;
   return buf;
 }
@@ -248,8 +255,8 @@ async function downloadAvatar(
 }
 
 async function sendRawSticker(params: {
-  client: any;
-  peer: any;
+  client: TelegramClient;
+  peer: tl.TypeInputPeer;
   buffer: Buffer;
   width: number;
   height: number;
@@ -261,10 +268,10 @@ async function sendRawSticker(params: {
   const uploaded = await client.uploadFile({
     file: buffer,
     fileName: "output.webp",
-    mimeType: "image/webp",
-  } as any);
+    fileMime: "image/webp",
+  });
 
-  const callParams: any = {
+  const callParams: Record<string, unknown> = {
     _: "messages.sendMedia",
     peer,
     media: {
@@ -276,13 +283,13 @@ async function sendRawSticker(params: {
         { _: "documentAttributeImageSize", w: width, h: height },
         { _: "documentAttributeFilename", file_name: "output.webp" },
       ],
-    } as any,
+    } as unknown as tl.RawInputMediaUploadedDocument,
     random_id: Math.floor(Math.random() * 2 ** 53),
   };
   if (replyMsgId) {
     callParams.reply_to = { _: "inputReplyToMessage", reply_to_msg_id: replyMsgId };
   }
-  await client.call(callParams as any);
+  await client.call(callParams as unknown as Parameters<typeof client.call>[0]);
 }
 
 async function compositeWithEntryConfig(parmas: {
@@ -294,8 +301,10 @@ async function compositeWithEntryConfig(parmas: {
   const { entry, msg, isEat2, trigger } = parmas;
   const client = await getGlobalClient();
   if (!client) return;
-  const peer = client.resolvePeer(msg.chat.id);
-  const repliedMsg = await safeGetReplyMessage(msg);
+  const [peer, repliedMsg] = await Promise.all([
+    client.resolvePeer(msg.chat.id),
+    safeGetReplyMessage(msg),
+  ]);
 
   const youAvatarBuffer = await downloadAvatar(msg, isEat2);
   if (!youAvatarBuffer) return;
@@ -341,7 +350,7 @@ async function compositeWithEntryConfig(parmas: {
       width: width!,
       height: height!,
       name: entry.name,
-      replyMsgId: (repliedMsg as any)?.id,
+      replyMsgId: repliedMsg?.id,
     });
     return;
   }
@@ -358,7 +367,7 @@ async function compositeWithEntryConfig(parmas: {
   }
 
   if (entry.me) {
-    const meId = (trigger as any)?.sender?.id || (msg as any).sender?.id;
+    const meId = trigger?.sender?.id || msg.sender?.id;
     if (!meId) {
       await msg.edit({ text: "无法获取自己的头像" });
       return;
@@ -389,7 +398,7 @@ async function compositeWithEntryConfig(parmas: {
     width: width!,
     height: height!,
     name: entry.name,
-    replyMsgId: (repliedMsg as any)?.id,
+    replyMsgId: repliedMsg?.id,
   });
 }
 
@@ -440,7 +449,7 @@ const fn = async (
   const [, ...args] = (msg.text || "").split(" ");
 
   if (!msg.replyToMessage) {
-    if (args[0] == "set") {
+    if (args[0] === "set") {
       let url = args[1] || baseConfigURL;
       await handleSetCommand({ msg, url });
       return;
@@ -453,7 +462,7 @@ const fn = async (
 
   await ensureConfigLoaded(msg);
 
-  if (args.length == 0) {
+  if (args.length === 0) {
     const entry = getRandomEntry();
     await sendSticker({ entry, msg, trigger, isEat2 });
   } else {

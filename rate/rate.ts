@@ -3,6 +3,9 @@ import type { MessageContext } from "@mtcute/dispatcher";
 import { html } from "@mtcute/html-parser";
 import { getGlobalClient } from "@utils/globalClient";
 import axios, { AxiosError } from "axios";
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
+import { htmlEscape } from "@utils/htmlEscape";
 
 
 interface CoinGeckoResponse {
@@ -221,13 +224,6 @@ const CRYPTO_CURRENCIES: Record<string, { symbol: string, name: string, aliases?
   'arb': { symbol: 'ARB', name: 'Arbitrum', aliases: ['arbitrum'] }
 };
 
-// HTML转义工具
-const htmlEscape = (text: string): string => 
-  text.replace(/[&<>"']/g, m => ({ 
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', 
-    '"': '&quot;', "'": '&#x27;' 
-  }[m] || m));
-
 const codeTag = (text: string): string => `<code>${htmlEscape(text)}</code>`;
 
 const help_text = `🚀 <b>智能汇率查询助手</b>
@@ -316,7 +312,7 @@ class RatePlugin extends Plugin {
           this.fiatRatesCache[key] = { rates: normalized, ts: now };
           return normalized;
         }
-      } catch {}
+      } catch (e: unknown) { logger.warn('操作失败', e) }
     }
     throw new Error('法币汇率服务不可用');
   }
@@ -343,11 +339,11 @@ class RatePlugin extends Plugin {
       if (data && data.price) {
         return parseFloat(data.price);
       }
-    } catch (error) {
+    } catch (error: unknown) {
       if (axios.isAxiosError(error) && error.response?.status === 400) {
         // 交易对不存在，这不是一个严重错误，静默处理
       } else {
-        console.warn(`[RatePlugin] Binance API for ${symbol} failed:`, error);
+        logger.warn(`[RatePlugin] Binance API for ${symbol} failed:`, error);
       }
     }
     throw new Error(`Binance pair not found for ${symbol}`);
@@ -373,7 +369,7 @@ class RatePlugin extends Plugin {
       try {
         const cryptoToFiat = await this.getCryptoFiatPrice(s2, s1);
         return { price: 1 / cryptoToFiat.price, lastUpdated: cryptoToFiat.lastUpdated };
-      } catch (error) {
+      } catch (_e: unknown) {
         throw new Error(`无法获取 ${s2} 对 ${s1} 的价格来计算反向汇率`);
       }
     }
@@ -395,21 +391,23 @@ class RatePlugin extends Plugin {
     try {
       const price = await this.fetchBinancePrice(`${crypto1}${crypto2}`);
       return { price, lastUpdated: new Date() };
-    } catch {}
+    } catch (e: unknown) { logger.warn('操作失败', e) }
 
     try {
       const price = await this.fetchBinancePrice(`${crypto2}${crypto1}`);
       return { price: 1 / price, lastUpdated: new Date() };
-    } catch {}
+    } catch (e: unknown) { logger.warn('操作失败', e) }
 
     // 2. 通过稳定币桥接
     const bridges = ['USDT', 'BUSD', 'USDC'];
     for (const bridge of bridges) {
       try {
-        const price1 = await this.fetchBinancePrice(`${crypto1}${bridge}`);
-        const price2 = await this.fetchBinancePrice(`${crypto2}${bridge}`);
+        const [price1, price2] = await Promise.all([
+          this.fetchBinancePrice(`${crypto1}${bridge}`),
+          this.fetchBinancePrice(`${crypto2}${bridge}`),
+        ]);
         return { price: price1 / price2, lastUpdated: new Date() };
-      } catch {}
+      } catch (e: unknown) { logger.warn('操作失败', e) }
     }
 
     throw new Error(`无法找到 ${crypto1} 和 ${crypto2} 之间的交易对`);
@@ -422,11 +420,11 @@ class RatePlugin extends Plugin {
     
     for (const bridge of bridges) {
       try {
-        console.log(`[RatePlugin] 尝试通过 ${bridge} 桥接: ${crypto} -> ${fiat}`);
+        logger.info(`[RatePlugin] 尝试通过 ${bridge} 桥接: ${crypto} -> ${fiat}`);
         
         // 获取加密货币对稳定币价格
         const cryptoPrice = await this.fetchBinancePrice(`${crypto}${bridge}`);
-        console.log(`[RatePlugin] ${crypto}${bridge} 价格: ${cryptoPrice}`);
+        logger.info(`[RatePlugin] ${crypto}${bridge} 价格: ${cryptoPrice}`);
         
         // 如果目标就是稳定币
         if (fiat.toUpperCase() === bridge) {
@@ -439,20 +437,20 @@ class RatePlugin extends Plugin {
           bridgeForFiat = 'usd';
         }
         
-        console.log(`[RatePlugin] 获取 ${bridgeForFiat} 到 ${fiat} 的汇率`);
+        logger.info(`[RatePlugin] 获取 ${bridgeForFiat} 到 ${fiat} 的汇率`);
         const fiatRates = await this.fetchFiatRates(bridgeForFiat);
         const fiatRate = fiatRates[fiat.toLowerCase()];
         
         if (fiatRate) {
           const finalPrice = cryptoPrice * fiatRate;
-          console.log(`[RatePlugin] 最终价格: ${crypto} = ${finalPrice} ${fiat}`);
+          logger.info(`[RatePlugin] 最终价格: ${crypto} = ${finalPrice} ${fiat}`);
           return { price: finalPrice, lastUpdated: new Date() };
         } else {
           lastError = `无法获取 ${bridgeForFiat} 到 ${fiat} 的汇率`;
         }
-      } catch (error: any) {
-        lastError = `${bridge} 桥接失败: ${error.message}`;
-        console.warn(`[RatePlugin] ${lastError}`);
+      } catch (error: unknown) {
+        lastError = `${bridge} 桥接失败: ${getErrorMessage(error)}`;
+        logger.warn(`[RatePlugin] ${lastError}`);
       }
     }
 
@@ -469,7 +467,7 @@ class RatePlugin extends Plugin {
         const { data } = await axios.get('https://api.coingecko.com/api/v3/simple/supported_vs_currencies', { timeout: 8000 });
         this.vsFiats = new Set((data || []).map((x: string) => x.toLowerCase()));
         this.vsFiatsTs = now;
-      } catch {}
+      } catch (e: unknown) { logger.warn('操作失败', e) }
       // 2) exchangerate.host /symbols
       if (!this.vsFiats || this.vsFiats.size === 0) {
         try {
@@ -477,7 +475,7 @@ class RatePlugin extends Plugin {
           const symbols = data?.symbols || {};
           this.vsFiats = new Set(Object.keys(symbols).map(k => k.toLowerCase()));
           this.vsFiatsTs = now;
-        } catch {}
+        } catch (e: unknown) { logger.warn('操作失败', e) }
       }
       // 3) frankfurter.app /currencies
       if (!this.vsFiats || this.vsFiats.size === 0) {
@@ -485,14 +483,14 @@ class RatePlugin extends Plugin {
           const { data } = await axios.get('https://api.frankfurter.app/currencies', { timeout: 8000 });
           this.vsFiats = new Set(Object.keys(data || {}).map(k => k.toLowerCase()));
           this.vsFiatsTs = now;
-        } catch {}
+        } catch (e: unknown) { logger.warn('操作失败', e) }
       }
       // 最后兜底：使用常见法币列表（仅法币）
       if (!this.vsFiats || this.vsFiats.size === 0) {
         const commonFiats = ['usd', 'eur', 'gbp', 'jpy', 'cny', 'cad', 'aud', 'chf', 'nzd', 'sek', 'nok', 'dkk', 'pln', 'czk', 'huf', 'ron', 'bgn', 'hrk', 'rub', 'try', 'brl', 'mxn', 'sgd', 'hkd', 'krw', 'inr', 'thb', 'myr', 'php', 'idr', 'vnd', 'zar', 'ils', 'aed', 'sar', 'egp', 'kwd', 'qar', 'bhd', 'omr', 'jod', 'lbp', 'mad', 'dzd', 'tnd', 'ngn', 'ghs', 'kes', 'ugx', 'tzs', 'zmw', 'bwp', 'mur', 'scr', 'mvr', 'lkr', 'pkr', 'bdt', 'npr'];
         this.vsFiats = new Set(commonFiats);
         this.vsFiatsTs = now;
-        console.log(`[RatePlugin] 使用本地法币列表，包含 ${this.vsFiats.size} 种货币`);
+        logger.info(`[RatePlugin] 使用本地法币列表，包含 ${this.vsFiats.size} 种货币`);
       }
     }
     return this.vsFiats.has(query.toLowerCase());
@@ -512,7 +510,7 @@ class RatePlugin extends Plugin {
       return this.currencyCache[qLower];
     }
 
-    console.log(`[RatePlugin] 识别货币类型: ${query}`);
+    logger.info(`[RatePlugin] 识别货币类型: ${query}`);
     
     // 先检查内置法币映射
     if (FIAT_CURRENCIES[qLower]) {
@@ -524,7 +522,7 @@ class RatePlugin extends Plugin {
         type: 'fiat' as const 
       };
       this.currencyCache[qLower] = result;
-      console.log(`[RatePlugin] ${query} 从内置映射识别为法币`);
+      logger.info(`[RatePlugin] ${query} 从内置映射识别为法币`);
       return result;
     }
     
@@ -538,19 +536,19 @@ class RatePlugin extends Plugin {
         type: 'crypto' as const 
       };
       this.currencyCache[qLower] = result;
-      console.log(`[RatePlugin] ${query} 从内置映射识别为加密货币`);
+      logger.info(`[RatePlugin] ${query} 从内置映射识别为加密货币`);
       return result;
     }
     
     // 回退到动态检查
     if (await this.isFiat(qLower)) {
-      console.log(`[RatePlugin] ${query} 动态识别为法币`);
+      logger.info(`[RatePlugin] ${query} 动态识别为法币`);
       const result = { id: qLower, symbol: query.toUpperCase(), name: query.toUpperCase(), type: 'fiat' as const };
       this.currencyCache[qLower] = result;
       return result;
     }
 
-    console.log(`[RatePlugin] ${query} 默认识别为加密货币`);
+    logger.info(`[RatePlugin] ${query} 默认识别为加密货币`);
     const result = { id: qLower, symbol: query.toUpperCase(), name: query.toUpperCase(), type: 'crypto' as const };
     this.currencyCache[qLower] = result;
     return result;
@@ -623,7 +621,7 @@ class RatePlugin extends Plugin {
     const [, ...args] = parts; // 跳过命令本身
 
     try {
-      console.log(`[RatePlugin] 收到命令: ${text}`);
+      logger.info(`[RatePlugin] 收到命令: ${text}`);
       if (!args[0]) {
         await msg.edit({
           text: html(help_text),
@@ -691,21 +689,21 @@ class RatePlugin extends Plugin {
       let price: number = 0;
       let lastUpdated: Date = new Date();
       
-      console.log(`[RatePlugin] 智能查询: ${currency1.symbol} (${currency1.type}) -> ${currency2.symbol} (${currency2.type}), 数量: ${amount}`);
+      logger.info(`[RatePlugin] 智能查询: ${currency1.symbol} (${currency1.type}) -> ${currency2.symbol} (${currency2.type}), 数量: ${amount}`);
       
       // 验证货币类型识别
       if (currency1.type === 'fiat' && currency2.type === 'crypto') {
-        console.log(`[RatePlugin] 检测到法币到加密货币转换: ${currency1.symbol} -> ${currency2.symbol}`);
+        logger.info(`[RatePlugin] 检测到法币到加密货币转换: ${currency1.symbol} -> ${currency2.symbol}`);
       }
       
       try {
         const market = await this.getUniversalPrice(currency1.symbol, currency2.symbol, currency1.type, currency2.type);
         price = market.price;
         lastUpdated = market.lastUpdated;
-      } catch (error: any) {
-        console.error(`[RatePlugin] 价格获取详细错误:`, error);
+      } catch (error: unknown) {
+        logger.error(`[RatePlugin] 价格获取详细错误:`, error);
         await msg.edit({
-          text: html(`❌ <b>获取价格失败:</b> ${htmlEscape(error.message)}<br><br>🔍 <b>调试信息:</b><br>• ${htmlEscape(currency1.symbol)} (${htmlEscape(currency1.type)})<br>• ${htmlEscape(currency2.symbol)} (${htmlEscape(currency2.type)})`),
+          text: html(`❌ <b>获取价格失败:</b> ${htmlEscape(getErrorMessage(error))}<br><br>🔍 <b>调试信息:</b><br>• ${htmlEscape(currency1.symbol)} (${htmlEscape(currency1.type)})<br>• ${htmlEscape(currency2.symbol)} (${htmlEscape(currency2.type)})`),
         });
         return;
       }
@@ -728,7 +726,7 @@ class RatePlugin extends Plugin {
         try {
           price1USD = (await this.getUniversalPrice(symbol1, 'USD', 'crypto', 'fiat')).price;
           price2USD = (await this.getUniversalPrice(symbol2, 'USD', 'crypto', 'fiat')).price;
-        } catch {}
+        } catch (e: unknown) { logger.warn('操作失败', e) }
         responseText = this.buildCryptoToCryptoResponse(amount, convertedAmount, price, price1USD, price2USD, symbol1, symbol2, lastUpdated);
       } else if (currency1.type === 'fiat' && currency2.type === 'crypto') {
         // 法币 -> 加密货币
@@ -747,15 +745,15 @@ class RatePlugin extends Plugin {
       await msg.edit({
         text: html(responseText),
       });  
-    } catch (error: any) {
-      console.error('[RatePlugin] 操作失败:', error);
+    } catch (error: unknown) {
+      logger.error('[RatePlugin] 操作失败:', error);
       
       let errorMessage = '未知错误';
       let errorCode = '';
       
       if (axios.isAxiosError(error)) {
-        errorCode = error.code || '';
-        errorMessage = error.message;
+        errorCode = (error as unknown as Record<string, unknown>).code as string || '';
+        errorMessage = getErrorMessage(error);
       } else if (error instanceof Error) {
         errorMessage = error.message;
       } else if (typeof error === 'string') {

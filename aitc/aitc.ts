@@ -6,6 +6,9 @@ import Database from "better-sqlite3";
 import path from "path";
 import { createDirectoryInAssets } from "@utils/pathHelpers";
 import { safeGetReplyMessage } from "@utils/safeGetMessages";
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
+import { htmlEscape } from "@utils/htmlEscape";
 
 const CONFIG_KEYS = {
   API_KEY: "aitc_api_key",
@@ -69,8 +72,8 @@ class ConfigManager {
         )
       `);
       this.initialized = true;
-    } catch (error) {
-      console.error("aitc plugin failed to init config store", error);
+    } catch (error: unknown) {
+      logger.error("aitc plugin failed to init config store", error);
       throw error;
     }
   }
@@ -83,8 +86,8 @@ class ConfigManager {
       if (row && typeof row.value === "string") {
         return row.value;
       }
-    } catch (error) {
-      console.error("aitc plugin failed to read config", error);
+    } catch (error: unknown) {
+      logger.error("aitc plugin failed to read config", error);
     }
     if (fallback !== undefined) return fallback;
     return DEFAULT_CONFIG[key] ?? "";
@@ -97,8 +100,8 @@ class ConfigManager {
         "INSERT OR REPLACE INTO config (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
       );
       stmt.run(key, value);
-    } catch (error) {
-      console.error("aitc plugin failed to write config", error);
+    } catch (error: unknown) {
+      logger.error("aitc plugin failed to write config", error);
       throw error;
     }
   }
@@ -113,8 +116,8 @@ class ConfigManager {
         result[row.key] = row.value;
       }
       return result;
-    } catch (error) {
-      console.error("aitc plugin failed to dump config", error);
+    } catch (error: unknown) {
+      logger.error("aitc plugin failed to dump config", error);
       return {};
     }
   }
@@ -134,8 +137,8 @@ class ConfigManager {
         }
       }
       return result;
-    } catch (error) {
-      console.error("aitc plugin failed to parse prompt map", error);
+    } catch (error: unknown) {
+      logger.error("aitc plugin failed to parse prompt map", error);
       return {};
     }
   }
@@ -146,19 +149,6 @@ class ConfigManager {
     this.set(CONFIG_KEYS.PROMPT_MAP, JSON.stringify(map));
   }
 }
-
-const htmlEscape = (text: string): string =>
-  text.replace(
-    /[&<>"']/g,
-    (char) =>
-      ({
-        "&": "&amp;",
-        "<": "&lt;",
-        ">": "&gt;",
-        '"': "&quot;",
-        "'": "&#x27;",
-      })[char] || char,
-  );
 
 const decodeHtmlEntities = (text: string): string =>
   text
@@ -403,12 +393,12 @@ async function handleAitcCommand(msg: MessageContext): Promise<void> {
     try {
       const reply = await safeGetReplyMessage(msg);
       const replyText =
-        reply?.text || ("text" in (reply || {}) ? (reply as any).text : "");
+        reply?.text || ("text" in (reply || {}) ? (reply as { text?: string }).text : "");
       if (typeof replyText === "string") {
         userInput = replyText.trim();
       }
-    } catch (error) {
-      console.error("aitc plugin failed to read reply", error);
+    } catch (error: unknown) {
+      logger.error("aitc plugin failed to read reply", error);
     }
   }
 
@@ -476,15 +466,21 @@ async function handleAitcCommand(msg: MessageContext): Promise<void> {
 
     const translated = content.trim();
     await replyPlainText(translated);
-  } catch (error: any) {
-    console.error("aitc plugin openai error", error);
+  } catch (error: unknown) {
+    logger.error("aitc plugin openai error", error);
     let message = "请求失败，请稍后重试";
-    if (error.response?.data?.error?.message) {
-      message = error.response.data.error.message;
-    } else if (error.response?.status) {
-      message = `API 返回状态 ${error.response.status}`;
-    } else if (error.message) {
-      message = error.message;
+    const errObj = error as Record<string, unknown>;
+    if (errObj.response && typeof errObj.response === "object") {
+      const resp = errObj.response as Record<string, unknown>;
+      const data = resp.data as Record<string, unknown> | undefined;
+      const innerError = data?.error as Record<string, unknown> | undefined;
+      if (innerError?.message && typeof innerError.message === "string") {
+        message = innerError.message;
+      } else if (resp.status && typeof resp.status === "number") {
+        message = `API 返回状态 ${resp.status}`;
+      }
+    } else if (getErrorMessage(error)) {
+      message = getErrorMessage(error);
     }
     if (message.length > 200) {
       message = message.slice(0, 200) + "...";

@@ -10,6 +10,9 @@ import { html } from "@mtcute/html-parser";
 import axios from "axios";
 import { exec } from "child_process";
 import { promisify } from "util";
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
+import { htmlEscape } from "@utils/htmlEscape";
 
 const execAsync = promisify(exec);
 
@@ -22,11 +25,12 @@ class SystemExecutor {
      try {
        const { stdout, stderr } = await execAsync(cmd);
        return { success: true, output: String(stdout ?? "").trim(), error: String(stderr ?? "").trim() };
-     } catch (e: any) {
+     } catch (e: unknown) {
+       const err = e as { stdout?: string; stderr?: string };
        return {
          success: false,
-         output: String(e?.stdout ?? "").trim(),
-         error: String(e?.stderr ?? e?.message ?? e ?? "").trim(),
+         output: String(err?.stdout ?? "").trim(),
+         error: String(err?.stderr ?? getErrorMessage(e) ?? "").trim(),
        };
      }
    }
@@ -35,13 +39,6 @@ class SystemExecutor {
      return this.run(`sudo ${cmd}`);
    }
  }
-
-// HTML转义（每个插件必须实现）
-const htmlEscape = (text: string): string =>
-  String(text).replace(/[&<>"']/g, m => ({ 
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', 
-    '"': '&quot;', "'": '&#x27;' 
-  }[m] || m));
 
 // 常量配置
 const DEFAULT_PORT = 40000;
@@ -70,7 +67,7 @@ class AccountManager {
       if (data.private_key && data.v6) {
         return { privateKey: data.private_key, address6: data.v6 };
       }
-    } catch {}
+    } catch (e: unknown) { logger.warn('操作失败', e) }
     return null;
   }
 
@@ -94,8 +91,8 @@ class AccountManager {
       await execAsync(`sudo bash -lc 'cat > ${WARP_CONFIG_FILE} <<"EOF"\n${accountData}\nEOF'`);
       
       return { privateKey, address6 };
-    } catch (error: any) {
-      throw new Error(`账户注册失败: ${error.message}`);
+    } catch (error: unknown) {
+      throw new Error(`账户注册失败: ${getErrorMessage(error)}`);
     }
   }
 }
@@ -113,7 +110,7 @@ class WireproxyManager {
           return { privateKey: String(obj.private_key), address6: String(obj.v6) };
         }
       }
-    } catch {}
+    } catch (e: unknown) { logger.warn('操作失败', e) }
 
     // 远程注册免费账户
     try {
@@ -128,8 +125,8 @@ class WireproxyManager {
       const payload = JSON.stringify({ type: "free", private_key: privateKey, v6: address6 }, null, 2);
       await execAsync(`sudo bash -lc 'mkdir -p /etc/wireguard && cat > /etc/wireguard/warp-account.conf <<"EOF"\n${payload}\nEOF'`);
       return { privateKey, address6 };
-    } catch (e: any) {
-      throw new Error(`注册免费账户失败: ${e?.message || e}`);
+    } catch (e: unknown) {
+      throw new Error(`注册免费账户失败: ${getErrorMessage(e)}`);
     }
   }
 
@@ -171,7 +168,7 @@ class WireproxyManager {
                 if (config.proxy && config.proxy.port === port) {
                   tgProxyStatus = `✅ 已配置 (端口: ${port})`;
                 }
-              } catch {
+              } catch (_e: unknown) {
                 tgProxyStatus = "❓ 配置文件解析失败";
               }
             }
@@ -189,7 +186,7 @@ class WireproxyManager {
                 if (musicProxy && musicProxy.includes(`:${port}`)) {
                   musicProxyStatus = `✅ 已配置 (端口: ${port})`;
                 }
-              } catch {
+              } catch (_e: unknown) {
                 musicProxyStatus = "❓ 配置文件解析失败";
               }
             }
@@ -211,8 +208,8 @@ class WireproxyManager {
       const text = `📊 <b>WARP 综合状态</b>\n\n<b>WireProxy</b>\n- ${htmlEscape(wireproxyStatusLine)}\n- 配置文件: ${cfg.success ? "存在" : "不存在"}\n- 可执行文件: ${bin.success ? "存在" : "不存在"}\n- 账户文件: ${acc.success ? "存在" : "不存在"}${proxyInfo}\n\n<b>Iptables 方案</b>\n- dnsmasq: ${dns.success && dns.output === "active" ? "✅ 运行中" : "❌ 未运行"}\n- iptables: ${ipt.success ? "✅ 已安装" : "❌ 未安装"}\n- ipset: ${ips.success ? "✅ 已安装" : "❌ 未安装"}\n\n<b>内核</b>\n- WireGuard 模块: ${kmod.success ? "✅ 已加载" : "⚠️ 未加载"}`;
 
       return text;
-    } catch (e: any) {
-      return `❌ 查询状态失败: ${htmlEscape(e?.message || e)}`;
+    } catch (e: unknown) {
+      return `❌ 查询状态失败: ${htmlEscape(getErrorMessage(e))}`;
     }
   }
 
@@ -227,9 +224,7 @@ class WireproxyManager {
           try {
             const data = JSON.parse(result.output);
             return `${data.ip} ${data.country} ${data.organisation}`.trim();
-          } catch {
-            // JSON parsing failed, continue to retry
-          }
+          } catch (e: unknown) { logger.warn(`[warp] JSON parsing failed, continue to retry:`, e) }
         }
         if (i < maxRetries - 1) {
           await new Promise(resolve => setTimeout(resolve, retryDelay));
@@ -305,8 +300,8 @@ class WireproxyManager {
       }
 
       return `✅ WireProxy 已启动，SOCKS5 代理: 127.0.0.1:${targetPort}`;
-    } catch (error: any) {
-      return `❌ 启动失败: ${htmlEscape(error.message)}`;
+    } catch (error: unknown) {
+      return `❌ 启动失败: ${htmlEscape(getErrorMessage(error))}`;
     }
   }
 
@@ -355,8 +350,8 @@ WantedBy=multi-user.target`;
       await execAsync("sudo systemctl stop wireproxy || true");
       await execAsync("sudo systemctl disable wireproxy || true");
       return "✅ wireproxy 已停止";
-    } catch (e: any) {
-      return `❌ wireproxy 停止失败: ${htmlEscape(e?.message || e)}`;
+    } catch (e: unknown) {
+      return `❌ wireproxy 停止失败: ${htmlEscape(getErrorMessage(e))}`;
     }
   }
 
@@ -377,8 +372,8 @@ WantedBy=multi-user.target`;
 
 
       return "✅ WireProxy 已重启，IP 已更换";
-    } catch (e: any) {
-      return `❌ 重启失败: ${htmlEscape(e?.message || e)}`;
+    } catch (e: unknown) {
+      return `❌ 重启失败: ${htmlEscape(getErrorMessage(e))}`;
     }
   }
 
@@ -399,8 +394,8 @@ WantedBy=multi-user.target`;
       }
       
       return `✅ 端口已更新为 ${port} 并重启服务`;
-    } catch (error: any) {
-      return `❌ 端口更新失败: ${htmlEscape(error.message)}`;
+    } catch (error: unknown) {
+      return `❌ 端口更新失败: ${htmlEscape(getErrorMessage(error))}`;
     }
   }
 
@@ -463,8 +458,8 @@ WantedBy=multi-user.target`;
       } else {
         return "✅ 所有 WARP 相关组件已彻底卸载。";
       }
-    } catch (e: any) {
-      return `❌ 卸载过程中出现错误: ${htmlEscape(e?.message || e)}。建议重启后重试。`;
+    } catch (e: unknown) {
+      return `❌ 卸载过程中出现错误: ${htmlEscape(getErrorMessage(e))}。建议重启后重试。`;
     }
   }
 }
@@ -593,7 +588,7 @@ class WarpPlugin extends Plugin {
       let config;
       try {
         config = JSON.parse(readResult.output);
-      } catch {
+      } catch (_e: unknown) {
         return "❌ config.json 文件格式错误。";
       }
 
@@ -614,8 +609,8 @@ class WarpPlugin extends Plugin {
       }
 
       return `✅ 代理配置已更新\n\n📋 <b>配置详情</b>\n- 代理类型: SOCKS5\n- 地址: 127.0.0.1\n- 端口: ${port}\n\n⚠️ <b>注意</b>: 需要重启 TeleBox 生效`;
-    } catch (e: any) {
-      return `❌ 配置代理失败: ${htmlEscape(e?.message || e)}`;
+    } catch (e: unknown) {
+      return `❌ 配置代理失败: ${htmlEscape(getErrorMessage(e))}`;
     }
   }
 
@@ -646,7 +641,7 @@ class WarpPlugin extends Plugin {
       let config;
       try {
         config = JSON.parse(readResult.output);
-      } catch {
+      } catch (_e: unknown) {
         return "❌ config.json 文件格式错误。";
       }
 
@@ -668,8 +663,8 @@ class WarpPlugin extends Plugin {
       }
 
       return `✅ Telegram 代理配置已关闭\n\n⚠️ <b>注意</b>: 需要重启 TeleBox 生效`;
-    } catch (e: any) {
-      return `❌ 关闭代理失败: ${htmlEscape(e?.message || e)}`;
+    } catch (e: unknown) {
+      return `❌ 关闭代理失败: ${htmlEscape(getErrorMessage(e))}`;
     }
   }
 
@@ -726,7 +721,7 @@ class WarpPlugin extends Plugin {
         let config;
         try {
           config = JSON.parse(readResult.output);
-        } catch {
+        } catch (_e: unknown) {
           return "❌ Music 配置文件格式错误。";
         }
 
@@ -744,8 +739,8 @@ class WarpPlugin extends Plugin {
       }
 
       return `✅ Music 插件代理配置已更新\n\n📋 <b>配置详情</b>\n- 代理类型: SOCKS5\n- 地址: 127.0.0.1\n- 端口: ${port}\n\n💡 <b>提示</b>: Music 插件现在可以通过 WARP 访问 YouTube`;
-    } catch (e: any) {
-      return `❌ 配置 Music 代理失败: ${htmlEscape(e?.message || e)}`;
+    } catch (e: unknown) {
+      return `❌ 配置 Music 代理失败: ${htmlEscape(getErrorMessage(e))}`;
     }
   }
 
@@ -776,7 +771,7 @@ class WarpPlugin extends Plugin {
       let config;
       try {
         config = JSON.parse(readResult.output);
-      } catch {
+      } catch (_e: unknown) {
         return "❌ Music 配置文件格式错误。";
       }
 
@@ -798,8 +793,8 @@ class WarpPlugin extends Plugin {
       }
 
       return `✅ Music 插件代理配置已关闭\n\n💡 <b>提示</b>: Music 插件现在将直接访问 YouTube`;
-    } catch (e: any) {
-      return `❌ 关闭 Music 代理失败: ${htmlEscape(e?.message || e)}`;
+    } catch (e: unknown) {
+      return `❌ 关闭 Music 代理失败: ${htmlEscape(getErrorMessage(e))}`;
     }
   }
 
@@ -858,7 +853,7 @@ class WarpPlugin extends Plugin {
               await msg.edit({ text: html("❌ Iptables/dnsmasq 方案似乎正在运行。请先禁用它，然后再启动 WireProxy。") });
               return;
             }
-          } catch {}
+          } catch (e: unknown) { logger.warn('操作失败', e) }
 
           const port = args[1] ? parseInt(args[1], 10) : undefined;
           await msg.edit({ text: html("🔄 正在启动 wireproxy...") });
@@ -926,8 +921,8 @@ class WarpPlugin extends Plugin {
           try {
             await execAsync("sudo apt-get update && sudo apt-get install -y iptables dnsmasq ipset || sudo yum install -y iptables dnsmasq ipset");
             await msg.edit({ text: html("✅ Iptables + dnsmasq + ipset 方案已安装") });
-          } catch (e: any) {
-            await msg.edit({ text: html(`❌ 安装失败: ${htmlEscape(e.message)}`) });
+          } catch (e: unknown) {
+            await msg.edit({ text: html(`❌ 安装失败: ${htmlEscape(getErrorMessage(e))}`) });
           }
           return;
         }
@@ -965,23 +960,24 @@ class WarpPlugin extends Plugin {
           await msg.edit({
           });
       }
-    } catch (error: any) {
-      console.error("[warp] 插件执行失败:", error);
+    } catch (error: unknown) {
+      const errMsg = getErrorMessage(error);
+      logger.error("[warp] 插件执行失败:", error);
       
       // 处理特定错误类型
-      if (error.message?.includes("FLOOD_WAIT")) {
-        const waitTime = parseInt(error.message.match(/\d+/)?.[0] || "60");
+      if (errMsg.includes("FLOOD_WAIT")) {
+        const waitTime = parseInt(errMsg.match(/\d+/)?.[0] || "60");
         await msg.edit({ text: html(`⏳ <b>请求过于频繁</b><br><br>需要等待 ${waitTime} 秒后重试`) });
         return;
       }
       
-      if (error.message?.includes("MESSAGE_TOO_LONG")) {
-        await msg.edit({ text: html("❌ <b>消息过长</b>\n\n请减少内容长度或使用文件发送") });
+      if (errMsg.includes("MESSAGE_TOO_LONG")) {
+        await msg.edit({ text: html("❌ <b>消息过长</b><br><br>请减少内容长度或使用文件发送") });
         return;
       }
       
       // 通用错误处理
-      await msg.edit({ text: html(`❌ <b>操作失败:</b> ${htmlEscape(error.message || "未知错误")}`) });
+      await msg.edit({ text: html(`❌ <b>操作失败:</b> ${htmlEscape(errMsg || "未知错误")}`) });
     }
   }
 }

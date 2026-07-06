@@ -4,19 +4,11 @@ import { html } from "@mtcute/html-parser";
 import { getPrefixes } from "@utils/pluginManager";
 import { getGlobalClient } from "@utils/globalClient";
 import { Message } from "@mtcute/node";
-
-const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+import { logger } from "@utils/logger";
+import { sleep } from "@utils/asyncHelpers";
+import { htmlEscape } from "@utils/htmlEscape";
 
 // 参考 plugins/music_bot.ts 的结构与实现方式
-
-const htmlEscape = (text: string): string =>
-  text.replace(/[&<>"']/g, (m) => ({
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    '"': "&quot;",
-    "'": "&#x27;",
-  }[m] || m));
 
 const prefixes = getPrefixes();
 
@@ -59,8 +51,8 @@ async function ensureBotReady(msg: MessageContext) {
     await client.call({
       _: "contacts.unblock",
       id: await client.resolvePeer(bot),
-    } as any);
-  } catch {}
+    });
+  } catch (e: unknown) { logger.warn('[netease] unblock bot failed:', e) }
 
   // 静音通知
   try {
@@ -74,12 +66,12 @@ async function ensureBotReady(msg: MessageContext) {
         muteUntil: 2147483647,
       },
     });
-  } catch {}
+  } catch (e: unknown) { logger.warn('[netease] mute bot failed:', e) }
 
   // 启动 bot（首次使用）
   try {
     await client.sendText(bot, "/start");
-  } catch {}
+  } catch (e: unknown) { logger.warn('[netease] start bot failed:', e) }
 }
 
 async function fetchAndSendAudio(
@@ -93,15 +85,15 @@ async function fetchAndSendAudio(
   // 发送命令
   try {
     await client.sendText(bot, commandToBot);
-  } catch {
+  } catch (e: unknown) {
     try {
       // 回退：有些 bot 可能只接收文本
       await client.sendText(bot, commandToBot.replace(/^\/(?:search|music)\s+/, ""));
-    } catch {}
+    } catch (e: unknown) { logger.warn('[netease] send fallback text failed:', e) }
   }
 
   // 轮询新消息：优先寻找按钮消息，其次直接媒体消息
-  let replyWithButtons: any | undefined;
+  let replyWithButtons: Message | undefined;
   let mediaMsg: Message | undefined;
   for (let i = 0; i < 20; i++) {
     await sleep(700);
@@ -109,7 +101,8 @@ async function fetchAndSendAudio(
     for (const m of msgs.slice().reverse()) {
       if (!m.isOutgoing && (m.date?.getTime?.() || 0) >= startTs) {
         if (!mediaMsg && m.media) mediaMsg = m;
-        if (!replyWithButtons && ((m as any).buttonCount || 0) > 0) replyWithButtons = m;
+        const btnCount = (m as { buttonCount?: number }).buttonCount || 0;
+        if (!replyWithButtons && btnCount > 0) replyWithButtons = m;
       }
     }
     if (mediaMsg || replyWithButtons) break;
@@ -118,9 +111,22 @@ async function fetchAndSendAudio(
   // 若有按钮则点击第一个按钮
   if (!mediaMsg && replyWithButtons) {
     try {
-      await (replyWithButtons as any).click({});
-    } catch (e) {
-      await msg.edit({ text: html(`❌ 点击按钮失败：${htmlEscape((e as any)?.message || String(e))}`) });
+      // mtcute: use getCallbackAnswer instead of gramjs Message.click()
+      const rawMsg = replyWithButtons.raw as { replyMarkup?: { _?: string; rows: { buttons: { _?: string; data?: Uint8Array }[] }[] } };
+      const markup = rawMsg.replyMarkup;
+      if (markup?._ === 'replyInlineMarkup') {
+        const firstBtn = markup.rows[0]?.buttons[0];
+        if (firstBtn?._ === 'keyboardButtonCallback' && firstBtn.data) {
+          await client.getCallbackAnswer({
+            chatId: replyWithButtons.chat.id,
+            message: replyWithButtons.id,
+            data: firstBtn.data,
+            fireAndForget: true,
+          });
+        }
+      }
+    } catch (e: unknown) {
+      await msg.edit({ text: html(`❌ 点击按钮失败：${htmlEscape((e as { message?: string })?.message || String(e))}`) });
       return;
     }
 
@@ -132,7 +138,7 @@ async function fetchAndSendAudio(
         if (
           !m.isOutgoing &&
           m.media &&
-          (m.date?.getTime?.() || 0) >= ((replyWithButtons as any).date?.getTime?.() || startTs)
+          (m.date?.getTime?.() || 0) >= (replyWithButtons?.date?.getTime?.() || startTs)
         ) {
           mediaMsg = m;
           break;
@@ -149,17 +155,18 @@ async function fetchAndSendAudio(
 
   // 以纯上传形式回传 - 下载后重新发送
   try {
-    const buffer = await client.downloadAsBuffer(mediaMsg.media as any);
+    // mtcute type limitation: downloadAsBuffer expects FileDownloadLocation but MessageMedia doesn't match
+    const buffer = await client.downloadAsBuffer(mediaMsg.media as Parameters<typeof client.downloadAsBuffer>[0]);
     const replyToId = msg.replyToMessage?.id;
     await client.sendMedia(msg.chat.id, {
       type: "audio",
       file: Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer),
       fileName: "music.mp3",
-    } as any, {
+    } as never, {
       caption,
       ...(replyToId ? { replyTo: replyToId } : {}),
     });
-  } catch {
+  } catch (e: unknown) {
     // Fallback: forward the message
     try {
       await client.forwardMessagesById({
@@ -167,7 +174,7 @@ async function fetchAndSendAudio(
         messages: [mediaMsg.id],
         toChatId: msg.chat.id,
       });
-    } catch {}
+    } catch (e: unknown) { logger.warn('[netease] forward message failed:', e) }
   }
 }
 
@@ -190,7 +197,7 @@ class NeteasePlugin extends Plugin {
         await msg.edit({
           text: html(`🔎 处理中：<code>${htmlEscape(keyword)}</code>`),
         });
-      } catch {}
+      } catch (e: unknown) { logger.warn('[netease] edit msg failed:', e) }
 
       await ensureBotReady(msg);
 
@@ -208,7 +215,7 @@ class NeteasePlugin extends Plugin {
 
       try {
         await msg.delete();
-      } catch {}
+      } catch (e: unknown) { logger.warn('[netease] delete msg failed:', e) }
     },
   };
 }

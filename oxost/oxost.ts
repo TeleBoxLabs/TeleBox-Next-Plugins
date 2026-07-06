@@ -3,17 +3,13 @@ import axios from "axios";
 import { getPrefixes } from "@utils/pluginManager";
 import { Plugin } from "@utils/pluginBase";
 import type { MessageContext } from "@mtcute/dispatcher";
+import type { MtcuteFileLocation } from "@utils/mtcuteTypes";
 import { html } from "@mtcute/html-parser";
 import { getGlobalClient, tryGetCurrentGenerationContext } from "@utils/globalClient";
 import { Buffer } from "buffer";
 import { safeGetReplyMessage } from "@utils/safeGetMessages";
-
-// HTML转义
-const htmlEscape = (text: string): string =>
-  text.replace(/[&<>"']/g, m => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;',
-    '"': '&quot;', "'": '&#x27;'
-  }[m] || m));
+import { getErrorMessage } from "@utils/errorHelpers";
+import { htmlEscape } from "@utils/htmlEscape";
 
 // 消息分割与发送（接受原始HTML字符串，内部用html模板标签解析）
 const MAX_MESSAGE_LENGTH = 4096;
@@ -38,9 +34,10 @@ async function sendLongHtml(msg: MessageContext, rawHtml: string) {
   if (parts.length === 1) {
     await msg.edit({ text: html(parts[0]) });
   } else {
-    await msg.edit({ text: html(parts[0] + "\n\n📄 (1/" + parts.length + ")") });
+    await msg.edit({ text: html(parts[0] + "<br><br>📄 (1/" + parts.length + ")") });
+    // 注意：消息必须按顺序逐条发送，不能并行（每条消息依赖前一条发送完成以保持顺序）
     for (let i = 1; i < parts.length; i++) {
-      await msg.replyText(html(parts[i] + "\n\n📄 (" + (i + 1) + "/" + parts.length + ")"));
+      await msg.replyText(html(parts[i] + "<br><br>📄 (" + (i + 1) + "/" + parts.length + ")"));
     }
   }
 }
@@ -51,7 +48,7 @@ const mainPrefix = prefixes[0];
 const pluginName = "0x0";
 const commandName = `${mainPrefix}${pluginName}`;
 
-const help_text = `🗂️ <b>0x0.st 文件上传插件</b>\n\n<b>命令格式：</b>\n<code>${commandName} [expires=小时] [secret]</code>\n\n<b>用法：</b>\n• 回复一条带文件/视频/语音的消息，自动上传到 <a href='https://0x0.st/'>0x0.st</a> 并返回下载链接\n• <code>${commandName} expires=72 secret</code> 设置72小时有效期并启用难猜链接\n• <code>${commandName} help</code> 显示帮助\n\n<b>参数说明：</b>\n• <code>expires=xx</code> 设置有效期（小时）\n• <code>secret</code> 生成更难猜的链接\n`;
+const help_text = `🗂️ <b>0x0.st 文件上传插件</b><br><br><b>命令格式：</b><br><code>${commandName} [expires=小时] [secret]</code><br><br><b>用法：</b><br>• 回复一条带文件/视频/语音的消息，自动上传到 <a href='https://0x0.st/'>0x0.st</a> 并返回下载链接<br>• <code>${commandName} expires=72 secret</code> 设置72小时有效期并启用难猜链接<br>• <code>${commandName} help</code> 显示帮助<br><br><b>参数说明：</b><br>• <code>expires=xx</code> 设置有效期（小时）<br>• <code>secret</code> 生成更难猜的链接<br>`;
 
 class Ox0Plugin extends Plugin {
 
@@ -86,8 +83,8 @@ class Ox0Plugin extends Plugin {
       let replied: Awaited<ReturnType<typeof safeGetReplyMessage>>;
       try {
         replied = await safeGetReplyMessage(msg);
-      } catch (e: any) {
-        await sendLongHtml(msg, `❌ <b>错误:</b> ${htmlEscape(e.message)}`);
+      } catch (e: unknown) {
+        await sendLongHtml(msg, `❌ <b>错误:</b> ${htmlEscape(getErrorMessage(e))}`);
         return;
       }
       if (!replied || !replied.media) {
@@ -98,7 +95,7 @@ class Ox0Plugin extends Plugin {
       await msg.edit({ text: "⏳ 正在下载并上传..." });
       try {
         const client = await getGlobalClient();
-        const downloaded = await client.downloadAsBuffer(replied.media as any);
+        const downloaded = await client.downloadAsBuffer(replied.media as MtcuteFileLocation);
         const buffer = Buffer.isBuffer(downloaded) ? downloaded : Buffer.from(downloaded);
         if (buffer.length === 0) {
           await sendLongHtml(msg, `❌ <b>错误:</b> 媒体下载失败或为空`);
@@ -107,7 +104,7 @@ class Ox0Plugin extends Plugin {
 
         // 文件名只保留英文、数字、下划线和扩展名，最长32位
         let filename = "file";
-        const media = replied.media as any;
+        const media = replied.media;
         if (media?.type === 'document' && media.fileName) {
           filename = media.fileName;
         } else if (replied.text) {
@@ -153,12 +150,13 @@ class Ox0Plugin extends Plugin {
             return;
           }
           await sendLongHtml(msg, `<code>${htmlEscape(url)}</code>`);
-        } catch (err: any) {
-          await sendLongHtml(msg, `❌ <b>错误:</b> 上传失败 — ${htmlEscape(err?.message || String(err))}`);
+        } catch (err: unknown) {
+          await sendLongHtml(msg, `❌ <b>错误:</b> 上传失败 — ${htmlEscape(getErrorMessage(err) || String(err))}`);
         }
-      } catch (error: any) {
-        if (error.message?.includes("FLOOD_WAIT")) {
-          const waitTime = parseInt(error.message.match(/\d+/)?.[0] || "60");
+      } catch (error: unknown) {
+        const errMsg = getErrorMessage(error);
+        if (errMsg.includes("FLOOD_WAIT")) {
+          const waitTime = parseInt(errMsg.match(/\d+/)?.[0] || "60");
           const lifecycle = tryGetCurrentGenerationContext();
           if (lifecycle) {
             await lifecycle.delay((waitTime + 1) * 1000, { label: "oxost:flood-wait" });
@@ -166,7 +164,7 @@ class Ox0Plugin extends Plugin {
             await new Promise(res => setTimeout(res, (waitTime + 1) * 1000));
           }
         }
-        await sendLongHtml(msg, `❌ <b>错误:</b> ${htmlEscape(error.message)}`);
+        await sendLongHtml(msg, `❌ <b>错误:</b> ${htmlEscape(getErrorMessage(error))}`);
       }
     },
   };

@@ -1,27 +1,22 @@
 /**
  * 消息历史查询插件 - 查询指定用户或频道在群内的发言历史
- * 
+ *
  * @author TeleBox Team
  * @version 2.0.0
  */
 
 import { Plugin } from "@utils/pluginBase";
-import type { MessageContext } from "@mtcute/dispatcher";
-import { html } from "@mtcute/html-parser";
 import { getGlobalClient } from "@utils/globalClient";
 import { getPrefixes } from "@utils/pluginManager";
 import { safeGetReplyMessage } from "@utils/safeGetMessages";
+import { logger } from "@utils/logger";
+import { htmlEscape } from "@utils/htmlEscape";
+import type { MessageContext } from "@mtcute/dispatcher";
+import type { TelegramClient } from "@mtcute/core/highlevel/client";
 
 // 获取命令前缀
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
-
-// HTML转义函数（必需）
-const htmlEscape = (text: string): string => 
-  text.replace(/[&<>"']/g, m => ({ 
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', 
-    '"': '&quot;', "'": '&#x27;' 
-  }[m] || m));
 
 // 帮助文本定义（必需）
 const help_text = `📜 <b>消息历史查询</b>
@@ -67,7 +62,7 @@ class HisPlugin extends Plugin {
 
   // 必须在 description 中引用 help_text
   description: string = `消息历史查询插件<br><br>${help_text}`;
-  
+
   constructor() {
     super();
   }
@@ -76,7 +71,7 @@ class HisPlugin extends Plugin {
     his: async (msg: MessageContext, trigger?: MessageContext) => {
       const client = await getGlobalClient();
       if (!client) {
-        await msg.edit({ text: html`❌ 客户端未初始化` });
+        await msg.edit({ text: "❌ 客户端未初始化" });
         return;
       }
 
@@ -87,28 +82,28 @@ class HisPlugin extends Plugin {
 
       try {
         const DEFAULT_COUNT = 30;
-        
+
         // 处理帮助命令
         if (args[0] === "help" || args[0] === "h") {
-          await msg.edit({ text: html(help_text) });
+          await msg.edit({ text: help_text });
           return;
         }
 
         // 无参数时的处理
         if (args.length === 0) {
           // 如果是回复消息，则查询被回复者
-          if (msg.replyToMessage) {
+          if (msg.replyToMessage?.id) {
             const reply = await safeGetReplyMessage(msg);
-            if (reply && reply.sender) {
+            if (reply) {
               const target = reply.sender.id.toString();
               await this.queryHistory(msg, target, DEFAULT_COUNT, client);
               return;
             }
           }
-          
+
           // 否则显示错误提示
           await msg.edit({
-            text: html`❌ 请回复一条消息或指定查询目标`,
+            text: "❌ 请回复一条消息或指定查询目标"
           });
           return;
         }
@@ -117,18 +112,18 @@ class HisPlugin extends Plugin {
         if (args.length === 1) {
           const arg = args[0];
           const num = parseInt(arg);
-          
+
           // 如果是数字且在回复消息的情况下，作为数量参数
-          if (!isNaN(num) && num > 0 && msg.replyToMessage) {
+          if (!isNaN(num) && num > 0 && msg.replyToMessage?.id) {
             const reply = await safeGetReplyMessage(msg);
-            if (reply && reply.sender) {
+            if (reply) {
               const target = reply.sender.id.toString();
               const count = Math.min(num, 100); // 最大限制100条
               await this.queryHistory(msg, target, count, client);
               return;
             }
           }
-          
+
           // 否则作为目标参数
           const target = this.parseEntity(arg);
           await this.queryHistory(msg, target, DEFAULT_COUNT, client);
@@ -139,14 +134,14 @@ class HisPlugin extends Plugin {
         if (args.length === 2) {
           const target = this.parseEntity(args[0]);
           const num = parseInt(args[1]);
-          
+
           if (isNaN(num) || num <= 0) {
             await msg.edit({
-              text: html`❌ 无效的数量参数`,
+              text: "❌ 无效的数量参数"
             });
             return;
           }
-          
+
           const count = Math.min(num, 100); // 最大限制100条
           await this.queryHistory(msg, target, count, client);
           return;
@@ -154,32 +149,32 @@ class HisPlugin extends Plugin {
 
         // 参数过多
         await msg.edit({
-          text: html`❌ 参数过多，请使用 .his help 查看帮助`,
+          text: "❌ 参数过多，请使用 .his help 查看帮助"
         });
         return;
 
       } catch (error: any) {
-        console.error("[his] 插件执行失败:", error);
-        
+        logger.error("[his] 插件执行失败:", error);
+
         // 处理特定错误类型
         if (error.message?.includes("FLOOD_WAIT")) {
           const waitTime = parseInt(error.message.match(/\d+/)?.[0] || "60");
           await msg.edit({
-            text: html`⏳ <b>请求过于频繁</b><br><br>需要等待 ${waitTime} 秒后重试`,
+            text: `⏳ <b>请求过于频繁</b><br><br>需要等待 ${waitTime} 秒后重试`
           });
           return;
         }
-        
+
         if (error.message?.includes("MESSAGE_TOO_LONG")) {
           await msg.edit({
-            text: html`❌ <b>消息过长</b><br><br>请减少查询数量`,
+            text: "❌ <b>消息过长</b><br><br>请减少查询数量"
           });
           return;
         }
-        
+
         // 通用错误处理
         await msg.edit({
-          text: html`❌ <b>操作失败:</b> ${htmlEscape(error.message || "未知错误")}`,
+          text: `❌ <b>操作失败:</b> ${htmlEscape(error.message || "未知错误")}`
         });
       }
     }
@@ -187,22 +182,26 @@ class HisPlugin extends Plugin {
 
 
   // 查询历史消息
-  private async queryHistory(msg: MessageContext, targetEntity: any, num: number, client: any): Promise<void> {
+  private async queryHistory(msg: MessageContext, targetEntity: any, num: number, client: TelegramClient): Promise<void> {
     const chatId = msg.chat.id;
 
     // 显示处理中消息
-    await msg.edit({ text: html`🔍 正在查询消息历史...` });
+    await msg.edit({ text: "🔍 正在查询消息历史..." });
 
     // 格式化目标实体显示
     let targetDisplay = "";
     try {
-      const entity = await client.getPeer(targetEntity);
-      if (entity) {
+      const peer = await client.getPeer(targetEntity);
+      if (peer) {
         const parts: string[] = [];
-        if (entity.title) parts.push(entity.title);
-        if (entity.firstName) parts.push(entity.firstName);
-        if (entity.lastName) parts.push(entity.lastName);
-        if (entity.username) parts.push(`@${entity.username}`);
+        if (peer.type === "user") {
+          if (peer.firstName) parts.push(peer.firstName);
+          if (peer.lastName) parts.push(peer.lastName);
+          if (peer.username) parts.push(`@${peer.username}`);
+        } else {
+          if (peer.title) parts.push(peer.title);
+          if (peer.username) parts.push(`@${peer.username}`);
+        }
         targetDisplay = parts.join(" ") || targetEntity.toString();
       } else {
         targetDisplay = targetEntity.toString();
@@ -214,39 +213,32 @@ class HisPlugin extends Plugin {
     // 获取聊天链接基础URL
     let baseLinkUrl = "";
     try {
-      const chat = await client.getPeer(chatId);
+      const chat = await client.getChat(chatId);
       if (chat.username) {
         baseLinkUrl = `https://t.me/${chat.username}/`;
-      } else {
-        // Check if it's a megagroup/supergroup by trying to access channel info
-        try {
-          const fullChat = await client.call({
-            _: 'channels.getFullChannel',
-            channel: await client.resolvePeer(chatId) as any,
-          }) as any;
-          if (fullChat?.full_chat?._ === 'channelFull') {
-            const chatIdStr = String(chatId).replace("-100", "");
-            baseLinkUrl = `https://t.me/c/${chatIdStr}/`;
-          }
-        } catch {
-          // Not a channel, try regular chat
-        }
+      } else if (chat.chatType === "supergroup" || chat.chatType === "gigagroup") {
+        const chatIdStr = String(chatId).replace("-100", "");
+        baseLinkUrl = `https://t.me/c/${chatIdStr}/`;
       }
     } catch (error) {
-      console.error("[HIS] Could not get chat entity for linking:", error);
+      logger.error("[HIS] Could not get chat entity for linking:", error);
     }
 
     let count = 0;
     const messages: string[] = [];
 
     try {
-      // 使用 mtcute searchMessages 替代 gramjs iterMessages
-      for await (const message of client.iterSearchMessages({
-        chatId: chatId,
-        query: '',
-        limit: num,
-        fromUser: targetEntity,
-      })) {
+      // 迭代消息 - iterHistory does NOT support fromUser, so we filter manually
+      const messageIterator = client.iterHistory(chatId, {
+        limit: num * 5  // fetch extra to account for filtered-out messages
+      });
+
+      for await (const message of messageIterator) {
+        // Manual sender filtering (replaces teleproto's fromUser option)
+        if (message.sender.id.toString() !== targetEntity.toString()) {
+          continue;
+        }
+
         count++;
         let messageText = message.text || "";
 
@@ -256,16 +248,14 @@ class HisPlugin extends Plugin {
         }
 
         // 处理服务消息
-        if (message.raw?._ === "messageService") {
-          const action = message.raw.action;
-          if (action?._ === 'messageActionPinMessage') {
+        if (message.isService && message.action) {
+          const action = message.action;
+          if (action.type === "message_pinned") {
             messageText = "[置顶消息]";
-          } else if (action?._ === 'messageActionChatEditTitle') {
-            const newTitle = (action as any).title;
-            messageText = "[修改群名] " + newTitle;
+          } else if (action.type === "title_changed") {
+            messageText = "[修改群名] " + action.title;
           } else {
-            const serviceType = action?._?.replace("messageAction", "") || "Unknown";
-            messageText = "[服务消息] " + serviceType;
+            messageText = "[服务消息] " + action.type;
           }
         }
 
@@ -274,7 +264,7 @@ class HisPlugin extends Plugin {
         }
 
         // 格式化消息显示
-        const messageTextDisplay = messageText.length > 50 
+        const messageTextDisplay = messageText.length > 50
           ? `${messageText.substring(0, 50)}...`
           : messageText;
 
@@ -285,35 +275,37 @@ class HisPlugin extends Plugin {
         } else {
           messages.push(`${count}. ${htmlEscape(messageTextDisplay)}`);
         }
+
+        if (count >= num) break;
       }
 
       if (messages.length === 0) {
         await msg.edit({
-          text: html`❌ 未找到 <b>${htmlEscape(targetDisplay)}</b> 的消息记录`,
+          text: `❌ 未找到 <b>${htmlEscape(targetDisplay)}</b> 的消息记录`
         });
         return;
       }
 
       // 构建结果消息
-      const header = `📜 <b>消息历史查询</b>\n\n` +
-                    `👤 <b>目标:</b> ${htmlEscape(targetDisplay)}\n` +
-                    `💬 <b>消息数:</b> ${messages.length}\n` +
-                    `━━━━━━━━━━━━━━━━\n\n`;
-      
-      const results = header + messages.join("\n");
+      const header = `📜 <b>消息历史查询</b><br><br>` +
+                    `👤 <b>目标:</b> ${htmlEscape(targetDisplay)}<br>` +
+                    `💬 <b>消息数:</b> ${messages.length}<br>` +
+                    `━━━━━━━━━━━━━━━━<br><br>`;
+
+      const results = header + messages.join("<br>");
 
       // 分片发送长消息
       const MAX_LENGTH = 3500;
       if (results.length > MAX_LENGTH) {
         const chunks: string[] = [];
         let currentChunk = header;
-        
+
         for (const message of messages) {
-          if ((currentChunk + "\n" + message).length > MAX_LENGTH) {
+          if ((currentChunk + "<br>" + message).length > MAX_LENGTH) {
             chunks.push(currentChunk);
             currentChunk = message;
           } else {
-            currentChunk += (currentChunk ? "\n" : "") + message;
+            currentChunk += (currentChunk ? "<br>" : "") + message;
           }
         }
         if (currentChunk) {
@@ -322,27 +314,29 @@ class HisPlugin extends Plugin {
 
         // 发送第一片
         await msg.edit({
-          text: html(chunks[0]),
+          text: chunks[0],
+          disableWebPreview: true
         });
 
         // 发送后续片段
         for (let i = 1; i < chunks.length; i++) {
-          await client.sendText(msg.chat.id, html(chunks[i]), {
-            disableWebPreview: true,
+          await client.sendText(chatId, chunks[i], {
+            disableWebPreview: true
           });
         }
       } else {
         await msg.edit({
-          text: html(results),
+          text: results,
+          disableWebPreview: true
         });
       }
 
-      console.log(`[HIS] 查询完成 - 群组: ${chatId}, 目标: ${targetEntity.toString()}, 消息数: ${count}`);
+      logger.info(`[HIS] 查询完成 - 群组: ${chatId}, 目标: ${targetEntity.toString()}, 消息数: ${count}`);
 
     } catch (error: any) {
-      console.error("[HIS_ERROR]:", error);
+      logger.error("[HIS_ERROR]:", error);
       await msg.edit({
-        text: html`❌ 查询失败: ${htmlEscape(error.message || "未知错误")}`,
+        text: `❌ 查询失败: ${htmlEscape(error.message || "未知错误")}`
       });
     }
   }
@@ -352,48 +346,56 @@ class HisPlugin extends Plugin {
     // 简化版本：总是显示媒体类型
     const showMediaType = true;
     if (!showMediaType) return mediaCaption;
-    
-    const media = message.media;
-    
-    // In mtcute, media is a MessageMedia object with a type property
-    // or a raw TL object with a _ field
-    const mediaType = media?.type || media?._ || "";
-    
-    if (mediaType === "photo" || mediaType === "messageMediaPhoto") {
-      return MEDIA_TYPES.PHOTO + " " + mediaCaption;
-    } else if (mediaType === "document" || mediaType === "messageMediaDocument") {
-      const doc = media.document || media;
-      const attributes = doc.attributes || [];
-      
-      const isVideo = attributes.some((attr: any) => attr._ === "documentAttributeVideo" || attr.className === "DocumentAttributeVideo");
-      const isVoice = attributes.some((attr: any) => (attr._ === "documentAttributeAudio" || attr.className === "DocumentAttributeAudio") && attr.voice);
-      const isAudio = attributes.some((attr: any) => attr._ === "documentAttributeAudio" || attr.className === "DocumentAttributeAudio");
-      const isSticker = attributes.some((attr: any) => attr._ === "documentAttributeSticker" || attr.className === "DocumentAttributeSticker");
-      const isAnimation = attributes.some((attr: any) => attr._ === "documentAttributeAnimated" || attr.className === "DocumentAttributeAnimated");
 
-      if (isSticker) return MEDIA_TYPES.STICKER + " " + mediaCaption;
-      if (isAnimation) return MEDIA_TYPES.ANIMATION + " " + mediaCaption;
-      if (isVideo) return MEDIA_TYPES.VIDEO + " " + mediaCaption;
-      if (isVoice) return MEDIA_TYPES.VOICE + " " + mediaCaption;
-      if (isAudio) return MEDIA_TYPES.AUDIO + " " + mediaCaption;
+    const media = message.media;
+
+    if (media.type === "photo") {
+      return MEDIA_TYPES.PHOTO + " " + mediaCaption;
+    } else if (media.type === "document") {
+      // In mtcute, document types use subclasses with .attr, not .attributes array
+      // Check subclass type by media constructor name or attr type
+      const docClassName = media.constructor?.name || "";
+
+      if (docClassName === "Sticker") {
+        return MEDIA_TYPES.STICKER + " " + mediaCaption;
+      } else if (docClassName === "Voice") {
+        return MEDIA_TYPES.VOICE + " " + mediaCaption;
+      } else if (docClassName === "Video") {
+        return MEDIA_TYPES.VIDEO + " " + mediaCaption;
+      } else if (docClassName === "Audio") {
+        return MEDIA_TYPES.AUDIO + " " + mediaCaption;
+      }
+
+      // Fallback: check the attr._ field for raw TL type
+      const attr = media.attr;
+      if (attr) {
+        if (attr._ === "documentAttributeSticker") return MEDIA_TYPES.STICKER + " " + mediaCaption;
+        if (attr._ === "documentAttributeAudio") {
+          if (attr.voice) return MEDIA_TYPES.VOICE + " " + mediaCaption;
+          return MEDIA_TYPES.AUDIO + " " + mediaCaption;
+        }
+        if (attr._ === "documentAttributeVideo") return MEDIA_TYPES.VIDEO + " " + mediaCaption;
+        if (attr._ === "documentAttributeAnimated") return MEDIA_TYPES.ANIMATION + " " + mediaCaption;
+      }
+
       return MEDIA_TYPES.DOCUMENT + " " + mediaCaption;
-    } else if (mediaType === "contact" || mediaType === "messageMediaContact") {
+    } else if (media.type === "contact") {
       return MEDIA_TYPES.CONTACT + " " + mediaCaption;
-    } else if (mediaType === "geo" || mediaType === "venue" || mediaType === "messageMediaGeo" || mediaType === "messageMediaVenue") {
+    } else if (media.type === "geo" || media.type === "venue") {
       return MEDIA_TYPES.LOCATION + " " + mediaCaption;
-    } else if (mediaType === "poll" || mediaType === "messageMediaPoll") {
+    } else if (media.type === "poll") {
       return MEDIA_TYPES.POLL + " " + mediaCaption;
-    } else if (mediaType === "webPage" || mediaType === "messageMediaWebPage") {
+    } else if (media.type === "webPage") {
       return MEDIA_TYPES.WEB_PAGE + " " + mediaCaption;
-    } else if (mediaType === "dice" || mediaType === "messageMediaDice") {
+    } else if (media.type === "dice") {
       return MEDIA_TYPES.DICE + " " + mediaCaption;
-    } else if (mediaType === "game" || mediaType === "messageMediaGame") {
+    } else if (media.type === "game") {
       return MEDIA_TYPES.GAME + " " + mediaCaption;
     }
 
     return mediaCaption;
   }
-  
+
   // 解析实体参数
   private parseEntity(argStr: string): string | number {
     // 尝试解析为数字ID

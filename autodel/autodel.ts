@@ -8,6 +8,7 @@ import Database from "better-sqlite3";
 import path from "path";
 
 import { safeGetMe } from "@utils/authGuards";
+import { logger } from "@utils/logger";
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
 
@@ -17,7 +18,7 @@ class AutoDelPlugin extends Plugin {
     if (this.db) {
       try {
         this.db.close();
-      } catch {}
+      } catch (e: unknown) { logger.warn('操作失败', e) }
     }
     this.db = null;
     this.settings.clear();
@@ -71,8 +72,8 @@ class AutoDelPlugin extends Plugin {
       `);
       
       await this.loadExistingSettings();
-    } catch (error) {
-      console.error("Failed to initialize autodel database:", error);
+    } catch (error: unknown) {
+      logger.error("Failed to initialize autodel database:", error);
     }
   }
 
@@ -87,8 +88,8 @@ class AutoDelPlugin extends Plugin {
       for (const setting of settings) {
         this.settings.set(setting.chat_id, setting.seconds);
       }
-    } catch (error) {
-      console.error("Failed to load existing settings:", error);
+    } catch (error: unknown) {
+      logger.error("Failed to load existing settings:", error);
     }
   }
 
@@ -183,8 +184,8 @@ class AutoDelPlugin extends Plugin {
     if (this.db) {
       try {
         this.db.prepare("DELETE FROM autodel_settings WHERE chat_id = ?").run(chatId);
-      } catch (error) {
-        console.error("Failed to delete setting:", error);
+      } catch (error: unknown) {
+        logger.error("Failed to delete setting:", error);
       }
     }
     
@@ -211,8 +212,8 @@ class AutoDelPlugin extends Plugin {
         this.db.prepare(
           "INSERT OR REPLACE INTO autodel_settings (chat_id, seconds) VALUES (?, ?)"
         ).run(chatId, seconds);
-      } catch (error) {
-        console.error("Failed to save setting:", error);
+      } catch (error: unknown) {
+        logger.error("Failed to save setting:", error);
       }
     }
     
@@ -266,12 +267,12 @@ class AutoDelPlugin extends Plugin {
           await client.deleteMessagesById(msg.chat.inputPeer, [msg.id], {
             revoke: false
           });
-        } catch (error) {
-          console.error("Failed to auto delete message:", error);
+        } catch (error: unknown) {
+          logger.error("Failed to auto delete message:", error);
         }
       })();
       lifecycle.trackTask(task, { label: "autodel:delete-message" });
-      task.catch(() => undefined);
+      task.catch((e) => logger.warn('[autodel] auto delete task failed:', e));
     }, seconds * 1000, { label: "autodel:delete-message-timer" });
   }
 

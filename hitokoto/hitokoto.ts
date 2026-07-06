@@ -1,8 +1,10 @@
 import { Plugin } from "@utils/pluginBase";
 import { getPrefixes } from "@utils/pluginManager";
+import { getErrorMessage } from "@utils/errorHelpers";
 import type { MessageContext } from "@mtcute/dispatcher";
 import { html } from "@mtcute/html-parser";
 import axios from "axios";
+import { htmlEscape } from "@utils/htmlEscape";
 
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
@@ -55,13 +57,6 @@ const help_text = `⚙️ <b>Hitokoto 插件</b>
 • 只接受类型字母参数
 • 可同时传多个类型，如 <code>${mainPrefix}hitokoto a c h</code>`;
 
-// HTML转义函数（符合开发规范）
-const htmlEscape = (text: string): string => 
-  text.replace(/[&<>"']/g, m => ({ 
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', 
-    '"': '&quot;', "'": '&#x27;' 
-  }[m] || m));
-
 class HitokotoPlugin extends Plugin {
 
   // 插件描述（符合开发规范）
@@ -92,7 +87,7 @@ class HitokotoPlugin extends Plugin {
       
       await this.fetchAndSendHitokoto(msg, params);
       
-    } catch (error: any) {
+    } catch (error: unknown) {
       await this.handleError(msg, error);
     }
   }
@@ -140,7 +135,7 @@ class HitokotoPlugin extends Plugin {
         );
         hitokotoData = response.data;
         break;
-      } catch (error) {
+      } catch (_e: unknown) {
         retryCount++;
         if (retryCount >= maxRetries) {
           throw new Error("获取一言失败，请稍后重试");
@@ -168,7 +163,7 @@ class HitokotoPlugin extends Plugin {
 
     // 构建最终消息
     const finalText = sourceInfo 
-      ? `💬 ${htmlEscape(hitokotoData.hitokoto)}\n\n📚 ${sourceInfo}`
+      ? `💬 ${htmlEscape(hitokotoData.hitokoto)}<br><br>📚 ${sourceInfo}`
       : `💬 ${htmlEscape(hitokotoData.hitokoto)}`;
 
     // 编辑消息显示结果
@@ -180,8 +175,8 @@ class HitokotoPlugin extends Plugin {
   /**
    * 错误处理
    */
-  private async handleError(msg: MessageContext, error: any): Promise<void> {
-    const errorMsg = error.message || "未知错误";
+  private async handleError(msg: MessageContext, error: unknown): Promise<void> {
+    const errorMsg = getErrorMessage(error) || "未知错误";
     await msg.edit({
       text: html`❌ <b>获取一言失败：</b>${htmlEscape(errorMsg)}`
     });

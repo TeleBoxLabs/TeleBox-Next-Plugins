@@ -18,6 +18,7 @@
  *   2. btstu.cn - fallback备用
  */
 import axios from "axios";
+import { getErrorMessage } from "@utils/errorHelpers";
 import { getPrefixes } from "@utils/pluginManager";
 import { Plugin } from "@utils/pluginBase";
 import type { MessageContext } from "@mtcute/dispatcher";
@@ -256,7 +257,7 @@ async function getWallpaper(lx: string): Promise<{imageBuffer: Buffer, filename:
     filename = `wallhaven_${wallpaper.id}_${wallpaper.dimension_x}x${wallpaper.dimension_y}.${fileExtension}`;
     source = `${wallpaper.path}\n📊 ${wallpaper.dimension_x}×${wallpaper.dimension_y}, ${Math.round(wallpaper.file_size/1024/1024*100)/100}MB`;
     
-  } catch (wallhavenError) {
+  } catch (wallhavenError: unknown) {
     // fallback到原有API
     try {
       const imgUrl = await fetchFromFallback(lx);
@@ -269,9 +270,9 @@ async function getWallpaper(lx: string): Promise<{imageBuffer: Buffer, filename:
       filename = `bizhi_${lx || "suiji"}.jpg`;
       source = `${imgUrl}\n📊 来源: btstu.cn`;
       
-    } catch (fallbackError) {
-      const wallhavenMsg = wallhavenError instanceof Error ? wallhavenError.message : String(wallhavenError);
-      const fallbackMsg = fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
+    } catch (fallbackError: unknown) {
+      const wallhavenMsg = getErrorMessage(wallhavenError);
+      const fallbackMsg = getErrorMessage(fallbackError);
       throw new Error(`所有数据源都失败: wallhaven(${wallhavenMsg}), fallback(${fallbackMsg})`);
     }
   }
@@ -326,8 +327,8 @@ class BizhiPlugin extends Plugin {
         }
         
         await msg.delete();
-      } catch (error) {
-        const errorMsg = error instanceof Error ? error.message : String(error);
+      } catch (error: unknown) {
+        const errorMsg = getErrorMessage(error);
         await msg.edit({ text: `获取壁纸失败: ${errorMsg}` });
       }
     },

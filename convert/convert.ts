@@ -11,19 +11,14 @@ import axios from "axios";
 import Database from "better-sqlite3";
 import { Converter } from "opencc-js";
 import { safeGetReplyMessage } from "@utils/safeGetMessages";
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
+import { htmlEscape } from "@utils/htmlEscape";
 
 const execFileAsync = promisify(execFile);
-
-// --- Basic Setup ---
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0] || ".";
 const toSimplified = Converter({ from: "tw", to: "cn" });
-
-const htmlEscape = (text: string): string =>
-  text.replace(/[&<>"']/g, (m) => ({
-    "&": "&amp;", "<": "&lt;", ">": "&gt;",
-    '"': "&quot;", "'": "&#x27;",
-  }[m] || m));
 
 // --- Gemini AI Configuration & Client ---
 const dbDir = path.join(process.cwd(), "assets", "convert");
@@ -43,22 +38,22 @@ class GeminiConfigManager {
       this.db = new Database(GEMINI_CONFIG_DB_PATH);
       this.db.exec(`CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT NOT NULL)`);
       this.initialized = true;
-    } catch (error) {
-      console.error("[convert] Failed to initialize Gemini config DB:", error);
+    } catch (error: unknown) {
+      logger.error("[convert] Failed to initialize Gemini config DB:", error);
     }
   }
 
   static get(key: string): string {
     this.init();
     if (!this.db) {
-        console.error("[convert] DB not initialized, cannot get config.");
+        logger.error("[convert] DB not initialized, cannot get config.");
         return "";
     }
     try {
       const row = this.db.prepare("SELECT value FROM config WHERE key = ?").get(key) as { value: string } | undefined;
       return row ? row.value : "";
-    } catch (error) {
-      console.error("[convert] Failed to read config:", error);
+    } catch (error: unknown) {
+      logger.error("[convert] Failed to read config:", error);
       return "";
     }
   }
@@ -66,13 +61,13 @@ class GeminiConfigManager {
   static set(key: string, value: string): void {
     this.init();
     if (!this.db) {
-        console.error("[convert] DB not initialized, cannot set config.");
+        logger.error("[convert] DB not initialized, cannot set config.");
         return;
     }
     try {
       this.db.prepare(`INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)`).run(key, value);
-    } catch (error) {
-      console.error("[convert] Failed to save config:", error);
+    } catch (error: unknown) {
+      logger.error("[convert] Failed to save config:", error);
     }
   }
 
@@ -80,7 +75,7 @@ class GeminiConfigManager {
     if (this.db) {
       try {
         this.db.close();
-      } catch {}
+      } catch (e: unknown) { logger.warn('操作失败', e) }
     }
     this.db = null;
     this.initialized = false;
@@ -119,8 +114,12 @@ If info is unknown, use "未知".`);
                 timeout: 30000,
             });
             return response.data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-        } catch (error: any) {
-            const errorMsg = error.response?.data?.error?.message || error.message;
+        } catch (error: unknown) {
+            const errObj = error as Record<string, unknown>;
+            const resp = errObj.response as Record<string, unknown> | undefined;
+            const data = resp?.data as Record<string, unknown> | undefined;
+            const innerErr = data?.error as Record<string, unknown> | undefined;
+            const errorMsg = innerErr?.message || getErrorMessage(error);
             throw new Error(`Gemini API Error: ${errorMsg}`);
         }
     }
@@ -165,8 +164,8 @@ async function searchAndDownloadCover(query: string, savePath: string): Promise<
                 });
             }
         }
-    } catch (error) {
-        console.error("Cover search failed:", error);
+    } catch (error: unknown) {
+        logger.error("Cover search failed:", error);
     }
     return false;
 }
@@ -198,8 +197,8 @@ class VideoConverter {
     try {
       await execFileAsync("ffmpeg", ["-i", inputPath, "-vn", "-acodec", "libmp3lame", "-q:a", "2", "-y", outputPath], { timeout: 300000 });
       return fs.existsSync(outputPath);
-    } catch (error) {
-      console.error("Video conversion failed:", error);
+    } catch (error: unknown) {
+      logger.error("Video conversion failed:", error);
       return false;
     }
   }
@@ -217,8 +216,8 @@ class VideoConverter {
         
         await execFileAsync("ffmpeg", args, { timeout: 120000 });
         return fs.existsSync(outputPath);
-    } catch (error) {
-        console.error("Failed to add metadata:", error);
+    } catch (error: unknown) {
+        logger.error("Failed to add metadata:", error);
         return false;
     }
   }
@@ -228,8 +227,8 @@ class VideoConverter {
     try {
       const { stdout } = await execFileAsync("ffprobe", ["-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", filePath]);
       return parseFloat(stdout.trim()) || 0;
-    } catch (error) {
-      console.error("Failed to get video duration:", error);
+    } catch (error: unknown) {
+      logger.error("Failed to get video duration:", error);
       return 0;
     }
   }
@@ -239,8 +238,8 @@ class VideoConverter {
         if (file && fs.existsSync(file)) {
             try {
                 fs.unlinkSync(file);
-            } catch (err) {
-                console.debug(`Failed to delete temp file ${path.basename(file)}:`, err);
+            } catch (err: unknown) {
+                logger.debug(`Failed to delete temp file ${path.basename(file)}:`, err);
             }
         }
     }
@@ -252,8 +251,8 @@ class VideoConverter {
         for (const file of files) {
             fs.unlinkSync(path.join(this.tempDir, file));
         }
-    } catch (error) {
-        console.debug("Error cleaning up temp directory:", error);
+    } catch (error: unknown) {
+        logger.debug("Error cleaning up temp directory:", error);
     }
   }
 }
@@ -312,10 +311,10 @@ class ConvertPlugin extends Plugin {
             } else {
                 await this.handleVideoConversion(msg, args);
             }
-        } catch (error: any) {
-            console.error("[convert] Plugin execution failed:", error);
+        } catch (error: unknown) {
+            logger.error("[convert] Plugin execution failed:", error);
             await msg.edit({
-                text: html(`❌ <b>插件执行失败:</b> ${htmlEscape(error.message)}`),
+                text: html(`❌ <b>插件执行失败:</b> ${htmlEscape(getErrorMessage(error))}`),
             });
         }
     }
@@ -325,13 +324,16 @@ class ConvertPlugin extends Plugin {
     const client = await getGlobalClient();
     const reply = await safeGetReplyMessage(msg);
 
-    if (!client || !reply || (!(reply as any).document && !(reply as any).video)) {
+    const replyMedia = reply?.media;
+    const replyDoc = replyMedia?.type === 'document' ? replyMedia : undefined;
+    const replyVideo = replyMedia?.type === 'video' ? replyMedia : undefined;
+    if (!client || !reply || (!replyDoc && !replyVideo)) {
       await msg.edit({ text: html(`❌ <b>使用错误</b><br><br>请回复一个视频消息后再使用此命令。<br><br>请回复一个视频消息后再试。`) });
       return;
     }
 
-    const doc = (reply as any).video || (reply as any).document;
-    const fileNameAttr = doc?.attributes?.find((a: any) => a.fileName);
+    const doc = replyVideo || replyDoc;
+    const fileNameAttr = doc?.raw?.attributes?.find((a): a is { _: 'documentAttributeFilename'; fileName: string } => a._ === 'documentAttributeFilename');
     const originalFileName = fileNameAttr?.fileName || doc?.fileName || "video.mp4";
 
     await msg.edit({ text: "📥 正在下载视频..." });
@@ -343,7 +345,8 @@ class ConvertPlugin extends Plugin {
     let tempCoverPath: string | undefined;
 
     try {
-        await client.downloadToFile(tempVideoPath, (reply as any).media);
+        // doc is Video|Document (both extend FileLocation), valid for downloadToFile
+        await client.downloadToFile(tempVideoPath, doc!);
         if (!fs.existsSync(tempVideoPath)) throw new Error("视频下载失败");
 
         await msg.edit({ text: "🔄 正在转换为 MP3..." });
@@ -390,6 +393,8 @@ class ConvertPlugin extends Plugin {
         await msg.edit({ text: "📤 正在发送文件..." });
         const duration = await converter.getVideoDuration(tempVideoPath);
 
+        // mtcute sendMedia type doesn't include all audio metadata fields;
+        // cast needed for thumb, title, performer at TL layer
         await client.sendMedia(msg.chat.id, {
             type: "audio",
             file: finalAudioPath,
@@ -398,15 +403,15 @@ class ConvertPlugin extends Plugin {
             duration: Math.round(duration),
             title: songInfo.title || path.basename(audioFileName, '.mp3'),
             performer: songInfo.artist || "Video Converter",
-        } as any, {
+        } as never, {
             replyTo: msg.id,
         });
 
         await msg.delete();
 
-    } catch (error: any) {
-        console.error("Conversion failed:", error);
-        await msg.edit({ text: html(`❌ <b>转换失败</b><br><br><b>错误:</b> ${htmlEscape(error.message)}`) });
+    } catch (error: unknown) {
+        logger.error("Conversion failed:", error);
+        await msg.edit({ text: html(`❌ <b>转换失败</b><br><br><b>错误:</b> ${htmlEscape(getErrorMessage(error))}`) });
     } finally {
         converter.cleanupTempFiles(tempVideoPath, tempAudioPath, finalAudioPath, tempCoverPath);
     }

@@ -1,14 +1,20 @@
 import { Plugin } from '@utils/pluginBase';
 import { getPrefixes } from '@utils/pluginManager';
 import { createDirectoryInTemp } from '@utils/pathHelpers';
+import type { MtcuteFileLocation, MtcuteMessageEntities } from '@utils/mtcuteTypes';
 import { execFile } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import type { MessageContext } from "@mtcute/dispatcher";
+import type { Message, MessageEntity, MessageMedia, Photo, Sticker, Video, Audio, Document, RawDocument } from "@mtcute/core";
+import type { TelegramClient } from "@mtcute/node";
 import { html } from "@mtcute/html-parser";
 import { getGlobalClient } from "@utils/globalClient";
 import { promisify } from 'util';
 import { safeGetReplyMessage } from "@utils/safeGetMessages";
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
+import { tl } from "@mtcute/core/tl";
 
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
@@ -79,11 +85,11 @@ class REVPlugin extends Plugin {
 				const replyMsg = await safeGetReplyMessage(msg);
 				if (replyMsg) {
 					const handled = await this.handleReplyMessage(
-						msg,
-						replyMsg as any,
-						flipMode,
-						invertColors
-					);
+							msg,
+							replyMsg,
+							flipMode,
+							invertColors
+						);
 					if (handled) return;
 				}
 
@@ -91,9 +97,9 @@ class REVPlugin extends Plugin {
 				await msg.edit({
 					text: html`❌ 请提供文本内容或回复一条支持的消息<br><br><b>支持的格式：</b><br>• 文本消息（逐行反转）<br>• 图片（JPG/PNG/BMP/WebP）<br>• 动图（GIF/.gif.mp4）<br>• 贴纸（WebM）<br><br><b>使用方法：</b><br><code>${mainPrefix}rev [文本]</code> 或回复消息使用 <code>${mainPrefix}rev [参数]</code>`,
 				});
-			} catch (error: any) {
+			} catch (error: unknown) {
 				await msg.edit({
-					text: html`❌ 处理失败: ${this.htmlEscape(error.message)}`,
+					text: html`❌ 处理失败: ${this.htmlEscape(getErrorMessage(error))}`,
 				});
 			}
 		},
@@ -108,12 +114,12 @@ class REVPlugin extends Plugin {
 
 	private async handleReplyMessage(
 		msg: MessageContext,
-		replyMsg: any,
+		replyMsg: Message,
 		flipMode: FlipMode,
 		invertColors: boolean
 	): Promise<boolean> {
 		const replyText = (replyMsg.text || '').trim();
-		const replyEntities = (replyMsg as any).entities || [];
+		const replyEntities = replyMsg.entities || [];
 
 		// 优先尝试媒体处理
 		const handledMedia = await this.tryHandleMediaTransform(
@@ -138,7 +144,7 @@ class REVPlugin extends Plugin {
 	private async handleTextReverse(
 		msg: MessageContext,
 		content: string,
-		entities: any[] = []
+		entities: readonly MessageEntity[] = []
 	) {
 		const { reversed, reversedEntities } = this.reverseStringWithEntities(
 			content,
@@ -153,16 +159,18 @@ class REVPlugin extends Plugin {
 					peer: await client.resolvePeer(msg.chat.id),
 					id: msg.id,
 					message: reversed,
-					entities: reversedEntities as any,
-				} as any);
+					entities: reversedEntities as unknown as MtcuteMessageEntities,
+				});
 				return;
-			} catch (err) {}
+			} catch (err: unknown) {
+				logger.debug("rev: rich text reverse send failed, falling back to plain", err);
+			}
 		}
 
 		await msg.edit({ text: reversed });
 	}
 
-	private reverseStringWithEntities(text: string, entities: any[] = []) {
+	private reverseStringWithEntities(text: string, entities: readonly MessageEntity[] = []) {
 		// 逐行反转字符顺序，保持行的顺序不变
 		const lines = text.split('\n');
 		const reversedLines = lines.map((line) =>
@@ -172,11 +180,10 @@ class REVPlugin extends Plugin {
 		const textLength = text.length;
 
 		// 反转实体的位置偏移
-		const reversedEntities = entities.map((entity: any) => {
-			const newEntity = { ...entity };
-			newEntity.offset = textLength - entity.offset - entity.length;
-			return newEntity;
-		});
+		const reversedEntities = entities.map((entity) => ({
+			...entity,
+			offset: textLength - entity.offset - entity.length,
+		}) as MessageEntity);
 
 		return { reversed, reversedEntities };
 	}
@@ -185,13 +192,13 @@ class REVPlugin extends Plugin {
 
 	private async tryHandleMediaTransform(
 		msg: MessageContext,
-		replyMsg: any,
+		replyMsg: Message,
 		flipMode: FlipMode,
 		invertColors: boolean,
 		captionText?: string,
-		captionEntities: any[] = []
+		captionEntities: readonly MessageEntity[] = []
 	): Promise<boolean> {
-		const media = (replyMsg as any).media;
+		const media = replyMsg.media;
 		if (!this.isSupportedMedia(media)) {
 			return false;
 		}
@@ -230,7 +237,7 @@ class REVPlugin extends Plugin {
 		}
 	}
 
-	private prepareMediaPaths(media: any) {
+	private prepareMediaPaths(media: MessageMedia) {
 		const extension = this.getExtensionFromMedia(media);
 		const uniqueId = `${Date.now().toString(36)}_${Math.random()
 			.toString(36)
@@ -251,11 +258,11 @@ class REVPlugin extends Plugin {
 	}
 
 	private async downloadMedia(
-		client: any,
-		replyMsg: any,
+		client: TelegramClient,
+		replyMsg: Message,
 		inputPath: string
 	) {
-		const buf = await client.downloadAsBuffer((replyMsg as any).media as any);
+		const buf = await client.downloadAsBuffer(replyMsg.media as MtcuteFileLocation);
 		fs.writeFileSync(inputPath, buf as Buffer);
 		if (!fs.existsSync(inputPath)) {
 			throw new Error('下载媒体失败，请稍后再试');
@@ -285,40 +292,25 @@ class REVPlugin extends Plugin {
 	}
 
 	private async sendTransformedMedia(
-		client: any,
+		client: TelegramClient,
 		msg: MessageContext,
-		replyMsg: any,
+		replyMsg: Message,
 		outputPath: string,
 		isWebm: boolean,
 		isWebp: boolean,
 		captionText?: string,
-		captionEntities: any[] = []
+		captionEntities: readonly MessageEntity[] = []
 	) {
-		const sendOptions: any = {
-			file: outputPath,
-			replyTo: (replyMsg as any).id,
-		};
-
-		// 处理文字说明
-		if (captionText) {
-			const { reversed, reversedEntities } = this.reverseStringWithEntities(
-				captionText,
-				captionEntities
-			);
-			sendOptions.caption = reversed;
-			if (reversedEntities.length > 0) {
-				sendOptions.entities = reversedEntities;
-			}
-		}
-
-		// WebM 和 WebP 作为贴纸发送
-		if (isWebm || isWebp) {
-			sendOptions.attributes = [
-				{ _: 'documentAttributeSticker', alt: 'fan', stickerset: { _: 'inputStickerSetEmpty' } } as any,
-			];
-		}
-
-		await client.sendMedia(msg.chat.id, sendOptions);
+		await client.sendMedia(msg.chat.id, outputPath, {
+			replyTo: replyMsg.id,
+			...(captionText ? (() => {
+				const { reversed, reversedEntities } = this.reverseStringWithEntities(captionText, captionEntities);
+				return {
+					caption: reversed,
+					...(reversedEntities.length > 0 ? { entities: reversedEntities } : {}),
+				};
+			})() : {}),
+		});
 	}
 
 	private async cleanupMessage(msg: MessageContext) {
@@ -334,76 +326,47 @@ class REVPlugin extends Plugin {
 				if (fs.existsSync(filePath)) {
 					fs.unlinkSync(filePath);
 				}
-			} catch (err) {
-				console.warn('清理临时文件失败', err);
+			} catch (err: unknown) {
+				logger.warn('清理临时文件失败', err);
 			}
 		}
 	}
 
 	// ==================== 媒体检测 ====================
 
-	private isSupportedMedia(media: any): boolean {
+	private isSupportedMedia(media: MessageMedia): media is Photo | Sticker | Video | Audio | Document {
 		if (!media) return false;
-		if ((media as any)._ === 'messageMediaPhoto') return true;
-		if ((media as any)._ === 'messageMediaDocument') {
-			const doc = (media as any).document;
-			const mime = doc?.mimeType || '';
-			const fileName = this.getFileNameFromDocument(doc);
-			// 支持 .gif.mp4（Telegram 动图格式），但不支持普通 .mp4
-			if (fileName && fileName.toLowerCase().endsWith('.gif.mp4')) {
-				return true;
-			}
-			return (
-				mime.startsWith('image/') ||
-				mime === 'video/webm' ||
-				mime.endsWith('/webm')
-			);
+		if (media.type === 'photo') return true;
+		if (media.type === 'sticker' || media.type === 'video' || media.type === 'audio' || media.type === 'document') {
+			const mime = media.mimeType || '';
+			const fileName = media.fileName;
+			if (fileName && fileName.toLowerCase().endsWith('.gif.mp4')) return true;
+			return mime.startsWith('image/') || mime === 'video/webm' || mime.endsWith('/webm');
 		}
 		return false;
 	}
 
-	private getFileNameFromDocument(doc: any): string | null {
-		if (!doc || !doc.attributes) return null;
-		for (const attr of doc.attributes) {
-			if ((attr as any)._ === 'documentAttributeFilename') {
-				return (attr as any).fileName;
-			}
-		}
-		return null;
+	private isGifMedia(media: MessageMedia): boolean {
+		if (!media || media.type === 'photo') return false;
+		const doc = media as RawDocument;
+		const fileName = doc.fileName;
+		if (fileName && fileName.toLowerCase().endsWith('.gif.mp4')) return true;
+		return doc.mimeType.toLowerCase().includes('gif');
 	}
 
-	private isGifMedia(media: any): boolean {
-		if ((media as any)._ === 'messageMediaDocument') {
-			const doc = (media as any).document;
-			const fileName = this.getFileNameFromDocument(doc);
-			// .gif.mp4 按 GIF 处理（使用调色板优化）
-			if (fileName && fileName.toLowerCase().endsWith('.gif.mp4')) {
-				return true;
-			}
-			return (doc?.mimeType || '').toLowerCase().includes('gif');
-		}
-		return false;
+	private isWebmMedia(media: MessageMedia): boolean {
+		if (!media || media.type === 'photo') return false;
+		const doc = media as RawDocument;
+		return doc.mimeType.toLowerCase().includes('webm');
 	}
 
-	private isWebmMedia(media: any): boolean {
-		if ((media as any)._ === 'messageMediaDocument') {
-			const doc = (media as any).document;
-			return (doc?.mimeType || '').toLowerCase().includes('webm');
-		}
-		return false;
-	}
-
-	private getExtensionFromMedia(media: any): string {
-		if ((media as any)._ === 'messageMediaDocument') {
-			const doc = (media as any).document;
-			const fileName = this.getFileNameFromDocument(doc);
-			// 保留 .gif.mp4 完整扩展名
-			if (fileName && fileName.toLowerCase().endsWith('.gif.mp4')) {
-				return '.gif.mp4';
-			}
-			return this.getExtensionFromMime(doc?.mimeType);
-		}
-		return '.jpg';
+	private getExtensionFromMedia(media: MessageMedia): string {
+		if (!media || media.type === 'photo') return '.jpg';
+		if (media.type === 'sticker') return '.webp';
+		const doc = media as RawDocument;
+		const fileName = doc.fileName;
+		if (fileName && fileName.toLowerCase().endsWith('.gif.mp4')) return '.gif.mp4';
+		return this.getExtensionFromMime(doc.mimeType);
 	}
 
 	private getExtensionFromMime(mime?: string): string {
@@ -434,16 +397,17 @@ class REVPlugin extends Plugin {
 
 		try {
 			await execFileAsync('ffmpeg', args);
-		} catch (error: any) {
-			if (error?.code === 'ENOENT') {
+		} catch (error: unknown) {
+			const err = error as { code?: string; stderr?: string; message?: string };
+			if (err.code === 'ENOENT') {
 				throw new Error('未找到 ffmpeg，请先安装后再试');
 			}
 			const stderr =
-				typeof error?.stderr === 'string' ? error.stderr.trim() : '';
+				typeof err.stderr === 'string' ? err.stderr.trim() : '';
 			if (stderr) {
 				throw new Error(`ffmpeg 处理失败: ${stderr.split('\n')[0]}`);
 			}
-			throw new Error(`ffmpeg 处理失败: ${error?.message || String(error)}`);
+			throw new Error(`ffmpeg 处理失败: ${err.message || String(error)}`);
 		}
 	}
 
@@ -558,8 +522,8 @@ class REVPlugin extends Plugin {
 		try {
 			await msg.edit({ text: html(text) });
 			return true;
-		} catch (error) {
-			console.warn('编辑消息失败', error);
+		} catch (error: unknown) {
+			logger.warn('编辑消息失败', error);
 			return false;
 		}
 	}
@@ -568,8 +532,8 @@ class REVPlugin extends Plugin {
 		try {
 			await msg.delete();
 			return true;
-		} catch (error) {
-			console.warn('删除消息失败', error);
+		} catch (error: unknown) {
+			logger.warn('删除消息失败', error);
 			return false;
 		}
 	}

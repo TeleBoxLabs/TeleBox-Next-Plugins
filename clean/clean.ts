@@ -1,646 +1,922 @@
-import { safeGetMe } from "@utils/authGuards";
-// file name: clean.ts
 import { Plugin } from "@utils/pluginBase";
+import type { TelegramClient } from "@mtcute/node";
 import type { MessageContext } from "@mtcute/dispatcher";
+import type { MtcuteInputChannel, MtcuteInputPeer, MtcuteLong } from "@utils/mtcuteTypes";
 import { html } from "@mtcute/html-parser";
 import { getGlobalClient } from "@utils/globalClient";
 import { getPrefixes } from "@utils/pluginManager";
-import { banUser, getBannedUsers, unbanUser } from "@utils/banUtils";
+import { createDirectoryInAssets } from "@utils/pathHelpers";
+import * as fs from "fs";
+import * as path from "path";
+import { sleep } from "@utils/asyncHelpers";
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
+import { getTitle } from "@utils/entityTypeGuards";
+import type { tl } from "@mtcute/core";
+import Long from "long";
+import { htmlEscape } from "@utils/htmlEscape";
+
+/** Raw user object returned by TL API calls like channels.getParticipants */
+interface RawUser {
+  id: number;
+  username?: string;
+  first_name?: string;
+  last_name?: string;
+  deleted?: boolean;
+  status?: tl.TypeUserStatus;
+}
+
+/** Raw participants result from channels.getParticipants */
+interface RawChannelParticipants {
+  count: number;
+  participants: unknown[];
+  users: RawUser[];
+  chats: unknown[];
+}
+
+const CACHE_DIR = createDirectoryInAssets("clean_member_cache");
 
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
 
-// HTML 转义函数（必需）
-const htmlEscape = (text: string): string => 
-  text.replace(/[&<>"']/g, m => ({ 
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', 
-    '"': '&quot;', "'": '&#x27;' 
-  }[m] || m));
+interface UserInfo {
+  id: number;
+  username: string;
+  first_name: string;
+  last_name: string;
+  is_deleted: boolean;
+  last_online: string | null;
+}
 
-// 延迟函数
-const sleep = (ms: number): Promise<void> => 
-  new Promise(resolve => setTimeout(resolve, ms));
+interface FailedUserInfo extends UserInfo {
+  error_message: string;
+}
 
-// 帮助文本
-const HELP_TEXT = `🧹 <b>清理工具 Pro</b>
+interface CacheData {
+  chat_id: number;
+  chat_title: string;
+  mode: string;
+  day: number;
+  search_time: string;
+  total_found: number;
+  users: UserInfo[];
+}
 
-<b>📝 功能概述:</b>
-• <b>删除账号清理</b>: 扫描并清理已注销/删除的账号
-• <b>拉黑用户清理</b>: 解除双向拉黑状态
-• <b>被封禁实体解封</b>: 解封群组中被封禁的用户/频道/群组
+const MAX_CACHE_ENTRIES = 50;
+const cache = new Map<string, { data: CacheData; timestamp: number }>();
+const CACHE_TTL = 24 * 60 * 60 * 1000;
 
-<b>🔧 命令列表:</b>
-
-<u>删除账号清理:</u>
-• <code>${mainPrefix}clean deleted pm</code> - 扫描私聊中的已注销账号
-• <code>${mainPrefix}clean deleted pm rm</code> - 扫描并删除已注销账号的私聊
-• <code>${mainPrefix}clean deleted member</code> - 扫描群组中的已注销账号
-• <code>${mainPrefix}clean deleted member rm</code> - 扫描并清理群组已注销账号
-
-<u>拉黑用户清理:</u>
-• <code>${mainPrefix}clean blocked pm</code> - 清理拉黑用户（智能模式）
-• <code>${mainPrefix}clean blocked pm all</code> - 清理所有拉黑用户（全量模式）
-
-<u>被封禁实体解封:</u>
-• <code>${mainPrefix}clean blocked member</code> - 解封自己封禁的实体
-• <code>${mainPrefix}clean blocked member all</code> - 解封所有被封禁的实体
-
-<u>帮助信息:</u>
-
-<b>⚡ 智能清理模式:</b>
-• 跳过机器人、诈骗账户、虚假账户
-• 自动处理 API 限制
-• 实时进度显示
-
-<b>📊 数据统计:</b>
-• 处理总数、成功数、失败数、跳过数
-• 实体类型统计（用户/频道/群组）
-• 清理成功率
-
-<b>⚠️ 权限要求:</b>
-• 群组操作需要管理员权限
-• 封禁清理需要封禁用户权限
-• 私聊清理仅操作机器人自身对话`;
-
-class CleanPlugin extends Plugin {
-
-  // 插件配置
-  private readonly PLUGIN_NAME = "clean";
-  private readonly PLUGIN_VERSION = "2.0.0";
-  public description: string = "";
-  
-  // 清理进度状态
-  private cleanupStartTime: number = 0;
-  private blockedCleanupStartTime: number = 0;
-  
-  // 命令处理器
-  cmdHandlers: { [key: string]: (msg: MessageContext) => Promise<void> };
-
-  constructor() {
-    super();
-    this.description = HELP_TEXT;
-    this.cmdHandlers = {
-      clean: this.handleClean.bind(this)
-    };
+function trimCache(): void {
+  if (cache.size <= MAX_CACHE_ENTRIES) return;
+  const excess = cache.size - MAX_CACHE_ENTRIES;
+  let count = 0;
+  for (const key of Array.from(cache.keys())) {
+    if (count >= excess) break;
+    cache.delete(key);
+    count++;
   }
+}
 
-  // 主命令处理器
-  private async handleClean(msg: MessageContext): Promise<void> {
+function getCacheKey(chatId: number, mode: string, day: number): string {
+  return `${chatId}_${mode}_${day}`;
+}
+
+function getFromCache(chatId: number, mode: string, day: number): CacheData | null {
+  const key = getCacheKey(chatId, mode, day);
+  const cached = cache.get(key);
+  if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
+    return cached.data;
+  }
+  cache.delete(key);
+  return null;
+}
+
+function setCache(chatId: number, mode: string, day: number, data: CacheData): void {
+  const key = getCacheKey(chatId, mode, day);
+  cache.set(key, { data, timestamp: Date.now() });
+  trimCache();
+}
+
+async function ensureDirectories(): Promise<void> {
+  try {
+    if (!fs.existsSync(CACHE_DIR)) {
+      fs.mkdirSync(CACHE_DIR, { recursive: true });
+    }
+  } catch (error: unknown) {
+    logger.error('Failed to create cache directory:', error);
+    throw error;
+  }
+}
+
+async function generateReport(cacheData: CacheData): Promise<string> {
+  await ensureDirectories();
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "").slice(0, 15);
+  const reportFile = path.join(CACHE_DIR, `report_${cacheData.chat_id}_${cacheData.mode}_${cacheData.day}_${timestamp}.csv`);
+  const modeNames: { [key: string]: string } = {
+    "1": `未上线超过${cacheData.day}天`,
+    "2": `未发言超过${cacheData.day}天`,
+    "3": `发言少于${cacheData.day}条`,
+    "4": "已注销账户",
+    "5": "所有普通成员",
+  };
+  const csvContent = [
+    ["群组清理报告"],
+    ["群组名称", cacheData.chat_title],
+    ["群组ID", cacheData.chat_id.toString()],
+    ["清理条件", modeNames[cacheData.mode] || "未知"],
+    ["搜索时间", cacheData.search_time.slice(0, 19)],
+    ["符合条件用户数量", cacheData.total_found.toString()],
+    [],
+    ["用户ID", "用户名", "姓名", "最后上线时间", "是否注销"],
+  ];
+  for (const user of cacheData.users) {
+    const fullName = `${user.first_name} ${user.last_name}`.trim();
+    csvContent.push([
+      user.id.toString(),
+      user.username,
+      fullName,
+      user.last_online || "未知",
+      user.is_deleted ? "是" : "否",
+    ]);
+  }
+  const csvString = csvContent.map((row) => row.join(",")).join("\n");
+  try {
+    fs.writeFileSync(reportFile, "\ufeff" + csvString, "utf8");
+    logger.info(`Report generated: ${reportFile}`);
+  } catch (error: unknown) {
+    logger.error('Failed to write report file:', error);
+    await sleep(1000);
+    fs.writeFileSync(reportFile, "\ufeff" + csvString, "utf8");
+  }
+  return reportFile;
+}
+
+async function generateFailedReport(failedUsers: FailedUserInfo[], chatTitle: string, chatId: number): Promise<string> {
+  await ensureDirectories();
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "").slice(0, 15);
+  const reportFile = path.join(CACHE_DIR, `failed_${chatId}_${timestamp}.csv`);
+  const csvContent = [
+    ["群组清理失败用户报告"],
+    ["群组名称", chatTitle],
+    ["群组ID", chatId.toString()],
+    ["失败时间", new Date().toISOString().slice(0, 19)],
+    ["失败用户数量", failedUsers.length.toString()],
+    [],
+    ["用户ID", "用户名", "姓名", "最后上线时间", "是否注销", "失败原因"],
+  ];
+  for (const user of failedUsers) {
+    const fullName = `${user.first_name} ${user.last_name}`.trim();
+    csvContent.push([
+      user.id.toString(),
+      user.username,
+      fullName,
+      user.last_online || "未知",
+      user.is_deleted ? "是" : "否",
+      user.error_message
+    ]);
+  }
+  const csvString = csvContent.map((row) => row.join(",")).join("\n");
+  try {
+    fs.writeFileSync(reportFile, "\ufeff" + csvString, "utf8");
+    logger.info(`Failed report generated: ${reportFile}`);
+  } catch (error: unknown) {
+    logger.error('Failed to write failed report file:', error);
+    await sleep(1000);
+    fs.writeFileSync(reportFile, "\ufeff" + csvString, "utf8");
+  }
+  return reportFile;
+}
+
+async function checkAdminPermissions(msg: MessageContext): Promise<boolean> {
+  try {
     const client = await getGlobalClient();
-    if (!client) {
-      await this.editMessage(msg, "❌ 客户端未就绪");
-      return;
-    }
-
+    if (!client || !msg.chat?.id) return false;
+    const me = await client.getMe();
     try {
-      const text = msg.text || "";
-      const parts = text.trim().split(/\s+/);
-      const subCommand = parts[1]?.toLowerCase();
-
-      // 显示帮助
-      if (!subCommand || subCommand === "help" || subCommand === "h") {
-        await this.editMessage(msg, HELP_TEXT);
-        return;
-      }
-
-      await this.editMessage(msg, "🔄 正在处理请求...");
-
-      // 路由到对应功能模块
-      switch (subCommand) {
-        case "deleted":
-          await this.handleDeletedClean(client, msg, parts);
-          break;
-        case "blocked":
-          await this.handleBlockedClean(client, msg, parts);
-          break;
-        default:
-          await this.sendError(msg, `未知子命令: ${htmlEscape(subCommand)}`);
-          break;
-      }
-
-    } catch (error: any) {
-      await this.handleError(msg, error);
-    }
-  }
-
-  // 处理删除账号清理
-  private async handleDeletedClean(client: any, msg: MessageContext, parts: string[]): Promise<void> {
-    const action = parts[2]?.toLowerCase();
-    const operation = parts[3]?.toLowerCase();
-
-    if (!action) {
-      await this.sendError(msg, "请指定清理类型: pm (私聊) 或 member (群组)");
-      return;
-    }
-
-    switch (action) {
-      case "pm":
-        await this.cleanDeletedPM(client, msg, operation === "rm");
-        break;
-      case "member":
-        await this.cleanDeletedMember(client, msg, operation === "rm");
-        break;
-      default:
-        await this.sendError(msg, `未知类型: ${htmlEscape(action)}`);
-        break;
-    }
-  }
-
-  // 处理拉黑/解封清理
-  private async handleBlockedClean(client: any, msg: MessageContext, parts: string[]): Promise<void> {
-    const action = parts[2]?.toLowerCase();
-    const mode = parts[3]?.toLowerCase();
-
-    if (!action) {
-      await this.sendError(msg, "请指定清理类型: pm (私聊拉黑) 或 member (群组封禁)");
-      return;
-    }
-
-    switch (action) {
-      case "pm":
-        await this.cleanBlockedPM(client, msg, mode === "all");
-        break;
-      case "member":
-        await this.unblockMember(client, msg, mode === "all");
-        break;
-      default:
-        await this.sendError(msg, `未知类型: ${htmlEscape(action)}`);
-        break;
-    }
-  }
-
-// 私聊已注销账号清理 - 修复版：直接移除整个对话
-  private async cleanDeletedPM(client: any, msg: MessageContext, deleteDialogs: boolean = false): Promise<void> {
-    await this.editMessage(msg, deleteDialogs 
-      ? "🔍 正在扫描并从对话列表中移除已注销账号..." 
-      : "🔍 正在扫描私聊已注销账号...");
-
-    const deletedUsers: Array<{id: string, username?: string}> = [];
-    
-    try {
-      const dialogsMain = await client.getDialogs({});
-      let dialogsArchived: any[] = [];
-      try {
-        dialogsArchived = await client.getDialogs({ folderId: 1 });
-      } catch (error: any) {
-        console.error(`[Clean] 获取归档对话失败:`, error?.message || error);
-      }
-
-      const dialogByUserId = new Map<string, any>();
-      const dialogs = [...(dialogsMain || []), ...(dialogsArchived || [])];
-
-      for (const dialog of dialogs) {
-        if (dialog.isUser && (dialog.entity as any)?._ === 'user' && (dialog.entity as any).deleted) {
-          const user = dialog.entity;
-          const userId = user.id.toString();
-
-          if (!dialogByUserId.has(userId)) {
-            dialogByUserId.set(userId, dialog);
-            deletedUsers.push({
-              id: userId,
-              username: user.username || "已注销账号"
-            });
-          }
-        }
-      }
-
-      if (deleteDialogs) {
-        for (const [userId, dialog] of dialogByUserId.entries()) {
-          try {
-            /**
-             * 修复核心：
-             * 1. 使用 dialog.inputEntity 确保 ID 类型在 API 层级完全匹配。
-             * 2. 不传任何参数（默认不开启 revoke），直接从本地对话列表中移除该会话。
-             * 3. 针对已注销账号，开启 revoke 反而会导致删除失败。
-             */
-            await client.deleteDialog(dialog.inputEntity);
-
-            await sleep(150);
-          } catch (error: any) {
-            console.error(`[Clean] 无法移除对话 ${userId}:`, error.message);
-            if (error.message?.includes("FLOOD_WAIT")) {
-              await this.handleFloodWait(msg, error);
-              return;
-            }
-          }
-        }
-      }
-
-      // 构建结果反馈
-      let result = "";
-      if (deletedUsers.length === 0) {
-        result = "✅ <b>扫描完成</b>\n\n对话列表中未发现已注销账号。";
-      } else {
-        result = deleteDialogs 
-          ? `✅ <b>清理完成</b>\n\n已从列表移除 <code>${deletedUsers.length}</code> 个已注销对话:\n\n`
-          : `✅ <b>扫描完成</b>\n\n共找到 <code>${deletedUsers.length}</code> 个已注销对话:\n\n`;
-        
-        // 仅展示前 15 条
-        deletedUsers.slice(0, 15).forEach((user) => {
-          result += `• <a href="tg://user?id=${user.id}">已注销账号</a> (ID: <code>${user.id}</code>)\n`;
-        });
-        
-        if (deletedUsers.length > 15) {
-          result += `\n... 以及其他 ${deletedUsers.length - 15} 个会话\n`;
-        }
-        
-        if (!deleteDialogs) {
-          result += `\n💡 使用 <code>${mainPrefix}clean deleted pm rm</code> 直接移除这些对话`;
-        }
-      }
-
-      await this.editMessage(msg, result);
-
-    } catch (error: any) {
-      await this.handleError(msg, error);
-    }
-  }
-
-  // 群组已注销账号清理
-  private async cleanDeletedMember(client: any, msg: MessageContext, cleanMembers: boolean = false): Promise<void> {
-    const chat = msg.chat;
-    if (!chat || (chat as any)?.chatType === 'private') {
-      await this.sendError(msg, "此命令仅在群组中可用");
-      return;
-    }
-
-    await this.editMessage(msg, cleanMembers 
-      ? "🔍 正在扫描并清理群组已注销账号..." 
-      : "🔍 正在扫描群组已注销账号...");
-
-    const chatId = chat.id;
-    if (cleanMembers && !await this.checkBanPermission(client, chatId)) {
-      await this.sendError(msg, "没有封禁用户权限，无法执行清理");
-      return;
-    }
-
-    let deletedCount = 0;
-    const deletedUsers: Array<{id: string, username?: string}> = [];
-
-    const participants = client.iterParticipants(chatId);
-    for await (const participant of participants) {
-      if ((participant as any)?._ === 'user' && (participant as any).deleted) {
-        deletedCount++;
-        deletedUsers.push({ 
-          id: participant.id.toString(), 
-          username: participant.username || "未知" 
-        });
-        
-        if (cleanMembers) {
-          try {
-            await banUser(client, chatId, participant.id);
-            await sleep(100);
-          } catch (error: any) {
-            if (error.message?.includes("FLOOD_WAIT")) {
-              await this.handleFloodWait(msg, error);
-              return;
-            }
-          }
-        }
-      }
-    }
-
-    let result = "";
-    if (deletedCount === 0) {
-      result = "✅ <b>扫描完成</b>\n\n此群组中没有发现已注销账号。";
-    } else {
-      result = cleanMembers 
-        ? `✅ <b>清理完成</b>\n\n已清理 <code>${deletedCount}</code> 个已注销账号:\n\n`
-        : `✅ <b>扫描完成</b>\n\n此群组的已注销账号数: <code>${deletedCount}</code>:\n\n`;
-      
-      deletedUsers.slice(0, 15).forEach(user => {
-        result += `• <a href="tg://user?id=${user.id}">${user.id}</a>\n`;
+      const result: any = await client.call({
+        _: 'channels.getParticipant',
+        channel: await client.resolvePeer(msg.chat.id) as unknown as MtcuteInputChannel,
+        participant: me.id as unknown as MtcuteInputPeer,
       });
-      
-      if (deletedCount > 15) {
-        result += `\n... 还有 ${deletedCount - 15} 个未显示\n`;
+      if (result?.participant?._ === 'channelParticipantAdmin' || 
+          result?.participant?._ === 'channelParticipantCreator') {
+        return true;
       }
-      
-      if (!cleanMembers) {
-        result += `\n💡 使用 <code>${mainPrefix}clean deleted member rm</code> 清理这些已注销账号`;
-      }
+    } catch (participantError: unknown) {
+      logger.info('GetParticipant failed, trying alternative method:', participantError);
     }
-
-    await this.editMessage(msg, result);
-  }
-
-  // 拉黑用户清理
-  private async cleanBlockedPM(client: any, msg: MessageContext, includeAll: boolean = false): Promise<void> {
-    this.blockedCleanupStartTime = Date.now();
-    
-    await this.editMessage(msg, 
-      `🧹 开始清理拉黑用户\n\n模式: ${includeAll ? '全量清理' : '智能清理'}`);
-
-    let offset = 0;
-    let success = 0, failed = 0, skipped = 0, totalUsers = 0, processedUsers = 0;
-    let consecutiveErrors = 0;
-
-    // 获取总数
     try {
-      const initialBlocked = await client.call({ _: "contacts.getBlocked", offset: 0, limit: 1 } as any);
-      totalUsers = initialBlocked._ === 'contacts.blockedSlice' 
-        ? (initialBlocked as any).count || 0 
-        : (await client.call({ _: "contacts.getBlocked", offset: 0, limit: 1000 } as any))?.users?.length || 0;
-    } catch (error) {
-      console.error("获取用户总数失败:", error);
-    }
-
-    while (true) {
-      try {
-        const blocked = await client.call({ _: "contacts.getBlocked", offset, limit: 100 } as any);
-        if (!blocked.users?.length) break;
-
-        for (const user of blocked.users) {
-          processedUsers++;
-          
-          // 智能模式跳过机器人/诈骗账户
-          if (!includeAll && (user.bot || user.scam || user.fake)) {
-            skipped++;
-            continue;
-          }
-
-          try {
-            await client.call({ _: "contacts.unblock", id: user } as any);
-            success++;
-            
-            // 动态延迟
-            const delay = this.getDynamicDelay(user, includeAll, consecutiveErrors);
-            await sleep(delay);
-            consecutiveErrors = 0;
-          } catch (error: any) {
-            if (error.message?.includes('FLOOD_WAIT_')) {
-              await this.handleFloodWait(msg, error);
-              continue;
-            } else {
-              failed++;
-              consecutiveErrors++;
-              await sleep(this.getDynamicDelay(user, includeAll, consecutiveErrors));
-            }
-          }
-
-          // 更新进度
-          if (processedUsers % 10 === 0) {
-            await this.updateBlockedProgress(msg, processedUsers, totalUsers, success, failed, skipped, includeAll);
-          }
-        }
-
-        offset += 100;
-        if (blocked._ === 'contacts.blockedSlice' && offset >= (blocked as any).count) break;
-        
-        // 批次间延迟
-        const batchDelay = consecutiveErrors > 0 ? 3000 + (consecutiveErrors * 1000) : 2000;
-        await sleep(Math.min(batchDelay, 10000));
-
-      } catch (error: any) {
-        console.error("获取拉黑列表失败:", error);
-        if (error.message?.includes('FLOOD_WAIT')) {
-          await this.handleFloodWait(msg, error);
-          continue;
-        }
-        break;
+      const result: any = await client.call({
+        _: 'channels.getParticipants',
+        channel: await client.resolvePeer(msg.chat.id) as unknown as MtcuteInputChannel,
+        filter: { _: 'channelParticipantsAdmins' },
+        offset: 0,
+        limit: 100,
+        hash: 0 as unknown as MtcuteLong,
+      });
+      if ('users' in result) {
+        const admins = result.users as RawUser[];
+        return admins.some(admin => Number(admin.id) === Number(me.id));
       }
+    } catch (adminListError: unknown) {
+      logger.info('GetParticipants admin list failed:', adminListError);
     }
-
-    const result = this.buildBlockedResult(success, failed, skipped, totalUsers, includeAll);
-    await this.editMessage(msg, result);
+    return false;
+  } catch (error: unknown) {
+    logger.error('Permission check failed:', error);
+    return false;
   }
+}
 
-  // 群组解封
-  private async unblockMember(client: any, msg: MessageContext, includeAll: boolean = false): Promise<void> {
-    const ct = (msg.chat as any)?.chatType;
-    if (ct !== 'group' && ct !== 'supergroup' && ct !== 'channel') {
-      await this.sendError(msg, "此命令只能在群组中使用");
-      return;
-    }
-
-    await this.editMessage(msg, "🔓 正在获取被封禁实体列表...");
-
-    const me = await safeGetMe(client);
-    if (!me) return;
-    const myId = Number(me.id);
-    const chatEntity = msg.chat.id;
-    
-    let bannedUsers = await getBannedUsers(client, chatEntity);
-    if (!includeAll) {
-      bannedUsers = bannedUsers.filter((u: any) => u.kickedBy === myId);
-    }
-    
-    if (bannedUsers.length === 0) {
-      await this.editMessage(msg, "ℹ️ 没有找到需要解封的实体");
-      await sleep(3000);
-      await this.safeDelete(msg);
-      return;
-    }
-
-    await this.editMessage(msg, `⚡ 正在解封 ${bannedUsers.length} 个实体...`);
-    
-    const entityStats = { users: 0, channels: 0, chats: 0 };
-    bannedUsers.forEach((entity: any) => {
-      if (entity.type === 'user') entityStats.users++;
-      else if (entity.type === 'channel') entityStats.channels++;
-      else if (entity.type === 'chat') entityStats.chats++;
+async function removeChatMember(client: TelegramClient, channelEntity: any, userId: number): Promise<void> {
+  try {
+    const userEntity = await client.resolvePeer(userId);
+    logger.info(`正在移出用户: ${userId}`);
+    await client.call({
+      _: 'channels.editBanned',
+      channel: channelEntity,
+      participant: userEntity,
+      bannedRights: {
+        _: 'chatBannedRights',
+        untilDate: Math.floor(Date.now() / 1000) + 60,
+        viewMessages: true,
+        sendMessages: true,
+        sendMedia: true,
+        sendStickers: true,
+        sendGifs: true,
+        sendGames: true,
+        sendInline: true,
+        sendPolls: true,
+        changeInfo: true,
+        inviteUsers: true,
+        pinMessages: true,
+      },
     });
-    
-    let successCount = 0, failedCount = 0;
-    const failedEntities: string[] = [];
-    
-    for (const entity of bannedUsers) {
-      const success = await unbanUser(client, chatEntity, entity.id);
-      if (success) {
-        successCount++;
-      } else {
-        failedCount++;
-        const displayName = entity.type === 'user' 
-          ? `${entity.firstName}(${entity.id})` 
-          : `${entity.title || entity.firstName}[${entity.type}](${entity.id})`;
-        failedEntities.push(displayName);
-      }
-      await sleep(500);
-    }
-    
-    let statsText = "";
-    if (entityStats.users > 0) statsText += `👤 用户: ${entityStats.users} `;
-    if (entityStats.channels > 0) statsText += `📢 频道: ${entityStats.channels} `;
-    if (entityStats.chats > 0) statsText += `💬 群组: ${entityStats.chats}`;
-    
-    let resultText = "";
-    if (failedCount > 0) {
-      resultText = `✅ <b>解封完成</b>\n\n${statsText}\n成功: <code>${successCount}</code> 个\n失败: <code>${failedCount}</code> 个`;
+    await sleep(2000 + Math.random() * 1000);
+    await client.call({
+      _: 'channels.editBanned',
+      channel: channelEntity,
+      participant: userEntity,
+      bannedRights: {
+        _: 'chatBannedRights',
+        untilDate: 0,
+        viewMessages: false,
+        sendMessages: false,
+        sendMedia: false,
+        sendStickers: false,
+        sendGifs: false,
+        sendGames: false,
+        sendInline: false,
+        sendPolls: false,
+        changeInfo: false,
+        inviteUsers: false,
+        pinMessages: false,
+      },
+    });
+    logger.info(`用户 ${userId} 已移出并解封，可重新加入`);
+  } catch (error: unknown) {
+    logger.error(`移出用户 ${userId} 失败:`, error);
+    const errorMsg = getErrorMessage(error);
+    if (errorMsg.includes("FLOOD_WAIT")) {
+      const seconds = parseInt(errorMsg.match(/\d+/)?.[0] || "60");
+      logger.info(`遇到频率限制，等待 ${seconds} 秒后重试`);
+      await sleep(seconds * 1000);
+      await removeChatMember(client, channelEntity, userId);
+    } else if (errorMsg.includes("USER_NOT_PARTICIPANT")) {
+      logger.info(`用户 ${userId} 已不在群组中`);
+      return;
+    } else if (errorMsg.includes("CHAT_ADMIN_REQUIRED")) {
+      logger.info(`无权限移出用户 ${userId}（可能是管理员）`);
+      throw error;
     } else {
-      resultText = `✅ <b>解封完成</b>\n\n${statsText}\n已成功解封 <code>${successCount}</code> 个实体`;
-    }
-    
-    await this.editMessage(msg, resultText);
-    await sleep(5000);
-    await this.safeDelete(msg);
-  }
-
-  // 工具函数
-  private async editMessage(msg: MessageContext, text: string): Promise<void> {
-    try {
-      await msg.edit({ text: html(text) });
-    } catch (error) {
-      console.error("编辑消息失败:", error);
-    }
-  }
-
-  private async sendError(msg: MessageContext, errorMsg: string): Promise<void> {
-    await this.editMessage(msg, `❌ <b>错误:</b> ${htmlEscape(errorMsg)}`);
-  }
-
-  private async handleError(msg: MessageContext, error: any): Promise<void> {
-    console.error(`[CleanPlugin] 错误:`, error);
-    
-    let errorMsg = `❌ <b>操作失败:</b> ${htmlEscape(error.message || "未知错误")}`;
-    
-    if (error.message?.includes("FLOOD_WAIT")) {
-      const waitTime = parseInt(error.message.match(/\d+/)?.[0] || "60");
-      errorMsg = `⏳ <b>请求过于频繁</b>\n\n需要等待 ${waitTime} 秒后重试`;
-    } else if (error.message?.includes("CHAT_ADMIN_REQUIRED")) {
-      errorMsg = "🔒 <b>权限不足</b>\n\n需要管理员权限";
-    } else if (error.message?.includes("USER_NOT_PARTICIPANT")) {
-      errorMsg = "❌ <b>未加入群组</b>\n\n机器人需要先加入群组";
-    }
-    
-    await this.editMessage(msg, errorMsg);
-  }
-
-  private async handleFloodWait(msg: MessageContext, error: any): Promise<void> {
-    const waitTime = parseInt(error.message.match(/\d+/)?.[0] || "60");
-    await this.editMessage(msg, `⏳ 需要等待 ${waitTime} 秒后继续`);
-    await sleep((waitTime + 1) * 1000);
-  }
-
-  private async safeDelete(msg: MessageContext): Promise<void> {
-    try {
-      await msg.delete();
-    } catch (error) {
-      // 忽略删除错误
-    }
-  }
-
-  private getDynamicDelay(user: any, includeAll: boolean, consecutiveErrors: number): number {
-    let delay = 200;
-    
-    if (user.bot) delay = 1500;
-    else if (user.scam || user.fake) delay = 800;
-    
-    if (includeAll) delay = Math.max(delay, 1000);
-    if (consecutiveErrors > 0) delay = delay * (1 + consecutiveErrors * 0.5);
-    
-    return Math.min(delay, 5000);
-  }
-
-  private async updateBlockedProgress(msg: MessageContext, processed: number, total: number, 
-                                    success: number, failed: number, skipped: number, includeAll: boolean): Promise<void> {
-    try {
-      const percentage = total > 0 ? Math.round((processed / total) * 100) : 0;
-      const progressBar = '█'.repeat(Math.round((percentage / 100) * 20)) + '░'.repeat(20 - Math.round((percentage / 100) * 20));
-      
-      const progressText = `🧹 <b>清理拉黑用户进行中</b>
-
-📊 <b>进度:</b> ${percentage}% (${processed}/${total})
-${progressBar}
-
-📈 <b>统计:</b>
-• ✅ 成功: ${success}
-• ❌ 失败: ${failed}
-• ⏭️ 跳过: ${skipped}
-
-⚙️ <b>模式:</b> ${includeAll ? '全量清理' : '智能清理'}
-
-⏱️ <b>剩余时间:</b> ${this.estimateRemainingTime(processed, total, Date.now() - this.blockedCleanupStartTime)}`;
-
-      await this.editMessage(msg, progressText);
-    } catch (e) {
-      // 忽略编辑错误
-    }
-  }
-
-  private estimateRemainingTime(processed: number, total: number, elapsedMs: number): string {
-    if (processed === 0 || total === 0) return "计算中...";
-    
-    const avgTimePerUser = elapsedMs / processed;
-    const remaining = total - processed;
-    const estimatedMs = avgTimePerUser * remaining;
-    
-    if (estimatedMs < 1000) return "即将完成";
-    if (estimatedMs < 60000) return `约 ${Math.ceil(estimatedMs / 1000)} 秒`;
-    return `约 ${Math.ceil(estimatedMs / 60000)} 分钟`;
-  }
-
-  private buildBlockedResult(success: number, failed: number, skipped: number, total: number, includeAll: boolean): string {
-    const efficiency = total > 0 ? Math.round((success / total) * 100) : 0;
-    const totalProcessed = success + failed + skipped;
-    
-    let statusEmoji = "✅", statusText = "成功完成";
-    if (failed > 0 && failed > success) {
-      statusEmoji = "⚠️"; statusText = "部分完成";
-    } else if (success === 0) {
-      statusEmoji = "ℹ️"; statusText = "无需清理";
-    }
-    
-    return `${statusEmoji} <b>清理拉黑用户${statusText}</b>
-
-📊 <b>统计结果:</b>
-• 总计用户: ${total}
-• 成功清理: ${success}
-• 清理失败: ${failed}
-• 跳过处理: ${skipped}
-• 成功率: ${efficiency}%
-
-⚙️ <b>清理模式:</b> ${includeAll ? '全量清理' : '智能清理'}
-
-📈 <b>处理详情:</b>
-• 已处理: ${totalProcessed}/${total}
-${skipped > 0 ? `• 跳过原因: ${includeAll ? '系统限制' : '机器人/诈骗/虚假账户'}` : ''}
-
-💡 <b>提示:</b> ${failed > 0 ? '部分失败可能是由于API限制或网络问题' : '所有操作已成功完成'}`;
-  }
-
-  private async checkBanPermission(client: any, chatId: any): Promise<boolean> {
-    try {
-      const me = await safeGetMe(client);
-      if (!me) return false;
-      
-      let participant: any;
-      const chat = await client.getChat(chatId).catch(() => null);
-      if ((chat as any)?._ === 'channel' || (chat as any)?.chatType === 'channel' || (chat as any)?.chatType === 'supergroup') {
-        participant = await client.call({ _: "channels.getParticipant", channel: chatId, participant: me.id } as any);
-      } else {
-        participant = await client.call({ _: "messages.getFullChat", chatId } as any);
-      }
-
-      if ((participant as any)?._ === 'channels.channelParticipant') {
-        const participantObj = (participant as any).participant;
-        if (participantObj?._ === 'channelParticipantCreator') return true;
-        if (participantObj?._ === 'channelParticipantAdmin') return participantObj.adminRights?.banUsers || false;
-      }
-      
-      if ((participant as any)?._ === 'messages.chatFull') {
-        const fullChat = (participant as any).fullChat;
-        if (fullChat?._ === 'chatFull') {
-          const participants = fullChat.participants;
-          if (participants?._ === 'chatParticipants') {
-            const meParticipant = participants.participants.find((p: any) => String(p.userId) === String(me.id));
-            if (meParticipant?._ === 'chatParticipantCreator' || meParticipant?._ === 'chatParticipantAdmin') {
-              return true;
-            }
-          }
-        }
-      }
-
-      return false;
-      
-    } catch (error: any) {
-      if (error.message?.includes("CHAT_ADMIN_REQUIRED") ||
-          error.message?.includes("USER_NOT_PARTICIPANT") ||
-          error.message?.includes("PEER_ID_INVALID")) {
-        return false;
-      }
-      return true;
+      throw error;
     }
   }
 }
 
-export default new CleanPlugin();
+function getLastOnlineDays(user: RawUser): number | null {
+  if (!user.status) return null;
+  const statusType = user.status._;
+  if (statusType === 'userStatusOnline' || statusType === 'userStatusRecently') {
+    return 0;
+  } else if (statusType === 'userStatusOffline') {
+    // wasOnline is a Unix timestamp (number) when status is userStatusOffline
+    const wasOnline = user.status.wasOnline;
+    const days = Math.floor((Date.now() - wasOnline * 1000) / (1000 * 60 * 60 * 24));
+    return days;
+  } else if (statusType === 'userStatusLastWeek') {
+    return 7;
+  } else if (statusType === 'userStatusLastMonth') {
+    return 30;
+  }
+  return null;
+}
+
+interface StreamProcessOptions {
+  client: TelegramClient;
+  chatEntity: any;
+  mode: string;
+  day: number;
+  adminIds: Set<number>;
+  onlySearch: boolean;
+  maxRemove?: number;
+  statusCallback?: (message: string, forceUpdate?: boolean) => Promise<void>;
+  modeNames: { [key: string]: string };
+}
+
+interface StreamProcessResult {
+  totalScanned: number;
+  totalFound: number;
+  totalRemoved: number;
+  users: UserInfo[];
+  failedUsers: FailedUserInfo[];
+}
+
+async function streamProcessMembers(options: StreamProcessOptions): Promise<StreamProcessResult> {
+  const { client, chatEntity, mode, day, adminIds, onlySearch, maxRemove, statusCallback, modeNames } = options;
+  const result: StreamProcessResult = {
+    totalScanned: 0,
+    totalFound: 0,
+    totalRemoved: 0,
+    users: [],
+    failedUsers: []
+  };
+  let offset = 0;
+  const limit = 200;
+  let hasMore = true;
+  let batchNumber = 0;
+  try {
+    while (hasMore) {
+      batchNumber++;
+      if (statusCallback) {
+        await statusCallback(
+          `🔍 扫描第 ${batchNumber} 批 (${modeNames[mode]}) | 已扫描: ${result.totalScanned} | 已找到: ${result.totalFound}${!onlySearch ? ` | 已移出: ${result.totalRemoved}` : ''}`,
+          true
+        );
+      }
+      const participantsResult: any = await client.call({
+        _: 'channels.getParticipants',
+        channel: chatEntity,
+        filter: { _: 'channelParticipantsRecent' },
+        offset: offset,
+        limit: limit,
+        hash: Long.fromNumber(0),
+      });
+      if ("users" in participantsResult && participantsResult.users.length > 0) {
+        const users = participantsResult.users as RawUser[];
+        result.totalScanned += users.length;
+        for (const user of users) {
+          const uid = Number(user.id);
+          if (adminIds.has(uid)) continue;
+          let shouldProcess = false;
+          if (mode === "1") {
+            const lastOnlineDays = getLastOnlineDays(user);
+            if (lastOnlineDays !== null && lastOnlineDays > day) {
+              shouldProcess = true;
+            }
+          } else if (mode === "2") {
+            try {
+              const userEntity = await client.resolvePeer(uid);
+              const minDate = Math.floor(Date.now() / 1000) - day * 24 * 60 * 60;
+              const res: any = await client.call({
+                _: 'messages.search',
+                peer: chatEntity,
+                q: "",
+                filter: { _: 'inputMessagesFilterEmpty' },
+                minDate,
+                maxDate: undefined as unknown as number,
+                offsetId: 0,
+                addOffset: 0,
+                limit: 1,
+                maxId: 0,
+                minId: 0,
+                hash: Long.fromNumber(0),
+                fromId: userEntity,
+              });
+              const cnt = ("count" in res) ? res.count : (res?.messages?.length || 0);
+              if (cnt === 0) {
+                shouldProcess = true;
+              }
+            } catch (_e: unknown) {
+              continue;
+            }
+          } else if (mode === "3") {
+            try {
+              const userEntity = await client.resolvePeer(uid);
+              const res: any = await client.call({
+                _: 'messages.search',
+                peer: chatEntity,
+                q: "",
+                filter: { _: 'inputMessagesFilterEmpty' },
+                minDate: undefined as unknown as number,
+                maxDate: undefined as unknown as number,
+                offsetId: 0,
+                addOffset: 0,
+                limit: 1,
+                maxId: 0,
+                minId: 0,
+                hash: Long.fromNumber(0),
+                fromId: userEntity,
+              });
+              const cnt = ("count" in res) ? res.count : (res?.messages?.length || 0);
+              if (cnt < day) {
+                shouldProcess = true;
+              }
+            } catch (_e: unknown) {
+              continue;
+            }
+          } else if (mode === "4") {
+            if ('deleted' in user && (user as { deleted?: boolean }).deleted) {
+              shouldProcess = true;
+            }
+          } else if (mode === "5") {
+            shouldProcess = true;
+          }
+          if (shouldProcess) {
+            result.totalFound++;
+            const userInfo: UserInfo = {
+              id: uid,
+              username: (user as { username?: string }).username || "",
+              first_name: (user as { firstName?: string }).firstName || "",
+              last_name: (user as { lastName?: string }).lastName || "",
+              is_deleted: 'deleted' in user && (user as { deleted?: boolean }).deleted || false,
+              last_online: null,
+            };
+            if (user.status) {
+              const statusType = user.status._;
+              if (statusType === 'userStatusOffline') {
+                // wasOnline is a Unix timestamp (number) when status is userStatusOffline
+                userInfo.last_online = new Date(user.status.wasOnline * 1000).toISOString();
+              } else if (statusType === 'userStatusOnline') {
+                userInfo.last_online = "online";
+              } else if (statusType === 'userStatusRecently') {
+                userInfo.last_online = "recently";
+              } else if (statusType === 'userStatusLastWeek') {
+                userInfo.last_online = "last_week";
+              } else if (statusType === 'userStatusLastMonth') {
+                userInfo.last_online = "last_month";
+              }
+            }
+            result.users.push(userInfo);
+            if (!onlySearch) {
+              if (maxRemove && result.totalRemoved >= maxRemove) {
+                logger.info(`已达到移除上限 ${maxRemove} 人，停止处理`);
+                hasMore = false;
+                break;
+              }
+              try {
+                await removeChatMember(client, chatEntity, uid);
+                result.totalRemoved++;
+                if (result.totalRemoved % 5 === 0 && statusCallback) {
+                  const limitInfo = maxRemove ? ` / 上限: ${maxRemove}` : '';
+                  await statusCallback(
+                    `⚡ 流式处理中 (${modeNames[mode]}) | 扫描: ${result.totalScanned} | 找到: ${result.totalFound} | 已移出: ${result.totalRemoved}${limitInfo}`,
+                    false
+                  );
+                }
+                await sleep(1000 + Math.random() * 500);
+                if (maxRemove && result.totalRemoved >= maxRemove) {
+                  logger.info(`已达到移除上限 ${maxRemove} 人，停止处理`);
+                  hasMore = false;
+                  break;
+                }
+              } catch (error: unknown) {
+                logger.error(`Failed to remove user ${uid}:`, error);
+                const failedUser: FailedUserInfo = {
+                  ...userInfo,
+                  error_message: getErrorMessage(error)
+                };
+                result.failedUsers.push(failedUser);
+              }
+            }
+          }
+        }
+        if (users.length < limit) {
+          hasMore = false;
+          logger.info(`批次 ${batchNumber}: 获取 ${users.length} 人，少于限制 ${limit}，结束扫描`);
+        } else {
+          offset += limit;
+          await sleep(100);
+        }
+      } else {
+        hasMore = false;
+      }
+      if (offset > 50000) {
+        logger.warn("达到最大扫描限制 50000 人");
+        break;
+      }
+    }
+    if (statusCallback) {
+      if (onlySearch) {
+        await statusCallback(
+          `✅ 搜索完成 (${modeNames[mode]}) | 扫描: ${result.totalScanned} 人 | 找到: ${result.totalFound} 人`,
+          true
+        );
+      } else {
+        await statusCallback(
+          `✅ 清理完成 (${modeNames[mode]}) | 扫描: ${result.totalScanned} 人 | 移出: ${result.totalRemoved}/${result.totalFound} 人`,
+          true
+        );
+      }
+    }
+    return result;
+  } catch (error: unknown) {
+    logger.error("Stream process error:", error);
+    if (statusCallback) {
+      await statusCallback(`❌ 处理失败: ${error}`, true);
+    }
+    throw error;
+  }
+}
+
+async function getAdminIds(client: TelegramClient, chatEntity: any): Promise<Set<number>> {
+  const adminIds = new Set<number>();
+  try {
+    const result: any = await client.call({
+      _: 'channels.getParticipants',
+      channel: chatEntity,
+      filter: { _: 'channelParticipantsAdmins' },
+      offset: 0,
+      limit: 200,
+      hash: Long.fromNumber(0),
+    });
+    if ("users" in result) {
+      const admins = result.users as RawUser[];
+      for (const admin of admins) {
+        adminIds.add(Number(admin.id));
+      }
+    }
+  } catch (error: unknown) {
+    logger.error("Failed to get admins:", error);
+  }
+  return adminIds;
+}
+
+async function checkCache(chatId: number, mode: string, day: number, statusCallback?: (message: string, forceUpdate?: boolean) => Promise<void>): Promise<CacheData | null> {
+  const cached = getFromCache(chatId, mode, day);
+  if (cached && statusCallback) {
+    await statusCallback(`📋 使用缓存: ${cached.total_found} 名用户`, true);
+  }
+  return cached;
+}
+
+function getHelpText(): string {
+  return `<b>🧹 群成员清理工具 Pro</b>
+
+<b>🔧 使用格式:</b>
+<code>${mainPrefix}clean_member ＜模式＞ ＜参数＞ [chat:-100xxx] [limit:数量] [search]</code>
+
+<b>📋 清理模式:</b>
+┌─────────────────────────
+│ <b>1</b> ＜天数＞ → 未上线超过N天
+│ <b>2</b> ＜天数＞ → 未发言超过N天  
+│ <b>3</b> ＜数量＞ → 发言少于N条
+│ <b>4</b> → 已注销账户
+│ <b>5</b> → 所有普通成员 ⚠️
+└─────────────────────────
+
+<b>⚙️ 可选参数:</b>
+• <code>chat:-100xxx</code> - 指定群组ID(跨群查询)
+• <code>limit:100</code> - 限制最多移出100人
+• <code>search</code> - 仅搜索不移出（预览模式）
+
+<b>💡 使用示例:</b>
+• <code>${mainPrefix}clean_member 1 30 search</code>
+  └ 搜索30天未上线的用户（预览）
+• <code>${mainPrefix}clean_member 2 60 limit:50</code>
+  └ 移出60天未发言，最多50人
+• <code>${mainPrefix}clean_member 4 chat:-1001234567890</code>
+  └ 移出指定群组的注销账户
+• <code>${mainPrefix}clean_member 1 7 limit:10</code>
+  └ 移出7天未上线，最多10人
+`;
+}
+
+const clean_member = async (msg: MessageContext) => {
+  const client = await getGlobalClient();
+  if (!client) {
+    await msg.edit({ text: html`❌ 客户端未初始化` });
+    return;
+  }
+  if (!(await checkAdminPermissions(msg))) {
+    await msg.edit({ text: html`❌ 权限不足，需要管理员权限` });
+    return;
+  }
+  const lines = msg.text?.trim()?.split(/\r?\n/g) || [];
+  const parts = lines?.[0]?.split(/\s+/) || [];
+  const [, ...args] = parts;
+  const mode = (args[0] || "").toLowerCase();
+  if (!mode) {
+    await msg.edit({ text: html(getHelpText()) });
+    return;
+  }
+  if (mode === "help" || mode === "h") {
+    await msg.edit({ text: html(getHelpText()) });
+    return;
+  }
+  let day = 0;
+  let onlySearch = false;
+  let maxRemove: number | undefined = undefined;
+  let targetChatId: string | number | undefined = undefined;
+  
+  if (args.some((arg) => arg.toLowerCase() === "search")) {
+    onlySearch = true;
+  }
+  
+  const limitArg = args.find((arg) => arg.toLowerCase().startsWith("limit:"));
+  if (limitArg) {
+    const limitValue = limitArg.split(":")[1];
+    const parsed = parseInt(limitValue);
+    if (!isNaN(parsed) && parsed > 0) {
+      maxRemove = parsed;
+    }
+  }
+  
+  const chatArg = args.find((arg) => arg.toLowerCase().startsWith("chat:"));
+  if (chatArg) {
+    const chatValue = chatArg.split(":")[1];
+    if (chatValue) {
+      targetChatId = chatValue;
+    }
+  }
+  if (mode === "1") {
+    if (args.length < 2) {
+      await msg.edit({
+        text: html`❌ <b>参数不足</b><br><br>模式1需要指定天数<br>💡 示例: <code>${mainPrefix}clean_member 1 7 search</code>`,
+      });
+      return;
+    }
+    day = parseInt(args[1]);
+    if (isNaN(day) || day < 1) {
+      await msg.edit({ text: html`❌ <b>参数错误</b><br><br>天数必须为正整数` });
+      return;
+    }
+    day = Math.max(day, 7);
+  } else if (mode === "2") {
+    if (args.length < 2) {
+      await msg.edit({
+        text: html`❌ <b>参数不足</b><br><br>模式2需要指定天数<br>💡 示例: <code>${mainPrefix}clean_member 2 30 search</code>`,
+      });
+      return;
+    }
+    day = parseInt(args[1]);
+    if (isNaN(day) || day < 1) {
+      await msg.edit({ text: html`❌ <b>参数错误</b><br><br>天数必须为正整数` });
+      return;
+    }
+    day = Math.max(day, 7);
+  } else if (mode === "3") {
+    if (args.length < 2) {
+      await msg.edit({
+        text: html`❌ <b>参数不足</b><br><br>模式3需要指定发言数<br>💡 示例: <code>${mainPrefix}clean_member 3 5 search</code>`,
+      });
+      return;
+    }
+    day = parseInt(args[1]);
+    if (isNaN(day) || day < 1) {
+      await msg.edit({ text: html`❌ <b>参数错误</b><br><br>发言数必须为正整数` });
+      return;
+    }
+  } else if (mode === "4" || mode === "5") {
+    day = 0;
+  } else {
+    await msg.edit({ text: html(getHelpText()) });
+    return;
+  }
+
+  const modeNames: { [key: string]: string } = {
+    "1": `未上线超过${day}天的用户`,
+    "2": `未发言超过${day}天的用户`,
+    "3": `发言少于${day}条的用户`,
+    "4": "已注销的账户",
+    "5": "所有普通成员",
+  };
+
+  let chatTitle = getTitle(msg.chat) || "当前群组";
+  let chatId: any = msg.chat.id;
+  let channelEntity: any;
+  
+  if (targetChatId) {
+    try {
+      channelEntity = await client.resolvePeer(targetChatId);
+      try {
+        const chatInfo = await client.getChat(targetChatId);
+        if (chatInfo) {
+          chatTitle = getTitle(chatInfo) || "目标群组";
+        }
+      } catch (e: unknown) { logger.warn('获取聊天信息失败', e) }
+      chatId = channelEntity;
+    } catch (error: unknown) {
+      await msg.edit({
+        text: html`❌ <b>错误：</b>无法访问指定群组<br><br>请确认群组ID正确且您是该群组成员<br>错误: ${htmlEscape(getErrorMessage(error))}`,
+      });
+      return;
+    }
+  } else {
+    if (!chatId) {
+      await msg.edit({
+        text: html`❌ 无法获取群组ID，请在群组中使用或指定chat参数`,
+      });
+      return;
+    }
+    channelEntity = await client.resolvePeer(chatId);
+  }
+  const startMessage = onlySearch ? 
+    `🔍 开始搜索: ${modeNames[mode]}` : 
+    `🧹 开始清理: ${modeNames[mode]}`;
+  
+  await msg.edit({
+    text: html`📋 <b>群组清理任务启动</b><br><br>🏷️ 群组: <b>${htmlEscape(chatTitle)}</b><br>🎯 ${startMessage}<br><br>⏳ 正在初始化...`,
+  });
+  let savedMessageId: number | null = null;
+  let useOriginalMessage = true;
+  let lastUpdateTime = Date.now();
+  const MIN_UPDATE_INTERVAL = 2000;
+  const statusCallback = async (message: string, forceUpdate: boolean = false) => {
+    try {
+      const now = Date.now();
+      if (!forceUpdate && now - lastUpdateTime < MIN_UPDATE_INTERVAL) {
+        return;
+      }
+      lastUpdateTime = now;
+      const progressMessage = html`📋 <b>群组清理进度</b><br><br>🏷️ 群组: <b>${htmlEscape(chatTitle)}</b><br>📊 ${message}<br><br>⏰ 更新时间: ${new Date().toLocaleTimeString('zh-CN')}`;
+      if (useOriginalMessage) {
+        try {
+          await msg.edit({
+            text: progressMessage,
+          });
+        } catch (editError: unknown) {
+          logger.info("原消息编辑失败，切换到收藏夹:", editError);
+          useOriginalMessage = false;
+          const savedMsg = await client.sendText("me", html`⚠️ <b>原消息已被删除，进度转移到收藏夹</b><br><br>${message}`);
+          if (savedMsg && typeof savedMsg.id === 'number') {
+            savedMessageId = savedMsg.id;
+          }
+        }
+      } else {
+        if (savedMessageId) {
+          try {
+            await msg.edit({ text: String(savedMessageId) });
+          } catch (_e: unknown) {
+            const newMsg = await client.sendText("me", progressMessage);
+            if (newMsg && typeof newMsg.id === 'number') {
+              savedMessageId = newMsg.id;
+            }
+          }
+        } else {
+          const newMsg = await client.sendText("me", progressMessage);
+          if (newMsg && typeof newMsg.id === 'number') {
+            savedMessageId = newMsg.id;
+          }
+        }
+      }
+    } catch (error: unknown) {
+      logger.info("Status update failed:", error);
+    }
+  };
+  
+  let numericChatId: number = 0;
+  try {
+    if (typeof chatId === "object" && "channelId" in chatId) {
+      numericChatId = Number((chatId as { channelId?: unknown }).channelId);
+    } else if (typeof chatId === "object" && "chatId" in chatId) {
+      numericChatId = Number((chatId as { chatId?: unknown }).chatId);
+    } else {
+      numericChatId = Number(chatId);
+    }
+  } catch (error: unknown) {
+    logger.error("Failed to extract numeric chat ID:", error);
+  }
+  if (onlySearch && numericChatId) {
+    const cached = await checkCache(numericChatId, mode, day, statusCallback);
+    if (cached) {
+      try {
+        await generateReport(cached);
+      } catch (error: unknown) {
+        logger.error("Failed to generate report:", error);
+      }
+      await msg.edit({
+        text: html`✅ 搜索完成（缓存）<br><br>📊 找到 ${cached.total_found} 名符合条件用户<br>📁 报告已保存至 \`${CACHE_DIR}/\`<br><br>💡 执行清理: \`${mainPrefix}clean_member ${mode}${day > 0 ? " " + day : ""}\``,
+      });
+      return;
+    }
+  }
+  await statusCallback(`👤 获取管理员权限...`, true);
+  const adminIds = await getAdminIds(client, channelEntity);
+  await statusCallback(
+    `🎯 准备${onlySearch ? "搜索" : "清理"}: ${modeNames[mode]} | 管理员: ${adminIds.size}`,
+    true
+  );
+  const result = await streamProcessMembers({
+    client,
+    chatEntity: channelEntity,
+    mode,
+    day,
+    adminIds,
+    onlySearch,
+    maxRemove,
+    statusCallback,
+    modeNames
+  });
+  if (numericChatId) {
+    const cacheData: CacheData = {
+      chat_id: numericChatId,
+      chat_title: chatTitle,
+      mode,
+      day,
+      search_time: new Date().toISOString(),
+      total_found: result.totalFound,
+      users: result.users
+    };
+    setCache(numericChatId, mode, day, cacheData);
+  }
+  let finalMessage = "";
+  if (onlySearch) {
+    finalMessage = `✅ <b>搜索完成</b> - ${modeNames[mode]}\n\n` +
+      `📊 扫描人数: <code>${result.totalScanned}</code> 人\n` +
+      `🎯 符合条件: <code>${result.totalFound}</code> 人\n` +
+      `📁 报告位置: <code>${CACHE_DIR}/</code>\n\n` +
+      `💡 <b>执行清理命令:</b>\n` +
+      `<code>${mainPrefix}clean_member ${mode}${day > 0 ? " " + day : ""}</code>`;
+  } else {
+    const successRate = result.totalFound > 0 
+      ? ((result.totalRemoved / result.totalFound) * 100).toFixed(1) 
+      : "0";
+    const failedCount = result.totalFound - result.totalRemoved;
+    const limitReached = maxRemove && result.totalRemoved >= maxRemove;
+    
+    finalMessage = `🎉 <b>清理完成</b> - ${modeNames[mode]}${limitReached ? " (已达上限)" : ""}\n\n` +
+      `📊 扫描人数: <code>${result.totalScanned}</code> 人\n` +
+      `🎯 符合条件: <code>${result.totalFound}</code> 人\n` +
+      `✅ 成功移出: <code>${result.totalRemoved}</code> 人` +
+      (maxRemove ? ` / 上限 <code>${maxRemove}</code>` : "") + `\n` +
+      `❌ 失败/跳过: <code>${failedCount}</code> 人\n` +
+      `📈 成功率: <code>${successRate}%</code>\n` +
+      `📁 报告位置: <code>${CACHE_DIR}/</code>`;
+  }
+  try {
+    if (useOriginalMessage) {
+      await msg.edit({
+        text: html(finalMessage),
+      });
+    } else {
+      if (savedMessageId) {
+        await msg.edit({ text: String(savedMessageId) });
+      } else {
+        await client.sendText("me", html(finalMessage));
+      }
+    }
+  } catch (error: unknown) {
+    logger.error("显示最终结果失败:", error);
+    await client.sendText("me", html(finalMessage));
+  }
+  if (!useOriginalMessage) {
+    try {
+      const reportMessage = `📋 <b>群组清理最终报告</b>\n\n` +
+        `🏷️ 群组: <b>${htmlEscape(chatTitle)}</b>\n` +
+        `🔧 模式: ${modeNames[mode]}\n` +
+        `📅 时间: ${new Date().toLocaleString('zh-CN')}\n\n` +
+        `⚠️ 注意：原消息已被删除，报告已转移到收藏夹\n\n` +
+        finalMessage;
+      
+      await client.sendText("me", html(reportMessage));
+      logger.info("完整报告已发送到收藏夹");
+    } catch (error: unknown) {
+      logger.error("发送完整报告失败:", error);
+    }
+  }
+  
+  if (!onlySearch && result.failedUsers.length > 0 && numericChatId) {
+    try {
+      const failedReportPath = await generateFailedReport(result.failedUsers, chatTitle, numericChatId);
+      const failedCaption = `⚠️ <b>清理失败用户报告</b>\n\n` +
+        `🏷️ 群组: <b>${htmlEscape(chatTitle)}</b>\n` +
+        `❌ 失败数量: <code>${result.failedUsers.length}</code> 人\n` +
+        `📁 报告文件: <code>${path.basename(failedReportPath)}</code>\n\n` +
+        `📊 详细信息请查看 CSV 文件`;
+      await client.sendMedia("me", {
+        type: 'document' as const,
+        file: failedReportPath,
+        caption: html(failedCaption),
+      });
+      logger.info(`失败用户报告已发送到收藏夹: ${failedReportPath}`);
+    } catch (error: unknown) {
+      logger.error("生成或发送失败报告失败:", error);
+    }
+  }
+};
+
+class CleanMemberPlugin extends Plugin {
+
+  description: string = getHelpText();
+
+  cleanup(): void {
+    cache.clear();
+  }
+
+  cmdHandlers: Record<string, (msg: MessageContext) => Promise<void>> = {
+    clean_member
+  };
+}
+
+export default new CleanMemberPlugin();

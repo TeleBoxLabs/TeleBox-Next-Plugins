@@ -6,7 +6,9 @@
 import { Plugin } from "@utils/pluginBase";
 import { getPrefixes } from "@utils/pluginManager";
 import type { MessageContext } from "@mtcute/dispatcher";
+import type { Message } from "@mtcute/node";
 import { html } from "@mtcute/html-parser";
+import type { DisplayableEntity, EntityWithId } from "@utils/mtcuteTypes";
 import axios from "axios";
 import { JSONFilePreset } from "lowdb/node";
 import * as path from "path";
@@ -14,6 +16,8 @@ import { createDirectoryInAssets } from "@utils/pathHelpers";
 import { getGlobalClient } from "@utils/globalClient";
 import { TelegramFormatter } from "@utils/telegramFormatter";
 import { safeGetMessages } from "@utils/safeGetMessages";
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
 
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
@@ -183,7 +187,7 @@ async function callGemini(
     );
 
     const parts = response.data?.candidates?.[0]?.content?.parts || [];
-    return parts.map((p: any) => p.text || "").join("");
+    return parts.map((p: { text?: string }) => p.text || "").join("");
 }
 
 async function callAI(provider: Provider, prompt: string, content: string, timeout: number): Promise<string> {
@@ -197,7 +201,7 @@ async function callAI(provider: Provider, prompt: string, content: string, timeo
 type MessageData = { time: string; sender: string; text: string };
 
 // 将各种 ID 类型统一转换为字符串进行比较
-function normalizeId(id: any): string {
+function normalizeId(id: string | number | bigint | { userId?: unknown; channelId?: unknown; chatId?: unknown; value?: unknown } | null | undefined): string {
     if (id === null || id === undefined) return "";
     // 处理 BigInt
     if (typeof id === "bigint") return id.toString();
@@ -211,7 +215,7 @@ function normalizeId(id: any): string {
 }
 
 async function collectMessages(
-    chatPeerId: any,  // msg.chat.id
+    chatPeerId: string | number,
     filterSenderId: string | null,  // senderId 用于过滤（数字形式的 userId）
     limit: { type: "count"; value: number } | { type: "time"; seconds: number } | { type: "today" }
 ): Promise<MessageData[]> {
@@ -224,7 +228,7 @@ async function collectMessages(
     const maxCount = limit.type === "count" ? limit.value : 10000;
 
     // 构建迭代器参数
-    const iterParams: any = { limit: maxCount };
+    const iterParams: Record<string, unknown> = { limit: maxCount };
 
     // 如果需要按用户过滤，使用 fromUser 参数（直接让 API 过滤，避免 flood wait）
     if (filterSenderId) {
@@ -232,48 +236,52 @@ async function collectMessages(
             // 尝试获取用户实体
             const userEntity = await client.resolvePeer(filterSenderId);
             iterParams.fromUser = userEntity;
-            console.log(`[UAI] Using fromUser filter: ${filterSenderId}`);
-        } catch (e) {
-            console.log(`[UAI] Failed to get entity for ${filterSenderId}, falling back to manual filter`);
+            logger.info(`[UAI] Using fromUser filter: ${filterSenderId}`);
+        } catch (e: unknown) {
+            logger.info(`[UAI] Failed to get entity for ${filterSenderId}, falling back to manual filter:`, e);
             // 如果获取实体失败，使用较小的扫描范围避免 flood
             iterParams.limit = Math.min(maxCount * 20, 3000);
         }
     }
 
-    const fetchedMessages = await client.getMessages(chatPeerId, iterParams);
+    const msgs = await client.searchMessages({ ...iterParams, chatId: chatPeerId });
     const normalizedFilterId = filterSenderId ? normalizeId(filterSenderId) : null;
     const needManualFilter = filterSenderId && !iterParams.fromUser;
 
-    for (const msg of fetchedMessages) {
-        const m = msg as any;
+    for (const msg of msgs) {
+        if (!msg) continue;
 
         // 时间检查 - 按数量获取时不检查时间
-        if (limit.type !== "count" && m.date < startTime) {
+        // mtcute: msg.date is already a Date object (not unix timestamp)
+        if (limit.type !== "count" && msg.date.getTime() / 1000 < startTime) {
             break;
         }
 
         // 手动过滤发送者（仅当 fromUser 不可用时）
+        // mtcute: msg.sender is a User/Peer; use raw.id for numeric ID
         if (needManualFilter && normalizedFilterId) {
-            const msgSenderId = normalizeId(m.senderId);
+            const senderObj = msg.sender as unknown as EntityWithId | null;
+            const msgSenderId = normalizeId(senderObj?.raw?.id ?? (msg.sender as unknown as EntityWithId | null)?.id);
             if (msgSenderId !== normalizedFilterId) continue;
         }
 
-        if (!m.message) continue;
+        if (!msg.text) continue;
 
         // 过滤掉插件生成的分析结果消息
-        if (m.message.startsWith("📊 分析结果") || m.message.startsWith("📊 总结结果")) continue;
+        if (msg.text.startsWith("📊 分析结果") || msg.text.startsWith("📊 总结结果")) continue;
 
-        const sender = m.sender?.firstName || m.sender?.username || "未知";
+        const senderUser = msg.sender as unknown as DisplayableEntity | null;
+        const sender = senderUser?.firstName || senderUser?.username || "未知";
         messages.push({
-            time: formatDate(new Date(m.date * 1000)),
+            time: formatDate(msg.date),
             sender,
-            text: m.message
+            text: msg.text
         });
 
         if (messages.length >= maxCount) break;
     }
 
-    console.log(`[UAI] Collected ${messages.length} messages`);
+    logger.info(`[UAI] Collected ${messages.length} messages`);
     return messages.reverse();
 }
 
@@ -354,14 +362,14 @@ class UAIPlugin extends Plugin {
                     db.data.collapse = true;
                     await db.write();
                     await msg.edit({ 
-                        text: html("✅ 已开启AI回答折叠显示\n\nAI回答将显示在可折叠的块引用中"),
+                        text: html("✅ 已开启AI回答折叠显示<br><br>AI回答将显示在可折叠的块引用中"),
                     });
                     return;
                 } else if (action === "off") {
                     db.data.collapse = false;
                     await db.write();
                     await msg.edit({ 
-                        text: html("✅ 已关闭AI回答折叠显示\n\nAI回答将正常显示"),
+                        text: html("✅ 已关闭AI回答折叠显示<br><br>AI回答将正常显示"),
                     });
                     return;
                 } else {
@@ -545,11 +553,12 @@ class UAIPlugin extends Plugin {
                 let sourceName = "未知";
                 let sourceUsername: string | undefined = undefined;
 
-                const fwdFrom = (repliedMsg as any).fwdFrom;
+                // mtcute: forward.info replaces gramjs fwdFrom; access raw TL header for fromId
+                const fwdFrom = repliedMsg.forward?.raw;
                 if (fwdFrom?.fromId) {
                     // 转发消息，获取原始来源
                     const fwdId = fwdFrom.fromId;
-                    if (fwdId.channelId) {
+                    if ('channelId' in fwdId) {
                         // 转发自频道 - 不按用户过滤，改为获取该频道消息
                         const channelPeerId = `-100${fwdId.channelId}`;
                         await msg.edit({ text: html("🔄 正在收集频道消息...") });
@@ -566,10 +575,10 @@ class UAIPlugin extends Plugin {
                         let channelName = "频道";
                         let channelUsername: string | undefined = undefined;
                         try {
-                            const channelEntity = await client.resolvePeer(channelPeerId);
-                            channelName = (channelEntity as any).title || (channelEntity as any).username || "频道";
-                            channelUsername = (channelEntity as any).username;
-                        } catch { }
+                            const channelEntity = await client.resolvePeer(channelPeerId) as { title?: string; username?: string };
+                            channelName = channelEntity.title || channelEntity.username || "频道";
+                            channelUsername = channelEntity.username;
+                        } catch (e: unknown) { logger.error('[uai] resolvePeer failed:', e); }
                         const displayName = channelUsername ? `@${channelUsername}` : channelName;
 
                         const userInfo = `来源: ${channelName}${channelUsername ? ` (@${channelUsername})` : ""}`;
@@ -584,24 +593,30 @@ class UAIPlugin extends Plugin {
                         await msg.delete({ revoke: true });
                         await client.sendText(chatPeerId, html(resultText));
                         return;
-                    } else if (fwdId.userId) {
+                    } else if ('userId' in fwdId) {
                         sourceId = fwdId.userId.toString();
                         try {
-                            const entity = await client.resolvePeer(fwdId.userId) as any;
+                            const entity = await client.resolvePeer(fwdId.userId) as { firstName?: string; username?: string };
                             sourceName = entity.firstName || entity.username || "用户";
                             sourceUsername = entity.username;
-                        } catch { }
+                        } catch (e: unknown) {
+                            logger.debug("uai: resolvePeer failed for forward source", e);
+                        }
                     }
                 } else {
                     // 非转发消息，使用发送者
-                    const senderId = (repliedMsg as any).senderId;
+                    // mtcute: msg.sender is a User/Peer; access raw.id for numeric sender ID
+                    const senderPeer = repliedMsg.sender as unknown as EntityWithId | null;
+                    const senderId = senderPeer?.raw?.id ?? (repliedMsg.sender as unknown as EntityWithId | null)?.id;
                     if (senderId) {
                         sourceId = senderId.toString();
                         try {
-                            const entity = await client.resolvePeer(senderId) as any;
+                            const entity = await client.resolvePeer(Number(senderId)) as DisplayableEntity;
                             sourceName = entity.firstName || entity.username || "用户";
                             sourceUsername = entity.username;
-                        } catch { }
+                        } catch (e: unknown) {
+                            logger.debug("uai: resolvePeer failed for sender", e);
+                        }
                     }
                 }
 
@@ -635,8 +650,8 @@ class UAIPlugin extends Plugin {
                 await msg.delete({ revoke: true });
                 await client.sendText(chatPeerId, html(resultText));
 
-            } catch (err: any) {
-                await msg.edit({ text: html`❌ 错误: ${htmlEscape(err.message || String(err))}` });
+            } catch (err: unknown) {
+                await msg.edit({ text: html`❌ 错误: ${htmlEscape(getErrorMessage(err) || String(err))}` });
             }
         }
     };

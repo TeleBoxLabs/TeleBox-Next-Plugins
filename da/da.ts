@@ -6,21 +6,19 @@ import { html } from "@mtcute/html-parser";
 import { getGlobalClient } from "@utils/globalClient";
 import * as path from "path";
 import * as fs from "fs";
-import bigInt from "big-integer";
 import { Low } from "lowdb";
 import { JSONFile } from "lowdb/node";
 
 import { safeGetMe } from "@utils/authGuards";
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
+import { Long } from "@mtcute/core";
+import { sleep } from "@utils/asyncHelpers";
+import { htmlEscape } from "@utils/htmlEscape";
+
 // 获取命令前缀
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
-
-// HTML转义工具（每个插件必须实现）
-const htmlEscape = (text: string): string => 
-  text.replace(/[&<>"']/g, m => ({ 
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', 
-    '"': '&quot;', "'": '&#x27;' 
-  }[m] || m));
 
 // 帮助文档常量
 const help_text = `<b>批量删除</b>
@@ -97,11 +95,7 @@ const removeTask = async (chatId: string) => {
 };
 
 // 初始化数据库
-initDatabase().catch(console.error);
-
-// 工具函数
-const sleep = (ms: number): Promise<void> =>
-  new Promise((resolve) => setTimeout(resolve, ms));
+initDatabase().catch((e: unknown) => logger.error("[da] init database failed:", e));
 
 /**
  * 使用messages.search直接搜索自己的消息 - 高效版本
@@ -116,7 +110,7 @@ async function searchMyMessagesOptimized(
   const allMyMessages: any[] = [];
   let offsetId = 0;
 
-  console.log(`[DA] 使用优化搜索模式，直接定位自己的消息`);
+  logger.info(`[DA] 使用优化搜索模式，直接定位自己的消息`);
 
   try {
     while (true) {
@@ -134,24 +128,24 @@ async function searchMyMessagesOptimized(
         limit: batchSize,
         maxId: 0,
         minId: 0,
-        hash: 0 as any
-      } as any);
+        hash: Long.fromInt(0)
+      });
 
       // 正确处理搜索结果类型
-      const resultMessages = (searchResult as any).messages;
+      const resultMessages = (searchResult as { messages?: unknown[] }).messages;
       if (!resultMessages || resultMessages.length === 0) {
-        console.log(`[DA] 搜索完成，共找到 ${allMyMessages.length} 条自己的消息`);
+        logger.info(`[DA] 搜索完成，共找到 ${allMyMessages.length} 条自己的消息`);
         break;
       }
 
-      const messages = resultMessages.filter((m: any) => 
+      const messages = (resultMessages as { _?: string; fromId?: { userId?: { toString(): string } }; id?: number }[]).filter((m) =>
         m._ === "message" && m.fromId?.userId?.toString() === myId.toString()
       );
 
       if (messages.length > 0) {
         allMyMessages.push(...messages);
-        offsetId = messages[messages.length - 1].id;
-        console.log(`[DA] 批次搜索到 ${messages.length} 条消息，总计 ${allMyMessages.length} 条`);
+        offsetId = messages[messages.length - 1].id ?? 0;
+        logger.info(`[DA] 批次搜索到 ${messages.length} 条消息，总计 ${allMyMessages.length} 条`);
       } else {
         break;
       }
@@ -159,8 +153,8 @@ async function searchMyMessagesOptimized(
       // 避免API限制
       await sleep(200);
     }
-  } catch (error: any) {
-    console.error("[DA] 优化搜索失败:", error);
+  } catch (error: unknown) {
+    logger.error("[DA] 优化搜索失败:", error);
     return [];
   }
 
@@ -218,23 +212,23 @@ ${recentErrors ? `<b>⚠️ 最近错误:</b>\n${recentErrors}` : ""}`;
     // 如果已有收藏夹消息，则编辑；否则创建新消息
     if (task.savedMessageId) {
       try {
-        await (client as any).editMessage({
-          peer: 'me',
+        await client.editMessage({
+          chatId: 'me',
           message: task.savedMessageId,
           text: message,
         });
         return task.savedMessageId;
-      } catch (editError) {
+      } catch (editError: unknown) {
         // 如果编辑失败，创建新消息
-        console.log("编辑收藏夹消息失败，创建新消息:", editError);
+        logger.info("编辑收藏夹消息失败，创建新消息:", editError);
       }
     }
     
     // 创建新消息
     const savedMsg = await client.sendText("me", html(message));
     return savedMsg.id;
-  } catch (error) {
-    console.error("发送进度到收藏夹失败:", error);
+  } catch (error: unknown) {
+    logger.error("发送进度到收藏夹失败:", error);
     return undefined;
   }
 };
@@ -249,7 +243,7 @@ const fastDeleteBatch = async (
   try {
     // 直接批量删除，不等待
     await client.deleteMessagesById(
-      chatId as any,
+      chatId,
       messages.map((m) => m.id),
       { revoke: true }
     );
@@ -258,10 +252,11 @@ const fastDeleteBatch = async (
     await saveTask(task);
     return true;
     
-  } catch (error: any) {
+  } catch (error: unknown) {
     // FLOOD_WAIT处理
-    if (error.message?.includes("FLOOD_WAIT")) {
-      const waitTime = parseInt(error.message.match(/\d+/)?.[0] || "30") * 1000;
+    const errMsg = getErrorMessage(error);
+    if (errMsg.includes("FLOOD_WAIT")) {
+      const waitTime = parseInt(errMsg.match(/\d+/)?.[0] || "30") * 1000;
       await sleep(waitTime);
       return fastDeleteBatch(client, chatId, messages, task); // 重试
     }
@@ -269,10 +264,10 @@ const fastDeleteBatch = async (
     // 批量失败，逐个删除
     for (const message of messages) {
       try {
-        await client.deleteMessagesById(chatId as any, [message.id], { revoke: true });
+        await client.deleteMessagesById(chatId as never, [message.id], { revoke: true });
         task.deletedMessages++;
         await sleep(50);
-      } catch {}
+      } catch (e: unknown) { logger.warn('操作失败', e) }
     }
     
     await saveTask(task);
@@ -294,7 +289,7 @@ const da = async (msg: MessageContext) => {
     return;
   }
 
-  if (!msg.chat.id || (msg.chat as any).chatType === "private") {
+  if (!msg.chat.id || !('chatType' in msg.chat)) {
     await msg.edit({ text: html("❌ 仅群组可用") });
     return;
   }
@@ -376,8 +371,8 @@ const da = async (msg: MessageContext) => {
       if ("title" in chat) {
         chatName = chat.title || "未知群组";
       }
-    } catch (error) {
-      console.error("获取群聊信息失败:", error);
+    } catch (error: unknown) {
+      logger.error("获取群聊信息失败:", error);
     }
 
     // 创建或恢复任务
@@ -412,46 +407,46 @@ const da = async (msg: MessageContext) => {
     let isAdmin = false;
     try {
       const chat = await client.getChat(chatId);
-      if ((chat as any)?.chatType === "channel" || (chat as any)?.chatType === "supergroup") {
+      if (chat.chatType === "channel" || chat.chatType === "supergroup") {
         try {
           const result: any = await client.call({
             _: "channels.getParticipant",
-            channel: chatId,
+            channel: await client.resolveChannel(chatId),
             participant: { _: "inputPeerSelf" },
-          } as any);
+          });
           isAdmin =
             result.participant?._ === "channelParticipantAdmin" ||
             result.participant?._ === "channelParticipantCreator";
-        } catch (permError) {
-          console.log("权限检查失败，尝试备用方法:", permError);
+        } catch (permError: unknown) {
+          logger.info("权限检查失败，尝试备用方法:", permError);
           try {
             const adminResult: any = await client.call({
               _: "channels.getParticipants",
-              channel: chatId,
+              channel: await client.resolveChannel(chatId),
               filter: { _: "channelParticipantsAdmins" },
               offset: 0,
               limit: 100,
-              hash: 0 as any,
-            } as any);
+              hash: Long.fromInt(0),
+            });
             if ("users" in adminResult) {
-              const admins = adminResult.users as any[];
+              const admins = (adminResult as { users?: { id: number | string }[] }).users ?? [];
               isAdmin = admins.some(
                 (admin) => Number(admin.id) === Number(myId)
               );
             }
-          } catch (adminListError) {
-            console.log("管理员列表获取失败:", adminListError);
+          } catch (adminListError: unknown) {
+            logger.info("管理员列表获取失败:", adminListError);
             isAdmin = false;
           }
         }
       }
-    } catch (e) {
-      console.error("权限检查失败:", e);
+    } catch (e: unknown) {
+      logger.error("权限检查失败:", e);
       isAdmin = false;
     }
 
     // 启动日志
-    console.log(`[DA] 任务启动 - 群组: ${chatName} | 模式: ${isAdmin ? "管理员" : "普通用户"}`);
+    logger.info(`[DA] 任务启动 - 群组: ${chatName} | 模式: ${isAdmin ? "管理员" : "普通用户"}`);
 
     // 自动发送任务开始状态到收藏夹
     const msgId = await sendProgressToSaved(client, task, "任务已启动");
@@ -465,7 +460,7 @@ const da = async (msg: MessageContext) => {
 
     if (isAdmin) {
       // 管理员模式：使用传统遍历删除所有消息
-      console.log(`[DA] 管理员模式：遍历删除所有消息`);
+      logger.info(`[DA] 管理员模式：遍历删除所有消息`);
       let messages: any[] = [];
       
       const deleteIterator = client.iterHistory(chatId, { minId: 1 });
@@ -496,21 +491,21 @@ const da = async (msg: MessageContext) => {
       }
     } else {
       // 普通用户模式：使用优化搜索只删除自己的消息
-      console.log(`[DA] 普通用户模式：使用优化搜索删除自己的消息`);
+      logger.info(`[DA] 普通用户模式：使用优化搜索删除自己的消息`);
       
       try {
         const chatEntity = await client.getChat(chatId);
         const myMessages = await searchMyMessagesOptimized(client, chatEntity, myId, BATCH_SIZE);
         
         if (myMessages.length === 0) {
-          console.log(`[DA] 未找到任何自己的消息`);
+          logger.info(`[DA] 未找到任何自己的消息`);
           task.isRunning = false;
           await saveTask(task);
           await sendProgressToSaved(client, task, "未找到消息");
           return;
         }
 
-        console.log(`[DA] 找到 ${myMessages.length} 条自己的消息，开始批量删除`);
+        logger.info(`[DA] 找到 ${myMessages.length} 条自己的消息，开始批量删除`);
 
         // 分批删除消息，优化进度报告
         const totalBatches = Math.ceil(myMessages.length / BATCH_SIZE);
@@ -527,14 +522,14 @@ const da = async (msg: MessageContext) => {
           }
 
           const batch = myMessages.slice(i, i + BATCH_SIZE);
-          console.log(`[DA] 优化模式：处理批次 ${currentBatch}/${totalBatches}，消息数: ${batch.length}`);
+          logger.info(`[DA] 优化模式：处理批次 ${currentBatch}/${totalBatches}，消息数: ${batch.length}`);
           
           await fastDeleteBatch(client, chatId, batch, task);
 
           // 静默处理，无进度反馈
         }
-      } catch (error) {
-        console.error("[DA] 优化删除失败:", error);
+      } catch (error: unknown) {
+        logger.error("[DA] 优化删除失败:", error);
         task.errors.push(`优化删除失败: ${error}`);
         task.isRunning = false;
         await saveTask(task);
@@ -551,35 +546,36 @@ const da = async (msg: MessageContext) => {
     // 最终日志报告
     const totalTime = Math.floor((Date.now() - task.startTime) / 1000);
     const avgSpeed = task.deletedMessages / totalTime;
-    console.log(`[DA] 任务完成 - 群组: ${task.chatName} | 总删除: ${task.deletedMessages} 条 | 总耗时: ${totalTime}秒 | 平均速度: ${avgSpeed.toFixed(1)} 条/秒`);
+    logger.info(`[DA] 任务完成 - 群组: ${task.chatName} | 总删除: ${task.deletedMessages} 条 | 总耗时: ${totalTime}秒 | 平均速度: ${avgSpeed.toFixed(1)} 条/秒`);
     
     await sendProgressToSaved(client, task, "任务完成");
 
     // 清理任务
     await removeTask(taskId);
 
-  } catch (error: any) {
-    console.error("[DA] 插件执行失败:", error);
-    
+  } catch (error: unknown) {
+    logger.error("[DA] 插件执行失败:", error);
+
     // 如果任务已创建，更新状态
     const existingTask = await getTask(taskId);
     if (existingTask) {
       existingTask.isRunning = false;
-      existingTask.errors.push(String(error));
+      existingTask.errors.push(getErrorMessage(error));
       await saveTask(existingTask);
       await sendProgressToSaved(client, existingTask, "执行失败");
     }
-    
+
     // 处理特定错误类型
-    if (error.message?.includes("FLOOD_WAIT")) {
-      const waitTime = parseInt(error.message.match(/\d+/)?.[0] || "60");
+    const errMsg = getErrorMessage(error);
+    if (errMsg.includes("FLOOD_WAIT")) {
+      const waitTime = parseInt(errMsg.match(/\d+/)?.[0] || "60");
       // 静默处理，不在群聊显示错误
-      console.log(`[DA] FLOOD_WAIT: 需等待 ${waitTime} 秒`);
+      logger.info(`[DA] FLOOD_WAIT: 需等待 ${waitTime} 秒`);
       return;
     }
-    
+
     // 其他错误也静默处理
-    console.log(`[DA] 错误: ${error.message || "未知错误"}`);
+    logger.info(`[DA] 错误: ${errMsg || "未知错误"}`);
   }
 };
 

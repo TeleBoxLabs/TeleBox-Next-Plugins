@@ -3,21 +3,20 @@ import { getGlobalClient } from "@utils/globalClient";
 import { getPrefixes } from "@utils/pluginManager";
 import { createDirectoryInAssets, createDirectoryInTemp } from "@utils/pathHelpers";
 import type { MessageContext } from "@mtcute/dispatcher";
+import type { MtcuteMessageContext } from "@utils/mtcuteTypes";
+import type { Message } from "@mtcute/core";
 import { html } from "@mtcute/html-parser";
 import sharp from "sharp";
 import * as fs from "fs";
 import * as path from "path";
 import { JSONFilePreset } from "lowdb/node";
-
-// 本地 sleep
-const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
+import { getMessageMedia, getMessageGroupedId } from "@utils/entityTypeGuards";
+import { sleep } from "@utils/asyncHelpers";
+import { htmlEscape } from "@utils/htmlEscape";
 
 // 必需工具函数
-const htmlEscape = (text: string): string => 
-  text.replace(/[&<>"']/g, m => ({ 
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', 
-    '"': '&quot;', "'": '&#x27;' 
-  }[m] || m));
 
 // 获取命令前缀
 const prefixes = getPrefixes();
@@ -102,8 +101,8 @@ class PicToStickerPlugin extends Plugin {
     try {
       const db = await JSONFilePreset<PicToStickerConfig>(this.configPath, this.config);
       this.config = db.data;
-    } catch (error) {
-      console.error("[pic_to_sticker] 加载配置失败:", error);
+    } catch (error: unknown) {
+      logger.error("[pic_to_sticker] 加载配置失败:", error);
     }
   }
 
@@ -112,8 +111,8 @@ class PicToStickerPlugin extends Plugin {
       const db = await JSONFilePreset<PicToStickerConfig>(this.configPath, this.config);
       db.data = this.config;
       await db.write();
-    } catch (error) {
-      console.error("[pic_to_sticker] 保存配置失败:", error);
+    } catch (error: unknown) {
+      logger.error("[pic_to_sticker] 保存配置失败:", error);
     }
   }
 
@@ -157,10 +156,10 @@ class PicToStickerPlugin extends Plugin {
 
       // 处理单张图片转换
       await this.convertSingleImage(msg, customEmoji);
-    } catch (error: any) {
-      console.error("[pic_to_sticker] 插件执行失败:", error);
+    } catch (error: unknown) {
+      logger.error("[pic_to_sticker] 插件执行失败:", error);
       await msg.edit({
-        text: html`❌ <b>转换失败:</b> ${htmlEscape(error.message || '未知错误')}`
+        text: html`❌ <b>转换失败:</b> ${htmlEscape(getErrorMessage(error) || '未知错误')}`
       });
     }
   }
@@ -252,9 +251,9 @@ class PicToStickerPlugin extends Plugin {
       }
 
       await msg.edit({ text: html`${message}` });
-    } catch (error: any) {
+    } catch (error: unknown) {
       await msg.edit({
-        text: html`❌ <b>配置失败:</b> ${htmlEscape(error.message)}`
+        text: html`❌ <b>配置失败:</b> ${htmlEscape(getErrorMessage(error))}`
       });
     }
   }
@@ -275,12 +274,18 @@ class PicToStickerPlugin extends Plugin {
       await msg.edit({ text: "🔄 正在批量处理图片..." });
 
       // 获取回复的消息
-      const targetMsg = msg.replyToMessage;
+      const targetMsg = await msg.getReplyTo();
+      if (!targetMsg) {
+        await msg.edit({
+          text: html`❌ <b>无法获取回复的消息</b>`
+        });
+        return;
+      }
       let processedCount = 0;
       let failedCount = 0;
 
       // 处理消息中的所有媒体
-      const media = targetMsg.media as any;
+      const media = getMessageMedia(targetMsg) as { _?: string; photo?: unknown } | undefined;
       if (media) {
         if (media._ === 'messageMediaPhoto' || media.photo) {
           // 单张图片
@@ -294,17 +299,17 @@ class PicToStickerPlugin extends Plugin {
           } else {
             failedCount++;
           }
-        } else if ((targetMsg as any).groupedId) {
+        } else if (getMessageGroupedId(targetMsg)) {
           // 媒体组（多张图片）- 获取历史消息
-          const messages = await client.getHistory(msg.chat.id, { limit: 10 });
+          const history = await client.getHistory(msg.chat.id, { limit: 10 });
           // 获取对应 group 的消息
           // 注意: mtcute 的 getHistory 返回的是旧消息在前，新消息在后
 
-          for (const groupMsg of messages) {
-            const groupMedia = (groupMsg as any).media as any;
-            if ((groupMsg as any).groupedId === (targetMsg as any).groupedId &&
+          for (const groupMsg of history) {
+            const groupMedia = getMessageMedia(groupMsg) as { _?: string; photo?: unknown } | undefined;
+            if (getMessageGroupedId(groupMsg) === getMessageGroupedId(targetMsg) &&
                 (groupMedia?._ === 'messageMediaPhoto' || groupMedia?.photo)) {
-              const result = await this.processImage(groupMsg as any, this.config.defaultEmoji);
+              const result = await this.processImage(groupMsg, this.config.defaultEmoji);
               if (result) {
                 await this.sendSticker(client, msg.chat.id, result.path, this.config.defaultEmoji, msg.id);
                 processedCount++;
@@ -330,10 +335,10 @@ class PicToStickerPlugin extends Plugin {
         await sleep(3000);
         await msg.delete();
       }
-    } catch (error: any) {
-      console.error("[pic_to_sticker] 批量转换失败:", error);
+    } catch (error: unknown) {
+      logger.error("[pic_to_sticker] 批量转换失败:", error);
       await msg.edit({
-        text: html`❌ <b>批量转换失败:</b> ${htmlEscape(error.message)}`
+        text: html`❌ <b>批量转换失败:</b> ${htmlEscape(getErrorMessage(error))}`
       });
     }
   }
@@ -343,15 +348,18 @@ class PicToStickerPlugin extends Plugin {
     if (!client) return;
 
     try {
-      let targetMsg: any = msg;
+      let targetMsg: MessageContext = msg;
       
       // 检查是否回复了消息
       if (msg.replyToMessage) {
-        targetMsg = msg.replyToMessage;
+        const repliedMsg = await msg.getReplyTo();
+        if (repliedMsg) {
+          targetMsg = repliedMsg as MtcuteMessageContext;
+        }
       }
 
       // 检查是否有图片
-      const media = targetMsg.media as any;
+      const media = getMessageMedia(targetMsg) as { _?: string; photo?: unknown } | undefined;
       if (!media || !(media._ === 'messageMediaPhoto' || media.photo)) {
         await msg.edit({
           text: html`❌ <b>请回复包含图片的消息</b><br><br>使用方法：<br>1. 回复包含图片的消息<br>2. 发送 <code>${mainPrefix}pts</code> 或 <code>${mainPrefix}pts [表情]</code>`
@@ -385,19 +393,20 @@ class PicToStickerPlugin extends Plugin {
         await msg.edit({ text: `✅ 贴纸已发送 ${emoji}` });
       }
 
-    } catch (error: any) {
-      console.error("[pic_to_sticker] 转换失败:", error);
+    } catch (error: unknown) {
+      logger.error("[pic_to_sticker] 转换失败:", error);
       
       let errorMsg = "❌ <b>转换失败</b>";
+      const errMsg = getErrorMessage(error);
       
-      if (error.message?.includes('MEDIA_INVALID')) {
+      if (errMsg.includes('MEDIA_INVALID')) {
         errorMsg = "❌ <b>无效的媒体文件</b>";
-      } else if (error.message?.includes('FILE_PARTS_INVALID')) {
+      } else if (errMsg.includes('FILE_PARTS_INVALID')) {
         errorMsg = "❌ <b>文件损坏或格式不支持</b>";
-      } else if (error.message?.includes('PHOTO_INVALID')) {
+      } else if (errMsg.includes('PHOTO_INVALID')) {
         errorMsg = "❌ <b>无效的图片文件</b>";
-      } else if (error.message?.includes('FLOOD_WAIT')) {
-        const waitTime = parseInt(error.message.match(/\d+/)?.[0] || "60");
+      } else if (errMsg.includes('FLOOD_WAIT')) {
+        const waitTime = parseInt(errMsg.match(/\d+/)?.[0] || "60");
         errorMsg = `❌ <b>请求过于频繁</b>\n\n请等待 ${waitTime} 秒后重试`;
       }
       
@@ -406,10 +415,18 @@ class PicToStickerPlugin extends Plugin {
   }
 
   /**
-   * 通过 raw API 发送贴纸（需要 DocumentAttributeSticker）
+   * 发送贴纸（需要 DocumentAttributeSticker）
+   * mtcute 的 InputMediaDocument 类型不包含 attributes 字段，
+   * 但底层 TL 层需要 documentAttributeSticker 来标识贴纸，
+   * 因此使用 unknown 断言绕过类型检查。
    */
-  private async sendSticker(client: any, peer: any, filePath: string, emoji: string, replyToId?: number): Promise<void> {
-    // 使用 sendMedia 发送 document 并带贴纸属性
+  private async sendSticker(
+    client: import("@mtcute/node").TelegramClient,
+    peer: number,
+    filePath: string,
+    emoji: string,
+    replyToId?: number
+  ): Promise<void> {
     await client.sendMedia(peer, {
       type: "document",
       file: filePath,
@@ -417,14 +434,15 @@ class PicToStickerPlugin extends Plugin {
       attributes: [
         { _: 'documentAttributeSticker', alt: emoji, stickerset: { _: 'inputStickerSetEmpty' } }
       ]
-    } as any, {
+    } as unknown as Parameters<typeof client.sendMedia>[1], {
       replyTo: replyToId
     });
   }
 
-  private async processImage(msg: any, emoji: string): Promise<{ path: string } | null> {
+  private async processImage(msg: Message | MessageContext, emoji: string): Promise<{ path: string } | null> {
     const client = await getGlobalClient();
-    if (!client || !msg.media) return null;
+    const media = getMessageMedia(msg) as { _?: string; photo?: unknown } | undefined;
+    if (!client || !media) return null;
 
     try {
       const timestamp = Date.now();
@@ -432,10 +450,11 @@ class PicToStickerPlugin extends Plugin {
       const stickerPath = path.join(this.tempDir, `sticker_${timestamp}_${Math.random().toString(36).substring(7)}.webp`);
 
       // 下载图片
-      const buffer = await client.downloadAsBuffer(msg.media as any);
+      const media = getMessageMedia(msg) as Parameters<typeof client.downloadAsBuffer>[0];
+      const buffer = await client.downloadAsBuffer(media);
       
       if (!buffer) {
-        console.error("[pic_to_sticker] 下载失败");
+        logger.error("[pic_to_sticker] 下载失败");
         return null;
       }
 
@@ -506,14 +525,14 @@ class PicToStickerPlugin extends Plugin {
 
         // 检查输出文件
         if (!fs.existsSync(stickerPath)) {
-          console.error("[pic_to_sticker] 转换失败，输出文件不存在");
+          logger.error("[pic_to_sticker] 转换失败，输出文件不存在");
           return null;
         }
 
         // 检查文件大小（Telegram 贴纸限制）
         const stats = fs.statSync(stickerPath);
         if (stats.size > 512 * 1024) { // 512KB 限制
-          console.log("[pic_to_sticker] 文件过大，尝试降低质量...");
+          logger.info("[pic_to_sticker] 文件过大，尝试降低质量...");
           
           // 降低质量重新处理
           await sharp(originalPath)
@@ -530,8 +549,8 @@ class PicToStickerPlugin extends Plugin {
 
         return { path: stickerPath };
 
-      } catch (sharpError: any) {
-        console.error("[pic_to_sticker] Sharp 处理失败:", sharpError);
+      } catch (sharpError: unknown) {
+        logger.error("[pic_to_sticker] Sharp 处理失败:", sharpError);
         
         // 清理文件
         if (fs.existsSync(originalPath)) {
@@ -544,8 +563,8 @@ class PicToStickerPlugin extends Plugin {
         return null;
       }
 
-    } catch (error) {
-      console.error("[pic_to_sticker] 处理图片失败:", error);
+    } catch (error: unknown) {
+      logger.error("[pic_to_sticker] 处理图片失败:", error);
       return null;
     }
   }

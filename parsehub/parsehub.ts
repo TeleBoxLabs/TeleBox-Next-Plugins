@@ -7,8 +7,13 @@ import { safeGetMessages, safeGetReplyMessage } from "@utils/safeGetMessages";
 import type { MessageContext } from "@mtcute/dispatcher";
 import { html } from "@mtcute/html-parser";
 import { getGlobalClient } from "@utils/globalClient";
-
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+import { tl, Long } from "@mtcute/node";
+import { Message } from "@mtcute/core";
+import { TelegramClient } from "@mtcute/core/highlevel/client.js";
+import { logger } from "@utils/logger";
+import { sleep } from "@utils/asyncHelpers";
+import { getErrorMessage } from "@utils/errorHelpers";
+import { htmlEscape } from "@utils/htmlEscape";
 
 const BOT_USERNAME = "ParseHubot";
 const POLL_INTERVAL_MS = 2000;
@@ -52,19 +57,6 @@ Instagram视频|图文
 <code>${commandName} https://www.instagram.com/p/xxxx/</code>
 `.trim();
 
-const htmlEscape = (text: string): string =>
-  text.replace(
-    /[&<>"']/g,
-    (ch) =>
-      ({
-        "&": "&amp;",
-        "<": "&lt;",
-        ">": "&gt;",
-        '"': "&quot;",
-        "'": "&#x27;",
-      })[ch] || ch,
-  );
-
 let hasStartedBot = false;
 let firstRunPreStartLastId = 0;
 let shouldIgnoreNextBotMessage = false;
@@ -87,7 +79,7 @@ function readState(): InitState {
         ? Number(parsed.ignoredUpToId)
         : undefined,
     };
-  } catch {
+  } catch (_e: unknown) {
     return { initialized: false };
   }
 }
@@ -95,7 +87,7 @@ function readState(): InitState {
 function writeState(state: InitState) {
   try {
     fs.writeFileSync(STATE_PATH, JSON.stringify(state), "utf-8");
-  } catch {}
+  } catch (e: unknown) { logger.warn('[parsehub] state write failed:', e) }
 }
 
 let initState: InitState = readState();
@@ -126,9 +118,16 @@ async function ensureBotReady(msg: MessageContext) {
   const client = await getGlobalClient();
   if (!client) return;
 
+  let botPeer: tl.TypeInputPeer;
+  let botUser: tl.TypeInputUser;
   try {
-    await client.call({ _: "contacts.unblock", id: BOT_USERNAME } as any);
-  } catch {}
+    botPeer = await client.resolvePeer(BOT_USERNAME);
+    botUser = await client.resolveUser(BOT_USERNAME);
+  } catch (e: unknown) { logger.warn('[parsehub] resolve failed:', e); return; }
+
+  try {
+    await client.call({ _: "contacts.unblock", id: botPeer });
+  } catch (e: unknown) { logger.warn('[parsehub] unblock failed:', e) }
 
   try {
     const inputPeer = await client.resolvePeer(BOT_USERNAME);
@@ -140,20 +139,20 @@ async function ensureBotReady(msg: MessageContext) {
         silent: true,
         muteUntil: 2147483647,
       },
-    } as any);
-  } catch {}
+    });
+  } catch (e: unknown) { logger.warn('[parsehub] notify settings update failed:', e) }
 
   if (hasStartedBot) {
     return;
   }
 
   try {
-    const history = await safeGetMessages(client, BOT_USERNAME, { limit: 1 } as any);
+    const history = await client.getHistory(BOT_USERNAME, { limit: 1 });
     if (history.length > 0) {
       hasStartedBot = true;
       return;
     }
-  } catch {}
+  } catch (e: unknown) { logger.warn('[parsehub] history fetch failed:', e) }
 
   try {
     if (!initState.initialized) {
@@ -162,12 +161,13 @@ async function ensureBotReady(msg: MessageContext) {
     }
     await client.call({
       _: "messages.startBot",
-      bot: BOT_USERNAME,
-      peer: BOT_USERNAME,
+      bot: botUser,
+      peer: botPeer,
+      randomId: Long.fromNumber(Date.now()),
       startParam: "",
-    } as any);
+    });
     hasStartedBot = true;
-  } catch {
+  } catch (e: unknown) {
     try {
       if (!initState.initialized) {
         firstRunPreStartLastId = await getLatestBotMessageId(client);
@@ -175,7 +175,7 @@ async function ensureBotReady(msg: MessageContext) {
       }
       await client.sendText(BOT_USERNAME, "/start");
       hasStartedBot = true;
-    } catch {}
+    } catch (e: unknown) { logger.warn('[parsehub] send /start failed:', e) }
   }
 
   // Best-effort: capture welcome message id to avoid mis-forwarding
@@ -193,19 +193,19 @@ async function ensureBotReady(msg: MessageContext) {
           shouldIgnoreNextBotMessage = false;
           break;
         }
-      } catch {}
+      } catch (e: unknown) { logger.warn('[parsehub] latest id fetch failed:', e) }
     }
   }
 }
 
-async function getLatestBotMessageId(client: any): Promise<number> {
+async function getLatestBotMessageId(client: TelegramClient): Promise<number> {
   if (!client) return 0;
   try {
-    const history = await safeGetMessages(client, BOT_USERNAME, { limit: 1 } as any);
+    const history = await client.getHistory(BOT_USERNAME, { limit: 1 });
     if (history.length > 0) {
       return history[0].id;
     }
-  } catch {}
+  } catch (e: unknown) { logger.warn('获取历史记录失败', e) }
   return 0;
 }
 
@@ -233,12 +233,12 @@ const describeReason = (reason?: RelayReason): string => {
   }
 };
 
-async function forwardChunk(client: any, peer: any, ids: number[]) {
+async function forwardChunk(client: TelegramClient, peer: string | number, ids: number[]) {
   await client.forwardMessagesById({
     toChatId: peer,
     fromChatId: BOT_USERNAME,
     messages: ids,
-  } as any);
+  });
 }
 
 async function relayParseResult(
@@ -253,17 +253,17 @@ async function relayParseResult(
 
   try {
     await client.sendText(BOT_USERNAME, link);
-  } catch (error: any) {
+  } catch (error: unknown) {
     return {
       lastId: baselineId,
       forwarded: false,
       reason: "send_failed",
-      error: error?.message || String(error),
+      error: getErrorMessage(error),
     };
   }
 
   const processedIds = new Set<number>();
-  const finalMessages = new Map<number, any>();
+  const finalMessages = new Map<number, Message>();
 
   const deadline = Date.now() + MAX_WAIT_MS;
   let lastId = baselineId;
@@ -273,19 +273,19 @@ async function relayParseResult(
   while (Date.now() < deadline) {
     await sleep(POLL_INTERVAL_MS);
 
-    let messages: any[] = [];
+    let messages: Message[] = [];
     try {
-      messages = await safeGetMessages(client, BOT_USERNAME, { limit: FETCH_LIMIT } as any);
-    } catch (error: any) {
+      messages = await client.getHistory(BOT_USERNAME, { limit: FETCH_LIMIT });
+    } catch (error: unknown) {
       return {
         lastId,
         forwarded: false,
         reason: "fetch_failed",
-        error: error?.message || String(error),
+        error: getErrorMessage(error),
       };
     }
 
-    messages.sort((a: any, b: any) => a.id - b.id);
+    messages.sort((a: Message, b: Message) => a.id - b.id);
 
     for (const botMsg of messages) {
       if (!botMsg) continue;
@@ -330,22 +330,23 @@ async function relayParseResult(
   }
 
   const sortedMessages = Array.from(finalMessages.values()).sort(
-    (a: any, b: any) => a.id - b.id,
+    (a: Message, b: Message) => a.id - b.id,
   );
 
   let forwarded = false;
   const fallbackTexts: string[] = [];
 
+  // Sequential forwarding: each chunk uses fallback text on failure, so order matters
   for (let i = 0; i < sortedMessages.length; i += 100) {
     const chunk = sortedMessages.slice(i, i + 100);
-    const ids = chunk.map((m: any) => m.id);
+    const ids = chunk.map((m: Message) => m.id);
 
     try {
       await forwardChunk(client, originMsg.chat.id, ids);
       forwarded = true;
-    } catch {
+    } catch (_e: unknown) {
       const snippet = chunk
-        .map((m: any) => m.text?.trim())
+        .map((m: Message) => m.text?.trim())
         .filter(Boolean)
         .join("\n\n");
       fallbackTexts.push(
@@ -358,12 +359,11 @@ async function relayParseResult(
 
   if (!forwarded && fallbackTexts.length) {
     try {
-      await client.sendText(originMsg.chat.id, {
-        message: `📨 @${BOT_USERNAME} 返回内容：\n\n${fallbackTexts.join("\n\n")}`,
+      await client.sendText(originMsg.chat.id, `📨 @${BOT_USERNAME} 返回内容：\n\n${fallbackTexts.join("\n\n")}`, {
         replyTo: originMsg.id,
-      } as any);
+      });
       forwarded = true;
-    } catch {}
+    } catch (e: unknown) { logger.warn('[parsehub] send to origin failed:', e) }
   }
 
   return {
@@ -388,27 +388,27 @@ class ParseHubPlugin extends Plugin {
       // 若命令未包含链接且为回复消息，从被回复消息中提取链接
       if (!links.length && msg.replyToMessage?.id) {
         try {
-          const replied = await safeGetReplyMessage(msg as any);
-          const replyText = (replied as any)?.text || "";
+          const replied = await safeGetReplyMessage(msg);
+          const replyText = replied?.text || "";
           const replyLinks = extractLinks(replyText);
           if (replyLinks.length) {
             links = replyLinks;
           }
-        } catch {}
+        } catch (e: unknown) { logger.warn('[parsehub] reply fetch failed:', e) }
       }
 
       // 若命令和被回复消息都包含链接，合并去重，命令里的在前
       if (msg.replyToMessage?.id) {
         try {
-          const replied = await safeGetReplyMessage(msg as any);
-          const replyText = (replied as any)?.text || "";
+          const replied = await safeGetReplyMessage(msg);
+          const replyText = replied?.text || "";
           const replyLinks = extractLinks(replyText);
           if (replyLinks.length) {
             const set = new Set<string>(links);
             for (const l of replyLinks) set.add(l);
             links = Array.from(set);
           }
-        } catch {}
+        } catch (e: unknown) { logger.warn('[parsehub] reply fetch failed:', e) }
       }
 
       if (!links.length) {
@@ -461,10 +461,9 @@ class ParseHubPlugin extends Plugin {
             outcome.error && outcome.error !== "undefined"
               ? `\n\n错误信息：${htmlEscape(outcome.error)}`
               : "";
-          await client.sendText(msg.chat.id, {
-            message: html(`⚠️ 未能获取 <b>${htmlEscape(link)}</b> 的最终结果（${reasonText}）。请稍后重试或直接私聊 @${BOT_USERNAME}。${detail}`),
+          await client.sendText(msg.chat.id, html(`⚠️ 未能获取 <b>${htmlEscape(link)}</b> 的最终结果（${reasonText}）。请稍后重试或直接私聊 @${BOT_USERNAME}。${detail}`), {
             replyTo: msg.id,
-          } as any);
+          });
         }
 
         await sleep(600);
@@ -472,7 +471,7 @@ class ParseHubPlugin extends Plugin {
 
       try {
         await msg.delete();
-      } catch {}
+      } catch (e: unknown) { logger.warn('[parsehub] msg already deleted:', e) }
     },
   };
 }

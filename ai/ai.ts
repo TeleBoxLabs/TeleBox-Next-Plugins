@@ -1,6 +1,6 @@
 import { Plugin } from "@utils/pluginBase";
 import type { MessageContext } from "@mtcute/dispatcher";
-import { html } from "@mtcute/html-parser";
+import type { ClientWithDownload, ClientWithGetMessages, ClientWithSendFile } from "@utils/clientInternals";
 import { getPrefixes } from "@utils/pluginManager";
 import type { Low } from "lowdb";
 import { JSONFilePreset } from "lowdb/node";
@@ -19,7 +19,9 @@ import sharp from "sharp";
 import http from "http";
 import https from "https";
 import { promisify } from "util";
+import { logger } from "@utils/logger";
 import { safeGetReplyMessage } from "@utils/safeGetMessages";
+import { htmlEscape } from "@utils/htmlEscape";
 
 interface ProviderConfig {
   tag: string;
@@ -345,13 +347,11 @@ const PROVIDER_HOST_TYPES: Record<string, ProviderType> = {
   ...mapHostsToProviderType(["127.0.0.1", "api.abjj.de"], "local-cliproxy"),
 };
 
-const DEFAULT_PROVIDER_PROFILE: ProviderProfile =
-  PROVIDER_PROFILES[DEFAULT_PROVIDER_TYPE];
-
 const getProviderHost = (url: string): string | null => {
   try {
     return new URL(url).hostname;
-  } catch {
+  } catch (e: unknown) {
+    logger.warn('[ai] 解析域名失败:', e);
     return null;
   }
 };
@@ -360,7 +360,8 @@ const isHttpUrl = (url: string): boolean => {
   try {
     const u = new URL(url);
     return u.protocol === "http:" || u.protocol === "https:";
-  } catch {
+  } catch (e: unknown) {
+    logger.warn('[ai] URL验证失败:', e);
     return false;
   }
 };
@@ -419,7 +420,8 @@ const matchModelRule = (model: string, rule: ModelMatchRule): boolean => {
   if (rule.type === "regex") {
     try {
       return new RegExp(rule.value).test(model);
-    } catch {
+    } catch (e: unknown) {
+      logger.warn('[ai] 正则表达式无效:', e);
       return false;
     }
   }
@@ -488,25 +490,12 @@ const resolveResponsesEndpointUrl = (
   return resolveEndpointUrl(responsesBaseUrl, "responses");
 };
 
-const getMessageText = (m?: any): string => {
+const getMessageText = (m?: { message?: string; text?: string } | null): string => {
   if (!m) return "";
-  const text = (m as any).message ?? (m as any).text ?? "";
+  const text = m.message ?? m.text ?? "";
   return typeof text === "string" ? text : "";
 };
 
-const htmlEscape = (text: string): string =>
-  text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-
-const buildUserContent = (
-  text: string,
-  images: AIContentPart[],
-): string | AIContentPart[] => {
-  if (images.length === 0) return text;
-  const parts: AIContentPart[] = [];
-  if (text.trim()) parts.push({ type: "text", text });
-  parts.push(...images);
-  return parts;
-};
 
 const buildResponsesInputContent = (
   text: string,
@@ -541,25 +530,26 @@ const buildResponsesInputContent = (
   return parts;
 };
 
-const extractErrorMessage = (error: any): string => {
-  const msgText = typeof error?.message === "string" ? error.message : "";
+const extractErrorMessage = (error: unknown): string => {
+  const err = error as { message?: string; cause?: unknown; config?: { signal?: { reason?: unknown } }; name?: string; code?: string; response?: { status?: number; data?: { error?: { message?: string }; message?: string } } };
+  const msgText = typeof err?.message === "string" ? err.message : "";
   const reasonText =
-    typeof error?.cause === "string"
-      ? error.cause
-      : error?.cause
-        ? String(error.cause)
-        : error?.config?.signal?.reason
-          ? String(error.config.signal.reason)
+    typeof err?.cause === "string"
+      ? err.cause
+      : err?.cause
+        ? String(err.cause)
+        : err?.config?.signal?.reason
+          ? String(err.config.signal.reason)
           : "";
 
   if ((msgText + reasonText).includes("请求超时")) return "请求超时";
-  if (error?.name === "AbortError" || msgText.toLowerCase().includes("aborted"))
+  if (err?.name === "AbortError" || msgText.toLowerCase().includes("aborted"))
     return "操作已取消";
-  if (error?.code === "ECONNABORTED") return "请求超时";
-  if (error?.response?.status === 429) return "请求过于频繁，请稍后重试";
+  if (err?.code === "ECONNABORTED") return "请求超时";
+  if (err?.response?.status === 429) return "请求过于频繁，请稍后重试";
   return (
-    error?.response?.data?.error?.message ||
-    error?.response?.data?.message ||
+    err?.response?.data?.error?.message ||
+    err?.response?.data?.message ||
     msgText ||
     "未知错误"
   );
@@ -585,11 +575,11 @@ const PROCESSING_TEXT: Record<ProcessingKind, string> = {
   video: "🎬 <b>正在处理 video 任务</b>",
 };
 
-const formatErrorForDisplay = (error: any): string => {
+const formatErrorForDisplay = (error: unknown): string => {
   if (
     error instanceof UserError ||
-    error?.name === "AbortError" ||
-    (typeof error?.message === "string" &&
+    (error instanceof Error && error.name === "AbortError") ||
+    (error instanceof Error &&
       error.message.toLowerCase().includes("aborted"))
   ) {
     const extracted = extractErrorMessage(error);
@@ -610,7 +600,7 @@ const sendProcessing = async (
 
 const sendErrorMessage = async (
   msg: MessageContext,
-  error: any,
+  error: unknown,
   trigger?: MessageContext,
 ): Promise<void> => {
   await MessageSender.sendOrEdit(trigger || msg, formatErrorForDisplay(error), {
@@ -635,7 +625,8 @@ const normalizeDownloadedMedia = async (
       const stat = await fs.promises.stat(downloaded);
       if (!stat.isFile()) return null;
       return await fs.promises.readFile(downloaded);
-    } catch {
+    } catch (e: unknown) {
+      logger.warn('[ai] 读取媒体文件失败:', e);
       return null;
     }
   }
@@ -652,7 +643,8 @@ const getImageExtensionForMime = (mimeType: string): string => {
 const extractFirstFrame = async (buffer: Buffer): Promise<Buffer | null> => {
   try {
     return await sharp(buffer, { animated: true }).png().toBuffer();
-  } catch {
+  } catch (e: unknown) {
+    logger.warn('[ai] 提取动画首帧失败:', e);
     return null;
   }
 };
@@ -689,7 +681,7 @@ const resolveImageInputs = async (
         resolved.push({ data: image.data, mimeType: image.mimeType });
         if (!allowFailures) break;
       }
-    } catch (error) {
+    } catch (error: unknown) {
       if (!allowFailures) throw error;
     }
   }
@@ -710,23 +702,26 @@ const resolveImagePart = async (
 
 const collectImagePartsFromSingleMessage = async (
   msg: MessageContext,
-  out: AIContentPart[],
-): Promise<void> => {
-  if (!msg.media || !msg.client) return;
+  out?: AIContentPart[],
+): Promise<AIContentPart[]> => {
+  const localParts: AIContentPart[] = [];
+  if (!msg.media || !msg.client) return localParts;
 
-  if ((msg.media as any)?.type === 'photo') {
-    const downloaded = await (msg.client as any).downloadMedia(msg.media);
+  const target = out ?? localParts;
+
+  if ((msg.media as unknown as { type?: string })?.type === 'photo') {
+    const downloaded = await (msg.client as unknown as ClientWithDownload).downloadMedia(msg.media);
     const buffer = await normalizeDownloadedMedia(downloaded);
-    if (!buffer) return;
+    if (!buffer) return localParts;
     const dataUrl = `data:image/jpeg;base64,${buffer.toString("base64")}`;
-    out.push({ type: "image_url", image_url: { url: dataUrl } });
-    return;
+    target.push({ type: "image_url", image_url: { url: dataUrl } });
+    return localParts;
   }
 
   if (
-    ['document', 'video', 'sticker', 'audio', 'voice'].includes((msg.media as any)?.type)
+    ['document', 'video', 'sticker', 'audio', 'voice'].includes((msg.media as unknown as { type?: string })?.type ?? '')
   ) {
-    const doc = msg.media as any;
+    const doc = msg.media as unknown as { mimeType?: string; attributes?: unknown[] };
     const docMime = doc.mimeType || "";
     const isAnimated =
       docMime === "image/gif" ||
@@ -740,45 +735,48 @@ const collectImagePartsFromSingleMessage = async (
     const thumb = getDocumentThumb(doc);
 
     if (!isAnimated && docMime.startsWith("image/")) {
-      const downloaded = await (msg.client as any).downloadMedia(msg.media);
+      const downloaded = await (msg.client as unknown as ClientWithDownload).downloadMedia(msg.media);
       const buffer = await normalizeDownloadedMedia(downloaded);
-      if (!buffer) return;
+      if (!buffer) return localParts;
       const dataUrl = `data:${docMime};base64,${buffer.toString("base64")}`;
-      out.push({ type: "image_url", image_url: { url: dataUrl } });
-      return;
+      target.push({ type: "image_url", image_url: { url: dataUrl } });
+      return localParts;
     }
 
     let frameBuffer: Buffer | null = null;
 
     if (thumb) {
-      const downloaded = await (msg.client as any).downloadMedia(msg.media, { thumb });
+      const downloaded = await (msg.client as unknown as ClientWithDownload).downloadMedia(msg.media, { thumb });
       const buffer = await normalizeDownloadedMedia(downloaded);
       if (buffer) {
         try {
           frameBuffer = await sharp(buffer).png().toBuffer();
-        } catch {
+        } catch (e: unknown) {
+          logger.warn('[ai] 转换PNG失败，使用原始buffer:', e);
           frameBuffer = buffer;
         }
       }
     }
 
     if (!frameBuffer) {
-      const downloaded = await (msg.client as any).downloadMedia(msg.media);
+      const downloaded = await (msg.client as unknown as ClientWithDownload).downloadMedia(msg.media);
       const buffer = await normalizeDownloadedMedia(downloaded);
       if (buffer) {
         try {
           frameBuffer = await extractFirstFrame(buffer);
-        } catch {
+        } catch (e: unknown) {
+          logger.warn('[ai] 提取首帧失败:', e);
           frameBuffer = null;
         }
       }
     }
 
-    if (!frameBuffer) return;
+    if (!frameBuffer) return localParts;
 
     const dataUrl = `data:image/png;base64,${frameBuffer.toString("base64")}`;
-    out.push({ type: "image_url", image_url: { url: dataUrl } });
+    target.push({ type: "image_url", image_url: { url: dataUrl } });
   }
+  return localParts;
 };
 
 const getMessageImageParts = async (
@@ -788,7 +786,7 @@ const getMessageImageParts = async (
 
   const parts: AIContentPart[] = [];
 
-  const rawGroupedId = (msg as any).groupedId;
+  const rawGroupedId = msg.groupedId;
   const groupedId = rawGroupedId ? rawGroupedId.toString() : undefined;
 
   if (!groupedId) {
@@ -799,11 +797,11 @@ const getMessageImageParts = async (
   const peer = msg.chat.id;
   const sameGroupMessages: MessageContext[] = [];
 
-  const messages = await (msg.client as any).getMessages(peer, { limit: 50 });
+  const messages = await (msg.client as unknown as ClientWithGetMessages).getMessages(peer, { limit: 50 });
   for (const m of messages) {
-    if (!(m as any)?.client) continue;
+    if (!(m as unknown as { client?: unknown })?.client) continue;
 
-    const g = (m as any).groupedId;
+    const g = (m as unknown as { groupedId?: string | number }).groupedId;
     if (!g) continue;
 
     if (g.toString() !== groupedId) continue;
@@ -813,8 +811,12 @@ const getMessageImageParts = async (
 
   sameGroupMessages.sort((a, b) => Number(a.id) - Number(b.id));
 
-  for (const m of sameGroupMessages) {
-    await collectImagePartsFromSingleMessage(m, parts);
+  // 并行收集各消息的图片部分
+  const partialResults = await Promise.all(
+    sameGroupMessages.map((m) => collectImagePartsFromSingleMessage(m)),
+  );
+  for (const partial of partialResults) {
+    parts.push(...partial);
   }
 
   return parts;
@@ -822,17 +824,17 @@ const getMessageImageParts = async (
 
 const getGroupedMessageIds = async (msg: MessageContext): Promise<number[]> => {
   if (!msg?.client) return [];
-  const rawGroupedId = (msg as any).groupedId;
+  const rawGroupedId = msg.groupedId;
   const groupedId = rawGroupedId ? rawGroupedId.toString() : undefined;
   if (!groupedId) return [];
 
   const peer = msg.chat.id;
   const ids: number[] = [];
 
-  const messages = await (msg.client as any).getMessages(peer, { limit: 50 });
+  const messages = await (msg.client as unknown as ClientWithGetMessages).getMessages(peer, { limit: 50 });
   for (const m of messages) {
-    if (!(m as any)?.client) continue;
-    const g = (m as any).groupedId;
+    if (!(m as unknown as { client?: unknown })?.client) continue;
+    const g = (m as unknown as { groupedId?: string | number }).groupedId;
     if (!g) continue;
     if (g.toString() !== groupedId) continue;
     ids.push(Number(m.id));
@@ -850,11 +852,11 @@ const deleteMessageOrGroup = async (msg: MessageContext): Promise<void> => {
     const ids = await getGroupedMessageIds(msg);
 
     if (ids.length > 1) {
-      await (msg.client as any).deleteMessages({peer: peer, messages: ids, revoke: true});
+      await msg.client.deleteMessagesById(peer, ids, { revoke: true });
       return;
     }
     await msg.delete();
-  } catch {}
+  } catch (e: unknown) { logger.warn('[ai] delete msg failed:', e) }
 };
 
 const getHeaderContentType = (headers: unknown): string | undefined => {
@@ -938,7 +940,8 @@ const videoHasAudioTrack = async (filePath: string): Promise<boolean> => {
     const info = JSON.parse(stdout);
     const streams = info.streams || [];
     return streams.length > 0;
-  } catch {
+  } catch (e: unknown) {
+    logger.warn('[ai] 流检测失败:', e);
     return false;
   }
 };
@@ -972,7 +975,8 @@ const ensureVideoHasAudio = async (
     ]);
 
     return outputPath;
-  } catch {
+  } catch (e: unknown) {
+    logger.warn('[ai] 音频转码失败，返回原始路径:', e);
     return inputPath;
   }
 };
@@ -1039,7 +1043,7 @@ const retryWithFixedDelay = async <T>(
     token?.throwIfAborted();
     try {
       return await operation();
-    } catch (error: any) {
+    } catch (error: unknown) {
       lastError = error;
       if (token?.aborted) throw error;
       if (!isRetryableError(error)) throw error;
@@ -1050,24 +1054,25 @@ const retryWithFixedDelay = async <T>(
   throw lastError;
 };
 
-const isRetryableError = (error: any): boolean => {
+const isRetryableError = (error: unknown): boolean => {
   if (!error) return false;
-  if (error.name === "AbortError") return false;
+  if (error instanceof Error && error.name === "AbortError") return false;
   if (
-    typeof error.message === "string" &&
+    error instanceof Error &&
     error.message.toLowerCase().includes("aborted")
   )
     return false;
 
-  const status = error.response?.status;
+  const err = error as { response?: { status?: number }; isAxiosError?: boolean; code?: string };
+  const status = err?.response?.status;
   if (typeof status === "number") {
     if (status === 429) return true;
     if (status >= 500 && status <= 599) return true;
     return false;
   }
 
-  if (error.isAxiosError && !error.response) return true;
-  if (typeof error.code === "string") return true;
+  if (err.isAxiosError && !err.response) return true;
+  if (typeof err.code === "string") return true;
 
   return false;
 };
@@ -1129,18 +1134,19 @@ interface MessageOptions {
   disableWebPreview?: boolean;
 }
 
-const getEditErrorText = (error: any): string => {
+const getEditErrorText = (error: unknown): string => {
+  const err = error as { errorMessage?: string; message?: string };
   const parts = [
-    typeof error?.errorMessage === "string" ? error.errorMessage : "",
-    typeof error?.message === "string" ? error.message : "",
+    typeof err?.errorMessage === "string" ? err.errorMessage : "",
+    typeof err?.message === "string" ? err.message : "",
   ].filter(Boolean);
   return parts.join(" ");
 };
 
-const isMessageNotModifiedError = (error: any): boolean =>
+const isMessageNotModifiedError = (error: unknown): boolean =>
   getEditErrorText(error).includes("MESSAGE_NOT_MODIFIED");
 
-const shouldFallbackToReplyOnEditError = (error: any): boolean => {
+const shouldFallbackToReplyOnEditError = (error: unknown): boolean => {
   const text = getEditErrorText(error);
   return (
     text.includes("MESSAGE_ID_INVALID") ||
@@ -1149,8 +1155,9 @@ const shouldFallbackToReplyOnEditError = (error: any): boolean => {
 };
 
 const getTopicRootId = (msg: MessageContext): number | undefined => {
-  const typedMsg = msg as any;
-  return typedMsg.replyTo?.replyToTopId ?? typedMsg.replyTo?.replyToMsgId ?? typedMsg.replyToMsgId;
+  // Access reply info via raw TL object for compatibility
+  const rawReply = msg.replyToMessage;
+  return rawReply?.threadId ?? rawReply?.id ?? undefined;
 };
 
 class MessageSender {
@@ -1162,18 +1169,18 @@ class MessageSender {
     try {
       const edited = await msg.edit({ text, ...options });
       if (edited) return edited;
-    } catch (error: any) {
+    } catch (error: unknown) {
       if (isMessageNotModifiedError(error)) {
         return msg;
       }
       if (shouldFallbackToReplyOnEditError(error)) {
-        const replied = await msg.replyText(text, options as any);
+        const replied = await msg.replyText(text, options as Record<string, unknown>);
         if (replied) return replied;
       }
       throw error;
     }
 
-    const replied = await msg.replyText(text, options as any);
+    const replied = await msg.replyText(text, options as Record<string, unknown>);
     if (replied) return replied;
     throw new Error("消息发送失败");
   }
@@ -1190,7 +1197,7 @@ class MessageSender {
 
     const topicRootId = getTopicRootId(msg);
     const replyTo = replyToId ?? topicRootId;
-    return await (msg.client as any).sendText(msg.chat.id, text, {
+    return await msg.client.sendText(msg.chat.id, text, {
       ...(options || {}),
       ...(replyTo ? { replyTo } : {}),
     });
@@ -1444,7 +1451,7 @@ class MessageUtils {
 
         const topicRootId = getTopicRootId(msg);
         const replyTo = replyToId ?? topicRootId;
-        await (msg.client as any).sendFile(peerId, {
+        await (msg.client as unknown as ClientWithSendFile).sendFile(peerId, {
           file: pathToSend,
           forceDocument: !options.previewEnabled,
           caption,
@@ -1697,8 +1704,7 @@ class ConfigManager {
   }
 
   private async notifyListeners(newConfig: DB): Promise<void> {
-    for (const listener of this.listeners)
-      await listener.onConfigChanged(newConfig);
+    await Promise.all(this.listeners.map((listener) => listener.onConfigChanged(newConfig)));
   }
 }
 
@@ -1724,7 +1730,8 @@ const applyAuthConfig = (
       const u = new URL(url);
       if (!u.searchParams.has("key")) u.searchParams.set("key", config.key);
       return { url: u.toString(), headers };
-    } catch {
+    } catch (e: unknown) {
+      logger.warn('[ai] URL解析失败，返回原始URL:', e);
       return { url, headers };
     }
   }
@@ -1781,7 +1788,8 @@ const normalizeOpenAIBaseUrl = (url: string): string => {
     u.pathname = "/v1";
     u.search = "";
     return u.toString();
-  } catch {
+  } catch (e: unknown) {
+    logger.warn('[ai] 规范化v1 API URL失败:', e);
     return url;
   }
 };
@@ -1799,7 +1807,8 @@ const normalizeGeminiBaseUrl = (url: string): string => {
     u.search = "";
     u.hash = "";
     return u.toString();
-  } catch {
+  } catch (e: unknown) {
+    logger.warn('[ai] 规范化Gemini Base URL失败:', e);
     return url;
   }
 };
@@ -2186,7 +2195,7 @@ const parseOpenAIResponsePayloads = (raw: string): any[] => {
 
     try {
       payloads.push(JSON.parse(body));
-    } catch {}
+    } catch (e: unknown) { logger.warn('[ai] JSON parse failed:', e) }
   }
 
   if (payloads.length > 0 || sawDataLine) return payloads;
@@ -2194,7 +2203,8 @@ const parseOpenAIResponsePayloads = (raw: string): any[] => {
   try {
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed) ? parsed : [parsed];
-  } catch {
+  } catch (e: unknown) {
+    logger.warn('[ai] JSON解析失败:', e);
     return [];
   }
 };
@@ -2418,7 +2428,7 @@ class TimeoutMiddleware implements Middleware {
 
     if (timeoutController.signal.aborted)
       controller.abort(timeoutController.signal.reason);
-    else
+    else {
       timeoutController.signal.addEventListener(
         "abort",
         () => controller.abort(timeoutController.signal.reason),
@@ -2426,10 +2436,11 @@ class TimeoutMiddleware implements Middleware {
           once: true,
         },
       );
+    }
 
     if (externalToken) {
       if (externalToken.aborted) controller.abort(externalToken.reason);
-      else
+      else {
         externalToken.signal.addEventListener(
           "abort",
           () => controller.abort(externalToken.reason),
@@ -2437,6 +2448,7 @@ class TimeoutMiddleware implements Middleware {
             once: true,
           },
         );
+      }
     }
 
     return {
@@ -3142,7 +3154,7 @@ class AIService implements ConfigChangeListener {
     model: string,
     prompt: string,
     images: AIContentPart[],
-    imageMode: VideoImageMode,
+    _imageMode: VideoImageMode,
     modeConfig: ProviderModeConfig,
     token?: AbortToken,
   ): Promise<AIVideo[]> {
@@ -3885,7 +3897,7 @@ class ConfigFeature extends BaseFeatureHandler {
     configManager: ConfigManager,
   ): Promise<void> {
     requireUser(
-      !!(msg as any).savedPeerId,
+      !!(msg as unknown as { savedPeerId?: unknown }).savedPeerId,
       "出于安全考虑，禁止在公开场景添加/修改 API 密钥",
     );
     const { tag, url, key, type } = this.parseAddConfigArgs(args);
@@ -4413,7 +4425,7 @@ class QuestionFeature extends BaseFeatureHandler {
   async handleQuestion(
     msg: MessageContext,
     question: string,
-    trigger?: MessageContext,
+    _trigger?: MessageContext,
     token?: AbortToken,
   ): Promise<void> {
     const config = await this.getConfig();
@@ -4737,8 +4749,10 @@ class ImageFeature extends BaseFeatureHandler {
 
     const promptInput = args.slice(1).join(" ").trim();
     const replyText = getMessageText(replyMsg).trim();
-    const replyImageParts = await getMessageImageParts(replyMsg);
-    const messageImageParts = await getMessageImageParts(msg);
+    const [replyImageParts, messageImageParts] = await Promise.all([
+      getMessageImageParts(replyMsg),
+      getMessageImageParts(msg),
+    ]);
     const imageParts = [...replyImageParts, ...messageImageParts];
 
     const hasPrompt = !!promptInput || !!replyText;
@@ -4781,7 +4795,7 @@ class ImageFeature extends BaseFeatureHandler {
           try {
             const pngBuffer = await sharp(inputImage.data).png().toBuffer();
             inputImage = { data: pngBuffer, mimeType: "image/png" };
-          } catch {}
+          } catch (e: unknown) { logger.warn('[ai] image convert to png failed:', e) }
         }
         images = await this.aiService.editImage(prompt, inputImage, token);
       } else {
@@ -5121,7 +5135,7 @@ class AIPlugin extends Plugin {
 
         if (handler) await handler.execute(msg, args, prefixes);
         else await this.questionFeature.execute(msg, args, prefixes);
-      } catch (error: any) {
+      } catch (error: unknown) {
         await sendErrorMessage(msg, error, trigger);
       }
     },

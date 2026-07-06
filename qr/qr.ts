@@ -9,6 +9,8 @@ import { tmpdir } from "os";
 import { safeGetReplyMessage } from "@utils/safeGetMessages";
 import type { MessageContext } from "@mtcute/dispatcher";
 import { html } from "@mtcute/html-parser";
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
 
 const execFileAsync = promisify(execFile);
 
@@ -28,13 +30,15 @@ async function ensureDependencies(): Promise<void> {
   
   try {
     await execFileAsync('which', ['qrencode']);
-  } catch (error) {
+  } catch (_e: unknown) {
+    // qrencode not found, add to missing deps
     missingDeps.push('qrencode');
   }
-  
+
   try {
     await execFileAsync('which', ['zbarimg']);
-  } catch (error) {
+  } catch (_e: unknown) {
+    // zbarimg not found, add to missing deps
     missingDeps.push('zbar-tools/zbar');
   }
   
@@ -50,15 +54,18 @@ async function ensureDependencies(): Promise<void> {
       try {
         await execFileAsync('which', ['apt-get']);
         installCmd = 'sudo apt-get update && sudo apt-get install qrencode zbar-tools';
-      } catch {
+      } catch (_e: unknown) {
+        // apt-get not found, try yum
         try {
           await execFileAsync('which', ['yum']);
           installCmd = 'sudo yum install qrencode zbar';
-        } catch {
+        } catch (_e: unknown) {
+          // yum not found, try dnf
           try {
             await execFileAsync('which', ['dnf']);
             installCmd = 'sudo dnf install qrencode zbar';
-          } catch {
+          } catch (_e: unknown) {
+            // no supported package manager found
             installCmd = '请使用您的包管理器安装 qrencode 和 zbar-tools';
           }
         }
@@ -89,7 +96,7 @@ async function generateQRCode(text: string): Promise<Buffer> {
     unlinkSync(tempFile); // 清理临时文件
     
     return imageBuffer;
-  } catch (error) {
+  } catch (error: unknown) {
     // 清理临时文件
     if (existsSync(tempFile)) {
       unlinkSync(tempFile);
@@ -157,7 +164,8 @@ async function decodeQRCode(imageBuffer: Buffer): Promise<string[]> {
                if (!hasEncodingIssues(decoded) && decoded.length > 0) {
                  return decoded;
                }
-             } catch {
+             } catch (_e: unknown) {
+               // decoding attempt failed, try next
                continue;
              }
            }
@@ -168,7 +176,7 @@ async function decodeQRCode(imageBuffer: Buffer): Promise<string[]> {
       .filter(line => line.length > 0);
     
     return results;
-  } catch (error) {
+  } catch (error: unknown) {
     // 清理临时文件
     if (existsSync(tempFile)) {
       unlinkSync(tempFile);
@@ -232,8 +240,8 @@ class QRPlugin extends Plugin {
             const client = await getGlobalClient();
             await client.sendMedia(msg.chat.id, { type: 'photo', file: imageBuffer, fileName: 'qrcode.png' }, { replyTo: msg.id });
             await msg.delete();
-          } catch (error: any) {
-            const errorMsg = error.message || '未知错误';
+          } catch (error: unknown) {
+            const errorMsg = getErrorMessage(error) || '未知错误';
             await msg.edit({
               text: html`❌ <b>生成二维码失败</b><br><br>${errorMsg.includes('❌') ? errorMsg : `<code>${htmlEscape(errorMsg)}</code>`}`
             });
@@ -242,10 +250,13 @@ class QRPlugin extends Plugin {
         }
 
         // 2. 检查消息本身或回复中是否附带媒体文件 (解码)
-        let mediaToProcess = null;
-        if ((msg as any).photo || (msg as any).sticker || (msg as any).document) {
+        let mediaToProcess: typeof msg | typeof replied | null = null;
+        const msgMediaType = msg?.media?.type;
+        const repliedMediaType = replied?.media?.type;
+        const hasImageMedia = (t: string | undefined) => t === 'photo' || t === 'sticker' || t === 'document';
+        if (msgMediaType && hasImageMedia(msgMediaType)) {
           mediaToProcess = msg;
-        } else if (replied && ((replied as any).photo || (replied as any).sticker || (replied as any).document)) {
+        } else if (replied && repliedMediaType && hasImageMedia(repliedMediaType)) {
           mediaToProcess = replied;
         }
 
@@ -262,7 +273,10 @@ class QRPlugin extends Plugin {
             text: '⏳ 正在解码二维码...'
           });
           try {
-            const imageBuffer = await client.downloadAsBuffer((mediaToProcess as any).media);
+            const media = mediaToProcess!.media;
+            if (!media) return;
+            // mtcute type limitation: MessageMedia union not directly assignable to FileDownloadLocation
+            const imageBuffer = await client.downloadAsBuffer(media as Parameters<typeof client.downloadAsBuffer>[0]);
             
             const decodedData = await decodeQRCode(imageBuffer as Buffer);
 
@@ -278,8 +292,8 @@ class QRPlugin extends Plugin {
                 text: '🤷‍♀️ 未在此图片中识别到二维码。'
               });
             }
-          } catch (error: any) {
-            const errorMsg = error.message || '未知错误';
+          } catch (error: unknown) {
+            const errorMsg = getErrorMessage(error) || '未知错误';
             await msg.edit({
               text: html`❌ <b>解码失败</b><br><br>${errorMsg.includes('❌') ? errorMsg : `<code>${htmlEscape(errorMsg)}</code>`}`
             });
@@ -297,8 +311,8 @@ class QRPlugin extends Plugin {
             const client = await getGlobalClient();
             await client.sendMedia(replied.chat.id, { type: 'photo', file: imageBuffer, fileName: 'qrcode.png' }, { replyTo: replied.id });
             await msg.delete();
-          } catch (error: any) {
-            const errorMsg = error.message || '未知错误';
+          } catch (error: unknown) {
+            const errorMsg = getErrorMessage(error) || '未知错误';
             await msg.edit({
               text: html`❌ <b>生成二维码失败</b><br><br>${errorMsg.includes('❌') ? errorMsg : `<code>${htmlEscape(errorMsg)}</code>`}`
             });
@@ -310,9 +324,9 @@ class QRPlugin extends Plugin {
         await msg.edit({
           text: html`ℹ️ <b>QR 工具使用方法:</b><br><br>• <code>qr &lt;文本&gt;</code><br>  (将文本转为二维码)<br><br>• 回复文本消息使用 <code>qr</code><br>  (将消息内容转为二维码)<br><br>• 回复图片/贴纸使用 <code>qr</code><br>  (解码图中的二维码)`
         });
-      } catch (error: any) {
-        console.error('QR Plugin Error:', error);
-        const errorMsg = error.message || '未知错误';
+      } catch (error: unknown) {
+        logger.error('QR Plugin Error:', error);
+        const errorMsg = getErrorMessage(error) || '未知错误';
         await msg.edit({
           text: html`❌ <b>插件执行失败</b><br><br>${errorMsg.includes('❌') ? errorMsg : `<code>${htmlEscape(errorMsg)}</code>`}`
         });

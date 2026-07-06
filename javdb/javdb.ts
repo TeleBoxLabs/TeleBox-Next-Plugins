@@ -18,6 +18,9 @@ import { getPrefixes } from "@utils/pluginManager";
 
 import type { MessageContext } from "@mtcute/dispatcher";
 import { html } from "@mtcute/html-parser";
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
+import { htmlEscape } from "@utils/htmlEscape";
 
 // ==================== 工具函数与常量 ====================
 /** 获取命令前缀 */
@@ -27,14 +30,6 @@ const mainPrefix = (getPrefixes()[0] || ".");
 const MAX_MESSAGE_LENGTH = 4096;
 
 /** HTML 转义函数（安全处理用户输入）*/
-const htmlEscape = (text: string): string =>
-  text.replace(/[&<>"']/g, (m) => ({
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    '"': "&quot;",
-    "'": "&#x27;",
-  }[m] || m));
 
 /** 分割 HTML 文本为多个分段（避免超过长度限制）*/
 function chunkHtml(text: string, limit = MAX_MESSAGE_LENGTH): string[] {
@@ -62,9 +57,10 @@ async function sendLongMessage(client: any, msg: MessageContext, htmlContent: st
   const first = parts[0] + (parts.length > 1 ? `\n\n📄 (1/${parts.length})` : "");
   try {
     await msg.edit({ text: html(first) });
-  } catch {
+  } catch (_e: unknown) {
     await client.sendText(msg.chat.id, html(first), { replyTo: msg.id });
   }
+  // 注意：消息必须按顺序逐条发送，不能并行（每条消息依赖前一条发送完成以保持顺序）
   for (let i = 1; i < parts.length; i++) {
     await client.sendText(msg.chat.id, html(`${parts[i]}<br><br>📄 (${i + 1}/${parts.length})`), { replyTo: msg.id });
   }
@@ -334,19 +330,19 @@ class JavDBPlugin extends Plugin {
 
         // 保存到临时文件
         const tmpPath = path.join(os.tmpdir(), `javdb_cover_${Date.now()}.jpg`);
-        await fs.promises.writeFile(tmpPath, Buffer.from(imgResp.data as any));
+        await fs.promises.writeFile(tmpPath, Buffer.from(imgResp.data as ArrayBuffer));
 
         try {
           // 上传文件并发送（带剧透标记）
-          await client.sendMedia(msg.chat.id, { type: 'photo', file: tmpPath, caption: html(caption), spoiler: true } as any, { replyTo: msg.replyToMessage?.id });
+          await client.sendMedia(msg.chat.id, { type: 'photo', file: tmpPath, caption: html(caption), spoiler: true }, { replyTo: msg.replyToMessage?.id });
 
           // 删除原查询消息
-          try { await msg.delete(); } catch {}
+          try { await msg.delete(); } catch (e: unknown) { logger.warn('操作失败', e) }
         } finally {
           // 清理临时文件
-          try { await fs.promises.unlink(tmpPath); } catch {}
+          try { await fs.promises.unlink(tmpPath); } catch (e: unknown) { logger.warn('操作失败', e) }
         }
-      } catch {
+      } catch (_e: unknown) {
         // 封面下载失败，仅发送文本
         await sendLongMessage(client, msg, caption);
       }
@@ -357,14 +353,14 @@ class JavDBPlugin extends Plugin {
         const t = setTimeout(async () => {
           pendingTimers.delete(t);
           if (getCurrentGeneration() !== gen) return;
-          try { await client.call({ _: 'messages.deleteMessages', id: [sent!.id], revoke: true } as any); } catch {}
+          try { await client.call({ _: 'messages.deleteMessages', id: [sent!.id], revoke: true } as unknown as Parameters<typeof client.call>[0]); } catch (e: unknown) { logger.warn('操作失败', e) }
         }, 60_000);
         pendingTimers.add(t);
       }
-    } catch (error: any) {
+    } catch (error: unknown) {
       // 错误处理
-      console.error("[javdb] 查询失败:", error);
-      const m = String(error?.message || error);
+      logger.error("[javdb] 查询失败:", error);
+      const m = getErrorMessage(error);
       
       // 处理 Telegram API 频率限制
       if (m.includes("FLOOD_WAIT")) {
@@ -375,7 +371,7 @@ class JavDBPlugin extends Plugin {
       
       // 处理消息过长错误
       if (m.includes("MESSAGE_TOO_LONG")) {
-        await msg.edit({ text: html("❌ <b>消息过长</b>\n\n请减少内容或以文件方式发送") });
+        await msg.edit({ text: html("❌ <b>消息过长</b><br><br>请减少内容或以文件方式发送") });
         return;
       }
       

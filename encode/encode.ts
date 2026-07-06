@@ -4,13 +4,9 @@ import { getPrefixes } from "@utils/pluginManager";
 import type { MessageContext } from "@mtcute/dispatcher";
 import { html } from "@mtcute/html-parser";
 import { safeGetReplyMessage } from "@utils/safeGetMessages";
-
-// HTML转义工具
-const htmlEscape = (text: string): string => 
-  text.replace(/[&<>"']/g, m => ({ 
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', 
-    '"': '&quot;', "'": '&#x27;' 
-  }[m] || m));
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
+import { htmlEscape } from "@utils/htmlEscape";
 
 // 获取命令前缀
 const prefixes = getPrefixes();
@@ -63,7 +59,7 @@ class EncodePlugin extends Plugin {
               throw new Error("无效的 Base64 字符串");
             }
             return result;
-          } catch {
+          } catch (_e: unknown) {
             throw new Error("无效的 Base64 字符串，请检查输入");
           }
         }
@@ -85,7 +81,7 @@ class EncodePlugin extends Plugin {
         decode: (text: string) => {
           try {
             return decodeURIComponent(text);
-          } catch {
+          } catch (_e: unknown) {
             throw new Error("无效的 URL 编码字符串，请检查输入");
           }
         }
@@ -132,10 +128,10 @@ class EncodePlugin extends Plugin {
       // 显示结果
       await this.showResult(msg, text, result, typeName, operation, icon);
 
-    } catch (error: any) {
-      console.error(`[${typeName.toLowerCase()}${operation}] 插件执行失败:`, error);
+    } catch (error: unknown) {
+      logger.error(`[${typeName.toLowerCase()}${operation}] 插件执行失败:`, error);
       await msg.edit({
-        text: html(`❌ <b>${typeName} ${operation === "encode" ? "编码" : "解码"}失败:</b> ${htmlEscape(error.message)}`),
+        text: html(`❌ <b>${typeName} ${operation === "encode" ? "编码" : "解码"}失败:</b> ${htmlEscape(getErrorMessage(error))}`),
       });
     }
   }
@@ -156,8 +152,8 @@ class EncodePlugin extends Plugin {
           });
           return null;
         }
-      } catch (replyError: any) {
-        console.error("获取回复消息失败:", replyError);
+      } catch (replyError: unknown) {
+        logger.error("获取回复消息失败:", replyError);
         await msg.edit({
           text: html(`❌ <b>缺少文本内容</b><br><br>💡 请提供要${operation === "encode" ? "编码" : "解码"}的文本`),
         });

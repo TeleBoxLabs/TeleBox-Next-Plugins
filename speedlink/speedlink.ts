@@ -1,4 +1,7 @@
-import { Plugin } from "@utils/pluginBase";
+import {
+  Plugin
+} from "@utils/pluginBase";
+import { logger } from "@utils/logger";
 import type { MessageContext } from "@mtcute/dispatcher";
 import { html } from "@mtcute/html-parser";
 import { execSync, execFile, ChildProcess, spawn } from "child_process";
@@ -9,6 +12,7 @@ import axios from "axios";
 import * as crypto from "crypto";
 import sharp from "sharp";
 import { safeGetReplyMessage } from "@utils/safeGetMessages";
+import { getErrorMessage } from "@utils/errorHelpers";
 import {
   createDirectoryInAssets,
   createDirectoryInTemp,
@@ -144,9 +148,7 @@ function sanitizeErrorMessage(error: string, server?: ServerConfig): string {
       try {
         const password = decrypt(server.credentials);
         sanitized = sanitized.replace(new RegExp(password, 'g'), '***');
-      } catch (e) {
-        // Ignore decryption errors
-      }
+      } catch (e: unknown) { logger.warn(`[speedlink] Ignore decryption errors:`, e) }
     }
   }
   
@@ -182,40 +184,39 @@ try {
   require.resolve("better-sqlite3");
   execSync("command -v sshpass");
   dependenciesInstalled = true;
-} catch (e: any) {
+} catch (_e: unknown) {
   dependenciesInstalled = false;
 }
 
 async function installDependencies(msg: MessageContext): Promise<void> {
   isInstalling = true;
   try {
-    console.log("SpeedLink Plugin: Starting async dependency installation...");
+    logger.info("SpeedLink Plugin: Starting async dependency installation...");
     try {
       require.resolve("better-sqlite3");
-    } catch (e: any) {
-      console.log("[INSTALLING] 'better-sqlite3' not found. Installing via npm...");
+    } catch (e: unknown) {
+      logger.info("[INSTALLING] 'better-sqlite3' not found. Installing via npm...", e);
       await execFileAsync("npm", ["install", "better-sqlite3"], { cwd: "/root/telebox" });
-      console.log("[SUCCESS] Installed 'better-sqlite3'.");
+      logger.info("[SUCCESS] Installed 'better-sqlite3'.");
     }
     try {
       execSync("command -v sshpass");
-    } catch (e: any) {
-      console.log("[INSTALLING] 'sshpass' not found. Installing via system package manager...");
-      if (fs.existsSync("/usr/bin/apt-get"))
-        await execFileAsync("sudo", ["apt-get", "update"], { timeout: 120000 }).then(() =>
-          execFileAsync("sudo", ["apt-get", "install", "-y", "sshpass"], { timeout: 120000 })
-        );
-      else if (fs.existsSync("/usr/bin/yum"))
+    } catch (e: unknown) {
+      logger.info("[INSTALLING] 'sshpass' not found. Installing via system package manager...", e);
+      if (fs.existsSync("/usr/bin/apt-get")) {
+        await execFileAsync("sudo", ["apt-get", "update"], { timeout: 120000 });
+        await execFileAsync("sudo", ["apt-get", "install", "-y", "sshpass"], { timeout: 120000 });
+      } else if (fs.existsSync("/usr/bin/yum"))
         await execFileAsync("sudo", ["yum", "install", "-y", "sshpass"], { timeout: 120000 });
       else throw new Error("Unsupported package manager.");
-      console.log("[SUCCESS] Installed 'sshpass'.");
+      logger.info("[SUCCESS] Installed 'sshpass'.");
     }
     await msg.edit({
       text: html`✅ <b>依赖安装完成！</b><br><br>为了使插件生效，请现在<b>重启TeleBox</b>。`
     });
     dependenciesInstalled = false;
-  } catch (error: any) {
-    console.error("[FATAL] Dependency installation failed:", error);
+  } catch (error: unknown) {
+    logger.error("[FATAL] Dependency installation failed:", error);
     await msg.edit({
       text: `❌ <b>依赖自动安装失败！</b>\n\n请检查服务器后台日志。`,
     });
@@ -243,8 +244,8 @@ function loadConfig(): { timeout?: number } {
     if (fs.existsSync(CONFIG_PATH)) {
       return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
     }
-  } catch (e) {
-    console.error("Failed to load config:", e);
+  } catch (e: unknown) {
+    logger.error("Failed to load config:", e);
   }
   return {};
 }
@@ -252,8 +253,8 @@ function loadConfig(): { timeout?: number } {
 function saveConfig(config: any): void {
   try {
     fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), 'utf-8');
-  } catch (e) {
-    console.error("Failed to save config:", e);
+  } catch (e: unknown) {
+    logger.error("Failed to save config:", e);
   }
 }
 
@@ -265,7 +266,7 @@ if (config.timeout) {
 
 async function downloadCli(): Promise<void> {
   if (fs.existsSync(SPEEDTEST_PATH)) return;
-  console.log("Downloading Speedtest CLI...");
+  logger.info("Downloading Speedtest CLI...");
   const platform = process.platform;
   const arch = process.arch;
   let filename: string;
@@ -295,14 +296,14 @@ async function downloadCli(): Promise<void> {
     const filePath = path.join(ASSETS_DIR, file);
     if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
   });
-  console.log("Speedtest CLI downloaded and extracted successfully.");
+  logger.info("Speedtest CLI downloaded and extracted successfully.");
 }
 
 function getEncryptionKey(): string {
   if (fs.existsSync(KEY_PATH)) return fs.readFileSync(KEY_PATH, "utf-8");
   const newKey = crypto.randomBytes(16).toString("hex");
   fs.writeFileSync(KEY_PATH, newKey, "utf-8");
-  console.log(`SpeedLink Plugin (${PLUGIN_NAME}): New encryption key generated.`);
+  logger.info(`SpeedLink Plugin (${PLUGIN_NAME}): New encryption key generated.`);
   return newKey;
 }
 
@@ -330,7 +331,7 @@ function decrypt(text: string): string {
     const encryptedText = Buffer.from(textParts.join(":"), "hex");
     const decipher = crypto.createDecipheriv("aes-256-cbc", Buffer.from(ENCRYPTION_KEY), iv);
     return Buffer.concat([decipher.update(encryptedText), decipher.final()]).toString();
-  } catch (error: any) {
+  } catch (_e: unknown) {
     throw new Error("Failed to decrypt credentials. The key file may have been changed/deleted.");
   }
 }
@@ -341,7 +342,9 @@ function htmlEscape(text: any): string {
   if (typeof text !== 'string') {
     return text ? String(text) : "";
   }
-  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return text
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#x27;");
 }
 
 async function unitConvert(bytes: number, isBytes: boolean = false): Promise<string> {
@@ -373,7 +376,7 @@ async function getIpApi(ip: string) {
         )
       : "";
     return { asInfo, ccFlag };
-  } catch (error: any) {
+  } catch (_e: unknown) {
     return { asInfo: "", ccFlag: "" };
   }
 }
@@ -391,13 +394,13 @@ async function saveSpeedtestImage(url: string): Promise<string | null> {
     try {
       await fillRoundedCorners(imagePath, filledImagePath, bgColor, borderPx);
       return filledImagePath;
-    } catch (err: any) {
-      console.error("Failed to fill rounded corners:", err);
+    } catch (err: unknown) {
+      logger.error("Failed to fill rounded corners:", err);
     }
 
     return imagePath;
-  } catch (error: any) {
-    console.error("Failed to save speedtest image:", error);
+  } catch (error: unknown) {
+    logger.error("Failed to save speedtest image:", error);
     return null;
   }
 }
@@ -543,13 +546,12 @@ const speedtest = async (msg: MessageContext): Promise<void> => {
           await msg.edit({
             text: `✅ 服务器 <b>${htmlEscape(name)}</b> 添加成功！`,
           });
-        } catch (err: any) {
+        } catch (err: unknown) {
           await msg.edit({
-            text: `❌ 添加失败: <code>${htmlEscape(err.message)}</code>`,
+            text: `❌ 添加失败: <code>${htmlEscape(getErrorMessage(err))}</code>`,
           });
         }
       } else if (command === "list") {
-        // const servers: ServerConfig[] = db.prepare("SELECT * FROM servers ORDER BY id").all(); // Already fetched
         if (allServers.length === 0) {
           await msg.edit({
             text: "ℹ️ 未配置任何远程服务器。",
@@ -570,7 +572,6 @@ const speedtest = async (msg: MessageContext): Promise<void> => {
           });
           return;
         }
-        // const servers: ServerConfig[] = db.prepare("SELECT * FROM servers ORDER BY id").all(); // Already fetched
         const serverToDelete = allServers[displayId - 1];
         if (!serverToDelete) {
           await msg.edit({
@@ -606,9 +607,9 @@ const speedtest = async (msg: MessageContext): Promise<void> => {
           await msg.edit({
             text: `✅ <b>重命名成功</b>\n\n原别名 <b>${htmlEscape(serverToRename.name)}</b> 已修改为 <b>${htmlEscape(newName)}</b>`,
           });
-        } catch (err: any) {
+        } catch (err: unknown) {
           await msg.edit({
-            text: `❌ 重命名失败: <code>${htmlEscape(err.message)}</code>`,
+            text: `❌ 重命名失败: <code>${htmlEscape(getErrorMessage(err))}</code>`,
           });
         }
       } else if (command === "backup") {
@@ -621,16 +622,15 @@ const speedtest = async (msg: MessageContext): Promise<void> => {
         await msg.edit({ text: `⚙️ 正在准备备份文件...` });
         const date = new Date().toISOString().split("T")[0];
         const backupFilename = `${PLUGIN_NAME}_backup_${date}.db`;
-        await (msg.client as any)?.sendFile("me", {
-          file: DB_PATH,
+        await msg.client.sendMedia("me", DB_PATH, {
           caption: `SpeedLink 插件服务器数据备份\n日期: ${date}`,
-          attributes: [{ _: 'documentAttributeFilename', fileName: backupFilename }],
+          replyMarkup: undefined,
         });
         await msg.edit({
           text: `✅ 备份成功！\n\n文件已发送至您的<b>收藏夹 (Saved Messages)</b>。`,
         });
       } else if (command === "restore") {
-        if (!(msg as any).isReply) {
+        if (!msg.replyToMessage) {
           await msg.edit({
             text: `❌ <b>恢复失败</b>\n\n请回复一个备份文件来执行此命令。`,
           });
@@ -643,7 +643,7 @@ const speedtest = async (msg: MessageContext): Promise<void> => {
           return;
         }
         const repliedMsg = await safeGetReplyMessage(msg);
-        if (!(repliedMsg as any)?.document) {
+        if (repliedMsg?.media?.type !== 'document') {
           await msg.edit({
             text: `❌ <b>恢复失败</b>\n\n您回复的消息不包含文件。`,
           });
@@ -654,7 +654,7 @@ const speedtest = async (msg: MessageContext): Promise<void> => {
           text: `⚙️ 正在从备份文件恢复数据...`,
         });
         const buffer = repliedMsg!.media
-          ? await (msg.client as any)?.downloadMedia(repliedMsg!.media)
+          ? await msg.client.downloadAsBuffer(repliedMsg!.media)
           : null;
         if (buffer) {
           if (fs.existsSync(DB_PATH)) {
@@ -674,7 +674,6 @@ const speedtest = async (msg: MessageContext): Promise<void> => {
     }
 
     // --- Speed Test Execution Logic ---
-    // const allServers: ServerConfig[] = db.prepare("SELECT * FROM servers ORDER BY id").all(); // Already fetched
     let targetServers: (ServerConfig | null)[] = [];
 
     const isAllTest = command === "all" && args[1] !== "no";
@@ -705,12 +704,11 @@ const speedtest = async (msg: MessageContext): Promise<void> => {
 
       await msg.delete();
 
+      // 注意：测速必须按顺序逐台执行（每台依赖独立的状态消息和清理），不能并行
       for (const server of targetServers) {
         if (!server) continue;
 
-        const statusMsg = await (msg.client as any)?.sendText(msg.chat.id, `⚡️ [${targetServers.indexOf(server) + 1}/${
-            targetServers.length
-          }] 正在为 <b>${htmlEscape(server.name)}</b> 进行远程测速...`);
+        const statusMsg = await msg.client.sendText(msg.chat.id, `⚡️ [${targetServers.indexOf(server) + 1}/${targetServers.length}] 正在为 <b>${htmlEscape(server.name)}</b> 进行远程测速...`);
 
         try {
           const speedtestArgs = ["--accept-license", "--accept-gdpr", "-f", "json"];
@@ -765,6 +763,14 @@ const speedtest = async (msg: MessageContext): Promise<void> => {
           const beijingTime = new Date(resultDate.getTime() + 8 * 60 * 60 * 1000);
           const beijingTimeString = beijingTime.toISOString().replace('T', ' ').substring(0, 19);
 
+          // 并行计算所有单位转换（独立纯函数调用）
+          const [downRate, upRate, downData, upData] = await Promise.all([
+            unitConvert(result.download.bandwidth),
+            unitConvert(result.upload.bandwidth),
+            unitConvert(result.download.bytes, true),
+            unitConvert(result.upload.bytes, true),
+          ]);
+
           const caption = [
             `<b>${htmlEscape(server.name)}</b> ${ccFlag}`,
             `<code>Name</code>  <code>${htmlEscape(result.isp)} ${asInfo}</code>`,
@@ -777,13 +783,8 @@ const speedtest = async (msg: MessageContext): Promise<void> => {
             `<code>Ping</code>  <code>⇔${result.ping.latency.toFixed(3)}ms ±${result.ping.jitter.toFixed(
               3
             )}ms</code>`,
-            `<code>Rate</code>  <code>↓${await unitConvert(
-              result.download.bandwidth
-            )} ↑${await unitConvert(result.upload.bandwidth)}</code>`,
-            `<code>Data</code>  <code>↓${await unitConvert(
-              result.download.bytes,
-              true
-            )} ↑${await unitConvert(result.upload.bytes, true)}</code>`,
+            `<code>Rate</code>  <code>↓${downRate} ↑${upRate}</code>`,
+            `<code>Data</code>  <code>↓${downData} ↑${upData}</code>`,
             `<code>Time</code>  <code>${beijingTimeString} (UTC+8)</code>`,
             `<code>Used</code>  <code>${duration}s</code>`,
             `<code>Link</code>  ${htmlEscape(result.result.url)}`,
@@ -791,29 +792,27 @@ const speedtest = async (msg: MessageContext): Promise<void> => {
 
           const imagePath = await saveSpeedtestImage(result.result.url);
           if (imagePath && fs.existsSync(imagePath)) {
-            await (msg.client as any)?.sendFile(msg.chat.id, {
-              file: imagePath,
-              caption: caption,
+            await msg.client.sendMedia(msg.chat.id, imagePath, {
+              caption,
             });
             fs.unlinkSync(imagePath);
           } else {
             if (statusMsg) {
-              await statusMsg.edit({ text: caption });
+              await msg.client.editMessage({ message: statusMsg, text: caption });
             }
           }
           if (statusMsg) {
-            await statusMsg.delete();
+            await msg.client.deleteMessages([statusMsg]);
           }
-        } catch (error: any) {
+        } catch (error: unknown) {
           // Sanitize error message before displaying
-          let errorMsg = String(error.stderr || error.message || error);
+          let errorMsg = String((error as { stderr?: string }).stderr || getErrorMessage(error) || error);
           errorMsg = sanitizeErrorMessage(errorMsg, server);
           
           if (statusMsg) {
-            await statusMsg.edit({
-              text: `❌ <b>${htmlEscape(server.name)}</b> 测速失败\n\n<code>${htmlEscape(
-                errorMsg
-              )}</code>`,
+            await msg.client.editMessage({
+              message: statusMsg,
+              text: `❌ <b>${htmlEscape(server.name)}</b> 测速失败\n\n<code>${htmlEscape(errorMsg)}</code>`,
             });
           }
         }
@@ -849,17 +848,17 @@ const speedtest = async (msg: MessageContext): Promise<void> => {
       return;
     }
 
-    let statusMsg: MessageContext | undefined;
+    let statusMsg: import("@mtcute/node").Message | undefined;
     try {
-      statusMsg = await (msg.client as any)?.sendText(msg.chat.id, initialText);
+      statusMsg = await msg.client.sendText(msg.chat.id, initialText);
       await msg.delete();
-    } catch (e) {
-      console.error("Failed to send/delete, falling back to editing original message:", e);
+    } catch (e: unknown) {
+      logger.error("Failed to send/delete, falling back to editing original message:", e);
       try {
         await msg.edit({ text: initialText });
         statusMsg = msg;
-      } catch (editError) {
-        console.error("Critical: Fallback edit also failed.", editError);
+      } catch (editError: unknown) {
+        logger.error("Critical: Fallback edit also failed.", editError);
       }
     }
 
@@ -899,7 +898,7 @@ const speedtest = async (msg: MessageContext): Promise<void> => {
       } else {
         if (!fs.existsSync(SPEEDTEST_PATH)) {
           const downloadingMsg = "本地 Speedtest CLI 不存在，正在为您下载...";
-          if (statusMsg) await statusMsg.edit({ text: downloadingMsg });
+          if (statusMsg) await msg.client.editMessage({ message: statusMsg, text: downloadingMsg });
           else await msg.edit({ text: downloadingMsg });
           await downloadCli();
         }
@@ -953,27 +952,26 @@ const speedtest = async (msg: MessageContext): Promise<void> => {
 
       const imagePath = await saveSpeedtestImage(result.result.url);
       if (imagePath && fs.existsSync(imagePath)) {
-        await (msg.client as any)?.sendFile(msg.chat.id, {
-          file: imagePath,
-          caption: caption,
+        await msg.client.sendMedia(msg.chat.id, imagePath, {
+          caption,
         });
         fs.unlinkSync(imagePath);
       } else {
-        await (msg.client as any)?.sendText(msg.chat.id, caption);
+        await msg.client.sendText(msg.chat.id, caption);
       }
-      if (statusMsg) await statusMsg.delete();
-    } catch (error: any) {
+      if (statusMsg) await msg.client.deleteMessages([statusMsg]);
+    } catch (error: unknown) {
       // Sanitize error message before displaying
-      let errorMsg = String(error.stderr || error.message || error);
+      let errorMsg = String((error as { stderr?: string }).stderr || getErrorMessage(error) || error);
       errorMsg = sanitizeErrorMessage(errorMsg, serverConfig || undefined);
       
       const errorText = `❌ <b>速度测试失败</b>\n\n<code>${htmlEscape(errorMsg)}</code>`;
       if (statusMsg) {
-        await statusMsg.edit({ text: errorText });
+        await msg.client.editMessage({ message: statusMsg, text: errorText });
       }
     }
-  } catch (error: any) {
-    console.error(`SpeedLink Plugin (${PLUGIN_NAME}) critical error:`, error);
+  } catch (error: unknown) {
+    logger.error(`SpeedLink Plugin (${PLUGIN_NAME}) critical error:`, error);
     // Sanitize any critical errors as well
     const sanitizedError = sanitizeErrorMessage(String(error));
     await msg.edit({

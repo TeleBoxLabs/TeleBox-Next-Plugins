@@ -1,4 +1,6 @@
+import { TelegramClient, Message } from "@mtcute/node";
 import type { MessageContext } from "@mtcute/dispatcher";
+import type { MtcuteMessageContext } from "@utils/mtcuteTypes";
 import { getGlobalClient } from "@utils/globalClient";
 import * as fs from "fs";
 import * as path from "path";
@@ -8,6 +10,9 @@ import { npm_install } from "@utils/npm_install";
 const { execFile } = require("child_process");
 import { safeGetReplyMessage, safeGetMessages } from "@utils/safeGetMessages";
 import { getPrefixes } from "@utils/pluginManager";
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
+import { sleep as sleepMs } from "@utils/asyncHelpers";
 
 const DEFAULT_BACKGROUND = "#231d2b/#372e44";
 const DEFAULT_EMOJI_BRAND = "apple";
@@ -20,7 +25,10 @@ const EMOJI_SUFFIXES = [
 const customEmojiCache = new Map<string, Buffer | undefined>();
 const animatedCustomEmojiCache = new Map<string, Buffer | undefined>();
 const animatedFrameCache = new Map<string, AnimatedFrameSet>();
-const entityCache = new Map<string, any>();
+/** Cache entity type - can be a resolved peer entity, sender, or undefined when lookup fails */
+type CachedEntity = unknown;
+
+const entityCache = new Map<string, CachedEntity | undefined>();
 const avatarCache = new Map<string, Buffer | undefined>();
 const EMOJI_FETCH_CONCURRENCY = 8;
 const QUOTE_MESSAGE_CONCURRENCY = 8;
@@ -96,13 +104,13 @@ async function downloadFileIfMissingOrChanged(url: string, filePath: string): Pr
   fs.writeFileSync(filePath, data);
 }
 
-function requireOrInstall(pkg: string): any {
+function requireOrInstall(pkg: string): unknown {
   try {
     return require(pkg);
-  } catch (err: any) {
-    const code = err?.code;
+  } catch (err: unknown) {
+    const code = (err as { code?: string })?.code;
     if (code !== "MODULE_NOT_FOUND" && code !== "ERR_MODULE_NOT_FOUND") throw err;
-    console.warn("quote loader installing npm package", { pkg });
+    logger.warn("quote loader installing npm package", { pkg });
     npm_install(pkg);
     return require(pkg);
   }
@@ -122,7 +130,7 @@ function quoteResourcesReady(): boolean {
   const quoteDir = path.join(quotePluginDir(), "quote");
   const versionFile = path.join(quoteDir, ".version");
   let currentVersion = "";
-  try { currentVersion = fs.readFileSync(versionFile, "utf8").trim(); } catch (_) {}
+  try { currentVersion = fs.readFileSync(versionFile, "utf8").trim(); } catch (_: unknown) { logger.debug("[quote] version file not found, skipping cache check"); }
   if (currentVersion !== QUOTE_PLUGIN_VERSION) return false;
   if (QUOTE_DEP_FILES.some((rel) => !fs.existsSync(path.join(quoteDir, rel)))) return false;
   if (QUOTE_ASSET_FILES.some((rel) => !fs.existsSync(path.join(QUOTE_ASSETS_DIR, rel)))) return false;
@@ -134,35 +142,33 @@ async function ensureQuoteAssets(): Promise<void> {
   const quoteDir = path.join(quotePluginDir(), "quote");
   const versionFile = path.join(quoteDir, ".version");
   let currentVersion = "";
-  try { currentVersion = fs.readFileSync(versionFile, "utf8").trim(); } catch (_) {}
+  try { currentVersion = fs.readFileSync(versionFile, "utf8").trim(); } catch (_: unknown) { logger.debug("[quote] version file not found"); }
 
   if (currentVersion !== QUOTE_PLUGIN_VERSION) {
     const missingVendor = QUOTE_DEP_FILES.filter((rel) => !fs.existsSync(path.join(quoteDir, rel)));
     if (missingVendor.length > 0) {
-      console.warn("quote loader installing missing vendor", { from: currentVersion || undefined, to: QUOTE_PLUGIN_VERSION, count: missingVendor.length });
-      for (const rel of missingVendor) {
-        await downloadFileIfMissingOrChanged(`${QUOTE_BASE_URL}/${rel}`, path.join(quoteDir, rel));
-      }
+      logger.warn("quote loader installing missing vendor", { from: currentVersion || undefined, to: QUOTE_PLUGIN_VERSION, count: missingVendor.length });
+      await Promise.all(missingVendor.map((rel) => downloadFileIfMissingOrChanged(`${QUOTE_BASE_URL}/${rel}`, path.join(quoteDir, rel))));
     }
     fs.mkdirSync(quoteDir, { recursive: true });
     fs.writeFileSync(versionFile, QUOTE_PLUGIN_VERSION);
   }
 
-  for (const rel of QUOTE_ASSET_FILES) {
-    const filePath = path.join(QUOTE_ASSETS_DIR, rel);
-    if (!fs.existsSync(filePath)) {
-      console.warn("quote loader downloading asset", { rel });
-      await downloadFileIfMissingOrChanged(`${QUOTE_ASSETS_BASE_URL}/${rel}`, filePath);
-    }
+  const missingAssets = QUOTE_ASSET_FILES.filter((rel) => !fs.existsSync(path.join(QUOTE_ASSETS_DIR, rel)));
+  if (missingAssets.length > 0) {
+    logger.warn("quote loader downloading missing assets", { count: missingAssets.length });
+    await Promise.all(missingAssets.map((rel) => downloadFileIfMissingOrChanged(`${QUOTE_ASSETS_BASE_URL}/${rel}`, path.join(QUOTE_ASSETS_DIR, rel))));
   }
 
-  for (const font of QUOTE_FONT_FILES) {
-    const filePath = path.join(QUOTE_ASSETS_DIR, font.name);
-    if (!fs.existsSync(filePath)) {
-      console.warn("quote loader downloading CJK font", { name: font.name });
-      await downloadFileIfMissingOrChanged(font.url, filePath);
-    }
-  }
+  await Promise.all(
+    QUOTE_FONT_FILES.map(async (font) => {
+      const filePath = path.join(QUOTE_ASSETS_DIR, font.name);
+      if (!fs.existsSync(filePath)) {
+        logger.warn("quote loader downloading CJK font", { name: font.name });
+        await downloadFileIfMissingOrChanged(font.url, filePath);
+      }
+    })
+  );
 }
 
 async function getQuoteGen(): Promise<any> {
@@ -182,7 +188,7 @@ function quoteMs(start: number): number {
 }
 
 function quoteTiming(label: string, start: number, extra?: Record<string, any>): void {
-  console.warn("quote timing", label, `${quoteMs(start)}ms`, extra || "");
+  logger.warn("quote timing", label, `${quoteMs(start)}ms`, extra || "");
 }
 
 type QuoteArgs = {
@@ -207,7 +213,7 @@ type QuoteUser = {
   name: string | false;
   first_name: string | false;
   photo: Record<string, never>;
-  emoji_status?: any;
+  emoji_status?: { documentId?: bigint | number; document_id?: bigint | number; customEmojiId?: bigint | number; custom_emoji_id?: bigint | number; id?: bigint | number } | null;
 };
 
 function generateRandomColor(): string {
@@ -259,75 +265,98 @@ function parseArgs(text: string): QuoteArgs {
   return out;
 }
 
-function asBigInt(value: any): bigint | undefined {
+function asBigInt(value: unknown): bigint | undefined {
   if (value === undefined || value === null) return undefined;
-  try { return BigInt(value.value ?? value); } catch (_) { return undefined; }
+  try {
+    const raw = (value as { value?: unknown })?.value ?? value;
+    return BigInt(raw as bigint | number | string);
+  } catch (_: unknown) { logger.debug("[quote] BigInt conversion failed", _); return undefined; }
 }
 
-function idNumber(value: any): number {
-  const raw = value?.value ?? value;
+function idNumber(value: unknown): number {
+  const raw = (value as { value?: unknown })?.value ?? value;
   if (typeof raw === "bigint") return Number(raw);
   if (typeof raw === "number") return raw;
+  if (typeof raw !== "string") return 0;
   const parsed = Number(raw);
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
-function peerIdNumber(peer: any): number {
+function peerIdNumber(peer: unknown): number {
   if (!peer) return 0;
-  return idNumber(peer.userId ?? peer.chatId ?? peer.channelId ?? peer.id ?? peer);
+  const obj = peer as Record<string, unknown>;
+  return idNumber(obj.userId ?? obj.chatId ?? obj.channelId ?? obj.id ?? peer);
 }
 
 function senderIdNumber(msg: MessageContext): number {
-  return idNumber(msg.sender?.id ?? (msg as any).fromId ?? (msg as any).peerId);
+  return idNumber(msg.sender?.id ?? (msg.raw as { fromId?: { userId?: number } })?.fromId?.userId ?? 0);
 }
 
-function isApiMessage(value: any): boolean {
-  return !!value && typeof value === "object" && typeof value.id === "number" && (
-    value.className === "Message" ||
-    value._ === "message" ||
-    "message" in value ||
-    "media" in value ||
-    "peerId" in value ||
-    "fromId" in value ||
-    "senderId" in value
+function isApiMessage(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  const obj = value as Record<string, unknown>;
+  return typeof obj.id === "number" && (
+    obj.className === "Message" ||
+    obj._ === "message" ||
+    "message" in obj ||
+    "media" in obj ||
+    "peerId" in obj ||
+    "fromId" in obj ||
+    "senderId" in obj
   );
 }
 
-function quoteSenderKey(message: any): string {
+function quoteSenderKey(message: unknown): string {
   if (!message) return "";
-  const fromId = message.from?.id ?? message.chatId ?? message.senderId ?? message.fromId ?? message.peerId;
+  const obj = message as Record<string, unknown>;
+  const fromObj = obj.from as Record<string, unknown> | undefined;
+  const fromId = fromObj?.id ?? obj.chatId ?? obj.senderId ?? obj.fromId ?? obj.peerId;
   const n = peerIdNumber(fromId);
   return n ? String(n) : "";
 }
 
-function emojiStatusPayload(entity: any, customEmojiBuffer?: Buffer): any | undefined {
+function emojiStatusPayload(entity: unknown, customEmojiBuffer?: Buffer): { custom_emoji_id?: number | bigint; customEmojiBuffer?: Buffer } | undefined {
   const id = emojiStatusIdFromEntity(entity);
   if (!id) return undefined;
-  return { custom_emoji_id: id, customEmojiBuffer };
+  const num = Number(id);
+  if (Number.isFinite(num) && Math.abs(num) < Number.MAX_SAFE_INTEGER) return { custom_emoji_id: num, customEmojiBuffer };
+  try { return { custom_emoji_id: BigInt(id), customEmojiBuffer }; } catch { return undefined; }
 }
 
-function displayName(entity: any): string {
+function displayName(entity: unknown): string {
   if (!entity) return "User";
-  const first = entity.firstName || entity.first_name || "";
-  const last = entity.lastName || entity.last_name || "";
-  const title = entity.title || "";
-  const username = entity.username ? `@${entity.username}` : "";
+  const obj = entity as Record<string, unknown>;
+  const first = (obj.firstName || obj.first_name || "") as string;
+  const last = (obj.lastName || obj.last_name || "") as string;
+  const title = (obj.title || "") as string;
+  const username = obj.username ? `@${obj.username}` as string : "";
   return [first, last].filter(Boolean).join(" ") || title || username || "User";
 }
 
-function fwdHeaderName(fwd: any): string | undefined {
+interface FwdInfo {
+  fromId?: unknown;
+  from_id?: unknown;
+  savedFromPeer?: unknown;
+  saved_from_peer?: unknown;
+  fromName?: string;
+  from_name?: string;
+  postAuthor?: string;
+  post_author?: string;
+}
+
+function fwdHeaderName(fwd: FwdInfo): string | undefined {
   return fwd?.fromName || fwd?.from_name || fwd?.postAuthor || fwd?.post_author || undefined;
 }
 
-function fwdPeer(fwd: any): any | undefined {
+function fwdPeer(fwd: FwdInfo): unknown {
   return fwd?.fromId ?? fwd?.from_id ?? fwd?.savedFromPeer ?? fwd?.saved_from_peer;
 }
 
-async function forwardedSource(msg: MessageContext): Promise<{ peer?: any; entity?: any; name?: string; anonymous: boolean } | undefined> {
-  const fwd: any = (msg as any).fwdFrom || (msg as any).fwd_from;
-  if (!fwd) return undefined;
-
-  const client = await getGlobalClient().catch(() => null as any);
+async function forwardedSource(msg: MessageContext): Promise<{ peer?: unknown; entity?: unknown; name?: string; anonymous: boolean } | undefined> {
+  const rawFwd = (msg.raw as { fwdFrom?: unknown })?.fwdFrom;
+  if (!rawFwd) return undefined;
+  const fwd = rawFwd as { fromId?: unknown; from_id?: unknown; savedFromPeer?: unknown; saved_from_peer?: unknown; fromName?: string; from_name?: string };
+  const client = await getGlobalClient().catch((e) => { logger.warn("[quote] forwardedSource: getGlobalClient failed", getErrorMessage(e)); return null; });
   const peer = fwdPeer(fwd);
   const headerName = fwdHeaderName(fwd);
 
@@ -340,27 +369,29 @@ async function forwardedSource(msg: MessageContext): Promise<{ peer?: any; entit
   return { anonymous: true };
 }
 
-function stableEntityKey(entity: any): string | undefined {
-  const raw = entity?.id ?? entity?.userId ?? entity?.channelId ?? entity?.chatId ?? entity?.accessHash ?? entity;
+function stableEntityKey(entity: unknown): string | undefined {
+  const obj = entity as Record<string, unknown>;
+  const raw = obj.id ?? obj.userId ?? obj.channelId ?? obj.chatId ?? obj.accessHash ?? entity;
   if (!raw) return undefined;
-  try { return typeof raw === "bigint" ? raw.toString() : JSON.stringify(raw, (_, v) => typeof v === "bigint" ? v.toString() : v); } catch (_) { return String(raw); }
+  try { return typeof raw === "bigint" ? raw.toString() : JSON.stringify(raw, (_, v) => typeof v === "bigint" ? v.toString() : v); } catch (_: unknown) { logger.debug("[quote] JSON stringify failed, falling back to String()", _); return String(raw); }
 }
 
-async function getPeerEntity(client: any, peer: any): Promise<any | undefined> {
+async function getPeerEntity(client: unknown, peer: unknown): Promise<unknown | undefined> {
   if (!client || !peer) return undefined;
   const key = JSON.stringify(peer, (_, v) => typeof v === "bigint" ? v.toString() : v);
   if (entityCache.has(key)) return entityCache.get(key);
   try {
-    const entity = await client.resolvePeer(peer);
+    const clientWithInternals = client as { resolvePeer: (p: unknown) => Promise<unknown> };
+    const entity = await clientWithInternals.resolvePeer(peer);
     entityCache.set(key, entity);
     return entity;
-  } catch (_) {
+  } catch (_: unknown) {
     entityCache.set(key, undefined);
     return undefined;
   }
 }
 
-async function senderEntity(msg: MessageContext): Promise<any | undefined> {
+async function senderEntity(msg: MessageContext): Promise<unknown | undefined> {
   const peer = msg.sender?.id;
   const key = peer ? `sender:${stableEntityKey(peer)}` : undefined;
   if (key && entityCache.has(key)) return entityCache.get(key);
@@ -370,64 +401,77 @@ async function senderEntity(msg: MessageContext): Promise<any | undefined> {
       if (key) entityCache.set(key, sender);
       return sender;
     }
-  } catch (_) {}
-  const client = await getGlobalClient().catch(() => null as any);
+  } catch (err: unknown) {
+    logger.debug("quote: sender entity from message failed", err);
+  }
+  const client = await getGlobalClient().catch((e) => { logger.warn("[quote] senderEntity: getGlobalClient failed", getErrorMessage(e)); return null; });
   const entity = await getPeerEntity(client, peer);
   if (key) entityCache.set(key, entity);
   return entity;
 }
 
-async function senderName(msg: MessageContext): Promise<string> {
-  return displayName(await senderEntity(msg));
-}
-
-function emojiStatusIdFromEntity(entity: any): string | undefined {
-  const status = entity?.emojiStatus ?? entity?.emoji_status;
-  if (!status) return undefined;
-  const documentId = status.documentId ?? status.document_id ?? status.customEmojiId ?? status.custom_emoji_id ?? status.id;
+function emojiStatusIdFromEntity(entity: unknown): string | undefined {
+  if (!entity || typeof entity !== "object") return undefined;
+  const obj = entity as Record<string, unknown>;
+  const status = obj.emojiStatus ?? obj.emoji_status;
+  if (!status || typeof status !== "object") return undefined;
+  const statusObj = status as Record<string, unknown>;
+  const documentId = statusObj.documentId ?? statusObj.document_id ?? statusObj.customEmojiId ?? statusObj.custom_emoji_id ?? statusObj.id;
   if (!documentId) return undefined;
   return String(documentId);
 }
 
-function messageDate(msg: MessageContext): number | undefined {
-  const date = (msg as any).date;
-  if (date instanceof Date) return Math.floor(date.getTime() / 1000);
-  if (typeof date === "number") return date;
-  return undefined;
+function getDocumentAttributes(msg: MessageContext): unknown[] {
+  const doc = (msg.media as { document?: { attributes?: unknown[] } })?.document ?? (msg.raw as { document?: { attributes?: unknown[] } })?.document;
+  return doc?.attributes ?? [];
 }
 
-function getDocumentAttributes(msg: MessageContext): any[] {
-  const doc = (msg as any).document ?? (msg as any).media?.document;
-  return doc?.attributes || [];
-}
-
-function audioAttribute(msg: MessageContext): any | undefined {
-  return getDocumentAttributes(msg).find((a: any) => (a.className || a.constructor?.name || "").includes("Audio"));
+function audioAttribute(msg: MessageContext): unknown | undefined {
+  return getDocumentAttributes(msg).find((a: unknown) => {
+    if (!a || typeof a !== "object") return false;
+    const obj = a as Record<string, { name?: string } | undefined>;
+    const className = String(obj.className ?? "");
+    const ctorName = obj.constructor?.name ? String(obj.constructor.name) : "";
+    return (className || ctorName || "").includes("Audio");
+  });
 }
 
 function voiceWaveform(msg: MessageContext): number[] | undefined {
-  const attr = audioAttribute(msg);
+  const attr = audioAttribute(msg) as { waveform?: unknown } | undefined;
   const raw = attr?.waveform;
   if (!raw) return undefined;
   let arr: number[];
-  if (Array.isArray(raw)) arr = raw.map((x: any) => Number(x) || 0);
+  if (Array.isArray(raw)) arr = raw.map((x: unknown) => Number(x) || 0);
   else if (Buffer.isBuffer(raw) || raw instanceof Uint8Array) arr = Array.from(raw as Uint8Array).map((x) => Number(x) || 0);
   else return undefined;
   if (!arr.length) return undefined;
   return arr.map((x) => Math.max(0, Math.min(31, x)));
 }
 
+function messageDate(msg: MessageContext): number | undefined {
+  const date = msg.date;
+  if (date instanceof Date) return Math.floor(date.getTime() / 1000);
+  if (typeof date === "number") return date;
+  return undefined;
+}
+
+function getDocumentAttribute(a: unknown, key: string): string {
+  if (!a || typeof a !== "object") return "";
+  const obj = a as Record<string, unknown>;
+  return String(obj[key] ?? "");
+}
+
 function getMediaKind(msg: MessageContext): string | undefined {
-  const media: any = (msg as any).media;
+  const media = msg.media as { className?: string; constructor?: { name?: string } } | undefined;
   if (!media) return undefined;
   const cls = media.className || media.constructor?.name || "";
   const attrs = getDocumentAttributes(msg);
-  if (attrs.some((a: any) => (a.className || "").includes("Sticker"))) return "sticker";
-  if (attrs.some((a: any) => (a.className || "").includes("Animated")) || cls.includes("Dice")) return "animation";
-  if (attrs.some((a: any) => (a.className || "").includes("Audio") && a.voice)) return "voice";
-  if (attrs.some((a: any) => (a.className || "").includes("Audio"))) return "audio";
-  if (attrs.some((a: any) => (a.className || "").includes("Video") && a.roundMessage)) return "round";
-  if (attrs.some((a: any) => (a.className || "").includes("Video"))) return "video";
+  if (attrs.some((a: unknown) => getDocumentAttribute(a, "className").includes("Sticker"))) return "sticker";
+  if (attrs.some((a: unknown) => getDocumentAttribute(a, "className").includes("Animated")) || cls.includes("Dice")) return "animation";
+  if (attrs.some((a: unknown) => getDocumentAttribute(a, "className").includes("Audio") && (a as Record<string, unknown>)?.voice)) return "voice";
+  if (attrs.some((a: unknown) => getDocumentAttribute(a, "className").includes("Audio"))) return "audio";
+  if (attrs.some((a: unknown) => getDocumentAttribute(a, "className").includes("Video") && (a as Record<string, unknown>)?.roundMessage)) return "round";
+  if (attrs.some((a: unknown) => getDocumentAttribute(a, "className").includes("Video"))) return "video";
   if (cls.includes("Photo")) return "photo";
   if (cls.includes("Geo")) return "location";
   if (cls.includes("Venue")) return "venue";
@@ -462,7 +506,7 @@ function messageText(msg: MessageContext): string {
 }
 
 function convertEntities(msg: MessageContext): any[] {
-  const entities = ((msg as any).entities || []) as any[];
+  const entities = msg.entities as unknown as Array<{ className?: string; constructor?: { name?: string }; offset?: number; length?: number; language?: string; url?: string; userId?: number; documentId?: string | number; document_id?: string | number }>;
   return entities.map((e) => {
     const name = e.className || e.constructor?.name || "";
     const offset = e.offset ?? 0;
@@ -503,8 +547,8 @@ async function normalizeAvatarBuffer(buffer: Buffer): Promise<Buffer | undefined
       .flatten({ background: { r: 0, g: 0, b: 0 } })
       .png()
       .toBuffer();
-  } catch (err: any) {
-    console.warn("quote avatar normalize failed", err?.message || err);
+  } catch (err: unknown) {
+    logger.warn("quote avatar normalize failed", getErrorMessage(err));
     return buffer.length > 0 ? buffer : undefined;
   }
 }
@@ -516,9 +560,9 @@ async function downloadEntityAvatar(client: any, entity: any): Promise<Buffer | 
 
   const tryDownload = async (isBig: boolean): Promise<Buffer | undefined> => {
     try {
-      const peer = typeof entity === "object" && entity._ ? entity : await client.resolvePeer(entity).catch(() => null);
+      const peer = typeof entity === "object" && entity._ ? entity : await client.resolvePeer(entity).catch((e: unknown) => { logger.warn("[quote] resolvePeer failed", getErrorMessage(e)); return null; });
       if (!peer) return undefined;
-      const fullUser = await client.call({ _: 'users.getFullUser', id: peer }).catch(() => null as any);
+      const fullUser = await client.call({ _: 'users.getFullUser', id: peer }).catch((e: unknown) => { logger.warn("[quote] getFullUser failed", getErrorMessage(e)); return null; });
       const photo = fullUser?.full_user?.photo;
       if (!photo || photo._ !== 'userProfilePhoto') return undefined;
       const location = {
@@ -527,10 +571,10 @@ async function downloadEntityAvatar(client: any, entity: any): Promise<Buffer | 
         peer: peer,
         photo_id: photo.photo_id,
       };
-      const buffer = await client.downloadAsBuffer(location).catch(() => null as any);
+      const buffer = await client.downloadAsBuffer(location).catch((e: unknown) => { logger.warn("[quote] downloadAsBuffer failed", getErrorMessage(e)); return null; });
       return Buffer.isBuffer(buffer) && buffer.length > 0 ? buffer : undefined;
-    } catch (err: any) {
-      console.warn(`quote avatar ${isBig ? "big" : "small"} download failed`, err?.message || err);
+    } catch (err: unknown) {
+      logger.warn(`quote avatar ${isBig ? "big" : "small"} download failed`, getErrorMessage(err));
       return undefined;
     }
   };
@@ -542,12 +586,8 @@ async function downloadEntityAvatar(client: any, entity: any): Promise<Buffer | 
 }
 
 async function downloadSenderAvatar(msg: MessageContext, entity?: any): Promise<Buffer | undefined> {
-  const client = await getGlobalClient().catch(() => null as any);
+  const client = await getGlobalClient().catch((e) => { logger.warn("[quote] downloadSenderAvatar: getGlobalClient failed", getErrorMessage(e)); return null; });
   return downloadEntityAvatar(client, entity ?? await senderEntity(msg));
-}
-
-function sleepMs(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function waitForStableFile(filePath: string, timeoutMs = 8000): Promise<Buffer | undefined> {
@@ -566,31 +606,32 @@ async function waitForStableFile(filePath: string, timeoutMs = 8000): Promise<Bu
           lastSize = size;
         }
       }
-    } catch (_) {}
+    } catch (_: unknown) { logger.debug("[quote] file stability check failed, continuing poll", _); }
     await sleepMs(120);
   }
   try {
     if (fs.existsSync(filePath) && fs.statSync(filePath).size > 0) return fs.readFileSync(filePath);
-  } catch (_) {}
+  } catch (_: unknown) { logger.debug("[quote] final fallback read failed", _); }
   return undefined;
 }
 
-async function downloadMediaToBuffer(client: any, target: any): Promise<Buffer | undefined> {
+async function downloadMediaToBuffer(client: TelegramClient, target: { media?: unknown } | null): Promise<Buffer | undefined> {
   if (!client || !target) return undefined;
   try {
     const media = target.media || target;
     if (!media) return undefined;
-    const buffer = await client.downloadAsBuffer(media as any);
+    const buffer = await client.downloadAsBuffer(media as Parameters<typeof client.downloadAsBuffer>[0]);
     return buffer && buffer.length > 0 ? Buffer.from(buffer) : undefined;
-  } catch (err: any) {
-    console.warn("quote media download failed", err?.message || err);
+  } catch (err: unknown) {
+    logger.warn("quote media download failed", getErrorMessage(err));
     return undefined;
   }
 }
 
 async function downloadMessageMedia(msg: MessageContext, enabled: boolean): Promise<Buffer | undefined> {
-  if (!enabled || !(msg as any).media) return undefined;
-  const client = await getGlobalClient().catch(() => null as any);
+  if (!enabled || !msg.media) return undefined;
+  const client = await getGlobalClient().catch((e) => { logger.warn("[quote] downloadMessageMedia: getGlobalClient failed", getErrorMessage(e)); return null; });
+  if (!client) return undefined;
   return downloadMediaToBuffer(client, msg);
 }
 
@@ -612,8 +653,8 @@ async function mediaBufferToCanvas(buffer: Buffer | undefined, kind: string | un
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.drawImage(img, 0, 0);
     return canvas;
-  } catch (err: any) {
-    console.warn("quote media canvas failed", kind, err?.message || err);
+  } catch (err: unknown) {
+    logger.warn("quote media canvas failed", kind, getErrorMessage(err));
     return undefined;
   }
 }
@@ -698,11 +739,11 @@ async function probeAnimatedInfo(buffer: Buffer): Promise<{ fps: number; duratio
     const durationRaw = Number(data.get("duration") || data.get("TAG:DURATION") || data.get("format.duration"));
     const duration = Number.isFinite(durationRaw) && durationRaw > 0 ? durationRaw : 2;
     return { fps, duration };
-  } catch (err: any) {
-    console.warn("quote animated probe failed", err?.message || err);
+  } catch (err: unknown) {
+    logger.warn("quote animated probe failed", getErrorMessage(err));
     return { fps: 12, duration: 2 };
   } finally {
-    try { if (fs.existsSync(input)) fs.unlinkSync(input); } catch (_) {}
+    try { if (fs.existsSync(input)) fs.unlinkSync(input); } catch (_: unknown) { logger.debug("[quote] cleanup: input already removed", _); }
   }
 }
 
@@ -737,18 +778,16 @@ async function convertAnimatedEmojiToPng(buffer: Buffer): Promise<Buffer | undef
         return await (await getSharp())(png, { animated: false }).ensureAlpha().png({ force: true }).toBuffer();
       }
     }
-  } catch (_) {
-    // keep fallback quiet; normal static buffers and unsupported tgs land here
-  } finally {
-    try { if (fs.existsSync(input)) fs.unlinkSync(input); } catch (_) {}
-    try { if (fs.existsSync(output)) fs.unlinkSync(output); } catch (_) {}
+  } catch (_: unknown) { logger.warn(`[quote] keep fallback quiet; normal static buffers and unsupported tgs land here:`, _) } finally {
+    try { if (fs.existsSync(input)) fs.unlinkSync(input); } catch (_: unknown) { logger.debug("[quote] cleanup: input already removed", _); }
+    try { if (fs.existsSync(output)) fs.unlinkSync(output); } catch (_: unknown) { logger.debug("[quote] cleanup: output already removed", _); }
   }
 
   try {
     // Some animated emoji downloads are tgs/lottie. Sharp cannot render lottie,
     // but if Telegram provided a raster thumbnail this path is not used.
     return await (await getSharp())(buffer, { animated: false }).resize(128, 128, { fit: "inside" }).png({ force: true }).toBuffer();
-  } catch (_) {
+  } catch (_: unknown) {
     return undefined;
   }
 }
@@ -771,12 +810,12 @@ async function extractAnimatedFrames(buffer: Buffer, size: number, frameCount: n
     ], 20000);
     const files = fs.readdirSync(dir).filter((f) => f.endsWith(".png")).sort();
     return files.map((f) => fs.readFileSync(path.join(dir, f))).filter((b) => b.length > 0);
-  } catch (err: any) {
-    console.warn("quote animated frame extract failed", err?.message || err);
+  } catch (err: unknown) {
+    logger.warn("quote animated frame extract failed", getErrorMessage(err));
     return [];
   } finally {
-    try { if (fs.existsSync(input)) fs.unlinkSync(input); } catch (_) {}
-    try { if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true }); } catch (_) {}
+    try { if (fs.existsSync(input)) fs.unlinkSync(input); } catch (_: unknown) { logger.debug("[quote] cleanup: input already removed", _); }
+    try { if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true }); } catch (_: unknown) { logger.debug("[quote] cleanup: dir already removed", _); }
   }
 }
 
@@ -789,7 +828,7 @@ async function bufferToCanvas(buffer: Buffer): Promise<any | undefined> {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.drawImage(img, 0, 0);
     return canvas;
-  } catch (_) {
+  } catch (_: unknown) {
     return undefined;
   }
 }
@@ -867,10 +906,10 @@ async function probeWebmAlpha(buffer: Buffer): Promise<string> {
       input,
     ], 10000);
     return out.trim().replace(/\s+/g, " ") || "empty-ffprobe";
-  } catch (err: any) {
-    return `probe-failed:${err?.message || err}`;
+  } catch (err: unknown) {
+    return `probe-failed:${getErrorMessage(err)}`;
   } finally {
-    try { if (fs.existsSync(input)) fs.unlinkSync(input); } catch (_) {}
+    try { if (fs.existsSync(input)) fs.unlinkSync(input); } catch (_: unknown) { logger.debug("[quote] cleanup: input already removed", _); }
   }
 }
 
@@ -887,10 +926,13 @@ async function downloadCustomEmojiAnimatedPreferred(client: any, doc: any): Prom
   const id = String(doc?.id ?? doc?.documentId ?? doc?.document_id ?? "");
   const mime = doc?.mimeType || doc?.mime_type || "";
   const thumbs = customEmojiThumbs(doc);
-  console.warn("quote emoji source scan", id, "docMime", mime, "thumbs", thumbs.map((t: any) => `${t?.className || t?.constructor?.name || typeof t}:${t?.type || ""}:${t?.size || ""}`).join(","), "mode", "skip-thumbs-use-original");
+  logger.warn("quote emoji source scan", id, "docMime", mime, "thumbs", thumbs.map((t: any) => `${t?.className || t?.constructor?.name || typeof t}:${t?.type || ""}:${t?.size || ""}`).join(","), "mode", "skip-thumbs-use-original");
   const td = Date.now();
-  const original = await downloadMediaToBuffer(client, doc).catch(() => undefined);
-  console.warn("quote emoji source selected", id, "original", original?.length || 0, bufferKind(original), "downloadMs", quoteMs(td), "totalMs", quoteMs(t0));
+  const original = await downloadMediaToBuffer(client, doc).catch((e) => {
+    logger.debug('[quote] downloadMediaToBuffer failed:', e);
+    return undefined;
+  });
+  logger.warn("quote emoji source selected", id, "original", original?.length || 0, bufferKind(original), "downloadMs", quoteMs(td), "totalMs", quoteMs(t0));
   return original;
 }
 function collectAnimatedMediaMessages(messages: any[]): any[] {
@@ -945,8 +987,8 @@ async function encodeFramesToWebm(frames: Buffer[], fps = TG_STICKER_FPS): Promi
     quoteTiming("webm.encode_total", t0, { frames: frames.length, bytes: best?.length || 0, crf: bestCrf });
     return best || Buffer.alloc(0);
   } finally {
-    for (const output of outputs) try { if (fs.existsSync(output)) fs.unlinkSync(output); } catch (_) {}
-    try { if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true }); } catch (_) {}
+    for (const output of outputs) try { if (fs.existsSync(output)) fs.unlinkSync(output); } catch (_: unknown) { logger.debug("[quote] cleanup: output already removed", _); }
+    try { if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true }); } catch (_: unknown) { logger.debug("[quote] cleanup: dir already removed", _); }
   }
 }
 async function generateAnimatedQuoteWebm(quoteMessages: any[], args: QuoteArgs): Promise<{ image: Buffer; ext: string; width?: number; height?: number; duration?: number }> {
@@ -1038,12 +1080,14 @@ async function generateAnimatedQuoteWebm(quoteMessages: any[], args: QuoteArgs):
     const probe = await loadImage(rendered[0]);
     width = probe.width;
     height = probe.height;
-  } catch (_) {}
+  } catch (err: unknown) {
+    logger.debug("quote: canvas probe failed, using defaults", err);
+  }
   const encoded = await encodeFramesToWebm(rendered, fps);
   const tprobe = Date.now();
   const alphaProbe = await probeWebmAlpha(encoded);
   quoteTiming("webm.alpha_probe", tprobe);
-  console.warn("quote webm generated", "bytes", encoded.length, "fps", fps, "frames", rendered.length, "size", `${width}x${height}`, "alpha", alphaProbe);
+  logger.warn("quote webm generated", "bytes", encoded.length, "fps", fps, "frames", rendered.length, "size", `${width}x${height}`, "alpha", alphaProbe);
   quoteTiming("animated.total", t0, { frames: rendered.length, bytes: encoded.length });
   return { image: encoded, ext: "webm", width, height, duration: Math.ceil(duration) };
 }
@@ -1056,7 +1100,7 @@ async function normalizeCustomEmojiBuffer(buffer: Buffer | undefined): Promise<B
   }
   try {
     return await (await getSharp())(buffer, { animated: false }).resize(128, 128, { fit: "inside" }).png({ force: true }).toBuffer();
-  } catch (_) {
+  } catch (_: unknown) {
     return buffer;
   }
 }
@@ -1069,8 +1113,8 @@ async function getCustomEmojiDocuments(client: any, ids: string[]): Promise<any[
       _: 'messages.getCustomEmojiDocuments',
       documentId: unique.map((id) => BigInt(id)),
     });
-  } catch (err: any) {
-    console.warn("quote custom emoji fetch failed", err?.message || err);
+  } catch (err: unknown) {
+    logger.warn("quote custom emoji fetch failed", getErrorMessage(err));
     return [];
   }
 }
@@ -1099,12 +1143,12 @@ async function hydrateCustomEmojiBuffers(client: any, messages: any[]): Promise<
     if (isAnimatedRasterBuffer(rawBuffer)) animatedCustomEmojiCache.set(id, rawBuffer);
     const buffer = await normalizeCustomEmojiBuffer(rawBuffer);
     customEmojiCache.set(id, buffer);
-    console.warn("quote custom emoji loaded", id, buffer ? buffer.length : 0, wasAnimated ? "animated-converted" : "static", "source", isGifBuffer(rawBuffer) ? "gif" : isWebmBuffer(rawBuffer) ? "webm" : "other", "mime", doc.mimeType || doc.mime_type || "", "thumbs", doc.thumbs?.length || 0, "videoThumbs", doc.videoThumbs?.length || doc.video_thumbs?.length || 0);
+    logger.warn("quote custom emoji loaded", id, buffer ? buffer.length : 0, wasAnimated ? "animated-converted" : "static", "source", isGifBuffer(rawBuffer) ? "gif" : isWebmBuffer(rawBuffer) ? "webm" : "other", "mime", doc.mimeType || doc.mime_type || "", "thumbs", doc.thumbs?.length || 0, "videoThumbs", doc.videoThumbs?.length || doc.video_thumbs?.length || 0);
   });
   const loadedDocIds = new Set(docs.map((doc: any) => String(doc.id ?? doc.documentId ?? doc.document_id ?? "")).filter(Boolean));
   ids.forEach((id) => {
-    if (!loadedDocIds.has(id)) console.warn("quote custom emoji document missing", id);
-    else if (!customEmojiCache.get(id)) console.warn("quote custom emoji buffer missing", id);
+    if (!loadedDocIds.has(id)) logger.warn("quote custom emoji document missing", id);
+    else if (!customEmojiCache.get(id)) logger.warn("quote custom emoji buffer missing", id);
   });
 
   const applyEntity = (entity: any) => {
@@ -1112,7 +1156,7 @@ async function hydrateCustomEmojiBuffers(client: any, messages: any[]): Promise<
     if (!id) return;
     const buffer = customEmojiCache.get(String(id));
     if (buffer) entity.customEmojiBuffer = buffer;
-    else console.warn("quote custom emoji apply missing", String(id));
+    else logger.warn("quote custom emoji apply missing", String(id));
   };
   const applyMessage = (message: any) => {
     (message.entities || []).forEach(applyEntity);
@@ -1121,11 +1165,11 @@ async function hydrateCustomEmojiBuffers(client: any, messages: any[]): Promise<
     if (statusId) {
       const buffer = customEmojiCache.get(String(statusId));
       if (buffer) {
-        console.warn("quote sender emoji status cached", String(statusId), buffer.length);
+        logger.warn("quote sender emoji status cached", String(statusId), buffer.length);
         if (message.from?.emoji_status) message.from.emoji_status.customEmojiBuffer = buffer;
         if (message.emoji_status) message.emoji_status.customEmojiBuffer = buffer;
       } else {
-        console.warn("quote sender emoji status missing", String(statusId));
+        logger.warn("quote sender emoji status missing", String(statusId));
       }
     }
     if (message.replyMessage) applyMessage(message.replyMessage);
@@ -1136,26 +1180,32 @@ async function hydrateCustomEmojiBuffers(client: any, messages: any[]): Promise<
 
 async function replyPreview(msg: MessageContext, includeReply: boolean, args: QuoteArgs): Promise<any | undefined> {
   if (!includeReply) return undefined;
-  const reply = await safeGetReplyMessage(msg).catch(() => undefined);
+  const reply = await safeGetReplyMessage(msg).catch((e) => {
+    logger.debug('[quote] safeGetReplyMessage failed:', e);
+    return undefined;
+  });
   if (!reply) return undefined;
-  const entity = await senderEntity(reply as any);
+  // safeGetReplyMessage returns Message, but downstream fns expect MessageContext
+  const replyCtx = reply as MtcuteMessageContext;
+  const entity = await senderEntity(replyCtx);
   const name = displayName(entity);
   return {
-    chatId: senderIdNumber(reply as any),
-    from: { id: senderIdNumber(reply as any), name, first_name: name, photo: {}, emoji_status: emojiStatusPayload(entity) },
+    chatId: senderIdNumber(replyCtx),
+    from: { id: senderIdNumber(replyCtx), name, first_name: name, photo: {}, emoji_status: emojiStatusPayload(entity) },
     name,
-    text: messageText(reply as any),
-    entities: convertEntities(reply as any),
-    ...await prepareQuoteMedia(reply as any, args),
+    text: messageText(replyCtx),
+    entities: convertEntities(replyCtx),
+    ...await prepareQuoteMedia(replyCtx, args),
   };
 }
 
 async function forwardPreview(msg: MessageContext): Promise<any | undefined> {
-  const fwd: any = (msg as any).fwdFrom || (msg as any).fwd_from;
-  if (!fwd) return undefined;
+  const rawFwd = (msg.raw as { fwdFrom?: unknown })?.fwdFrom;
+  if (!rawFwd) return undefined;
+  const fwd: any = rawFwd;
   const src = await forwardedSource(msg);
   const name = src?.name || "Forwarded";
-  const client = await getGlobalClient().catch(() => null as any);
+  const client = await getGlobalClient().catch((e) => { logger.warn("[quote] toQuoteMessage: getGlobalClient failed", getErrorMessage(e)); return null; });
   const avatarBuffer = src?.entity && !src.anonymous ? await downloadEntityAvatar(client, src.entity) : undefined;
   return {
     chatId: peerIdNumber(src?.peer || src?.entity),
@@ -1179,7 +1229,7 @@ async function toQuoteMessage(msg: MessageContext, args: QuoteArgs): Promise<any
   const effectiveName = fwd?.name || displayName(effectiveEntity);
   const [avatarBuffer, media, replyMessage, forward] = await Promise.all([
     fwd && !fwd.anonymous && fwd.entity
-      ? downloadEntityAvatar(await getGlobalClient().catch(() => null as any), fwd.entity)
+      ? downloadEntityAvatar(await getGlobalClient().catch((e) => { logger.warn("[quote] emojiStatus: getGlobalClient failed", getErrorMessage(e)); return null; }), fwd.entity)
       : downloadSenderAvatar(msg, entity),
     prepareQuoteMedia(msg, args),
     replyPreview(msg, args.reply, args),
@@ -1189,7 +1239,7 @@ async function toQuoteMessage(msg: MessageContext, args: QuoteArgs): Promise<any
   let emojiBuffer: Buffer | undefined;
   if (emojiId) {
     emojiBuffer = customEmojiCache.get(emojiId);
-    console.warn("quote sender emoji status", emojiId, emojiBuffer ? emojiBuffer.length : 0);
+    logger.warn("quote sender emoji status", emojiId, emojiBuffer ? emojiBuffer.length : 0);
   }
   const user: QuoteUser = {
     id: fwd?.peer ? peerIdNumber(fwd.peer) : senderIdNumber(msg),
@@ -1219,41 +1269,42 @@ async function toQuoteMessage(msg: MessageContext, args: QuoteArgs): Promise<any
     mediaCrop: media.mediaCrop,
     emoji_status: args.hidden || fwd?.anonymous ? undefined : emojiStatusPayload(effectiveEntity, emojiBuffer),
     date: messageDate(msg),
-    via_bot: (msg as any).viaBotId ?? (msg as any).via_bot_id,
+    via_bot: msg.viaBot?.id,
     senderTag: undefined,
   };
 }
 
 async function collectMessages(msg: MessageContext, args: QuoteArgs): Promise<any[]> {
-  const reply = await safeGetReplyMessage(msg).catch(() => undefined);
+  const reply = await safeGetReplyMessage(msg).catch((e) => {
+    logger.debug('[quote] collectMessages safeGetReplyMessage failed:', e);
+    return undefined;
+  });
   const count = args.count || 1;
 
   const peer = msg.chat;
-  const client = await getGlobalClient().catch(() => null as any);
+  const client = await getGlobalClient().catch((e) => { logger.warn("[quote] collectMessages: getGlobalClient failed", getErrorMessage(e)); return null; });
   if (!peer || !client) return [reply || msg];
 
   if (reply) {
     const baseId = reply.id;
     if (!baseId || Math.abs(count) <= 1) return [reply];
     const limit = Math.min(Math.abs(count), MAX_QUOTE_MESSAGES);
-    const params = count > 0
-      ? { offsetId: baseId - 1, limit, reverse: true }
-      : { offsetId: baseId + 1, limit };
-    const messages = await safeGetMessages(client, peer, params as any).catch(() => []);
+    const messages = count > 0
+      ? await client.getHistory(peer, { minId: baseId, limit, reverse: true }).catch(() => [] as Message[])
+      : await client.getHistory(peer, { maxId: baseId, limit }).catch(() => [] as Message[]);
     const result = (Array.isArray(messages) ? messages : []).filter(isApiMessage).sort((a: any, b: any) => a.id - b.id);
-    console.warn("quote collect messages", { reply: true, count, baseId, params, got: result.map((m: any) => m.id) });
+    logger.warn("quote collect messages", { reply: true, count, baseId, got: result.map((m: any) => m.id) });
     return result.length ? result : [reply];
   }
 
   const commandId = msg.id;
   if (!commandId || Math.abs(count) <= 1) return [msg];
   const limit = Math.min(Math.abs(count), MAX_QUOTE_MESSAGES);
-  const params = count > 0
-    ? { offsetId: commandId, limit }
-    : { offsetId: commandId + 1, limit };
-  const messages = await safeGetMessages(client, peer, params as any).catch(() => []);
+  const messages = count > 0
+    ? await client.getHistory(peer, { minId: commandId, limit }).catch(() => [] as Message[])
+    : await client.getHistory(peer, { maxId: commandId, limit }).catch(() => [] as Message[]);
   const result = (Array.isArray(messages) ? messages : []).filter(isApiMessage).sort((a: any, b: any) => a.id - b.id);
-  console.warn("quote collect messages", { reply: false, count, commandId, params, got: result.map((m: any) => m.id) });
+  logger.warn("quote collect messages", { reply: false, count, commandId, got: result.map((m: any) => m.id) });
   return result.length ? result : [msg];
 }
 
@@ -1262,7 +1313,10 @@ function hasExplicitCount(argsText: string): boolean {
 }
 
 async function quoteStickerReplyTargetId(commandMsg: MessageContext, quoteMessages: any[], argsText: string): Promise<any> {
-  const replied = await safeGetReplyMessage(commandMsg).catch(() => undefined);
+  const replied = await safeGetReplyMessage(commandMsg).catch((e) => {
+    logger.debug('[quote] quoteStickerReplyTargetId safeGetReplyMessage failed:', e);
+    return undefined;
+  });
   if (replied?.id) return replied.id;
 
   // Direct `.q <number>` quotes surrounding messages, so there is no single referenced message.
@@ -1274,17 +1328,18 @@ async function quoteStickerReplyTargetId(commandMsg: MessageContext, quoteMessag
 
 async function editProgress(msg: MessageContext, text: string): Promise<void> {
   try {
-    if (typeof (msg as any).edit === "function") await (msg as any).edit({ text });
+    if (typeof msg.edit === "function") await msg.edit({ text });
     else {
-      const client = await getGlobalClient().catch(() => null as any);
-      if (client) await (client as any).editMessage({
-        peer: msg.chat.id,
+      const client = await getGlobalClient().catch((e) => { logger.warn("[quote] editProgress: getGlobalClient failed", getErrorMessage(e)); return null; });
+      if (client) await client.editMessage({
+        chatId: msg.chat.id,
         message: msg.id,
         text,
       });
     }
-  } catch (_) {
-    try { await msg.replyText(text); } catch (_) {}
+  } catch (err: unknown) {
+    logger.warn("quote: reply with media failed, falling back to text", err);
+    try { await msg.replyText(text); } catch (_: unknown) { logger.warn("[quote] fallback reply also failed", _); }
   }
 }
 
@@ -1300,7 +1355,7 @@ export class QuotePlugin {
       const argsText = getCommandArgsText(msg, command);
       const args = parseArgs(argsText);
       const quoteStartedAt = Date.now();
-      console.warn("quote command triggered", { command, text: rawText, argsText, out: (msg as any).isOutgoing, replyTo: !!(msg as any).replyTo, backgroundColor: args.backgroundColor });
+      logger.warn("quote command triggered", { command, text: rawText, argsText, out: msg.isOutgoing, replyTo: !!msg.replyToMessage, backgroundColor: args.backgroundColor });
       await editProgress(msg, quoteResourcesReady() ? "⏳ 正在生成 quote…" : "⏳ 首次使用，正在初始化 quote 资源…");
 
       try {
@@ -1359,7 +1414,7 @@ export class QuotePlugin {
               },
             ],
           };
-          console.warn("quote webm send options", { bytes: result.image.length, mimeType: sendOptions.mimeType, width, height, duration });
+          logger.warn("quote webm send options", { bytes: result.image.length, mimeType: sendOptions.mimeType, width, height, duration });
           await sendClient.sendMedia(msg.chat.id, sendOptions);
         } else {
           const sendOptions: any = {
@@ -1374,14 +1429,14 @@ export class QuotePlugin {
         quoteTiming("main.send_reply", tSend, { ext: result.ext, bytes: result.image?.length || 0 });
         try {
           await msg.delete();
-          console.warn("quote command source deleted", { id: msg.id });
-        } catch (deleteErr: any) {
-          console.warn("quote command source delete failed", deleteErr?.message || deleteErr);
+          logger.warn("quote command source deleted", { id: msg.id });
+        } catch (deleteErr: unknown) {
+          logger.warn("quote command source delete failed", getErrorMessage(deleteErr));
         }
-        console.warn("quote command finished", { ms: Date.now() - quoteStartedAt, bytes: result.image?.length, ext: result.ext, replyTo: replyTargetId });
-      } catch (err: any) {
-        console.error("quote command failed", err?.stack || err?.message || err);
-        await editProgress(msg, `❌ quote 失败：${err?.message || err}`);
+        logger.warn("quote command finished", { ms: Date.now() - quoteStartedAt, bytes: result.image?.length, ext: result.ext, replyTo: replyTargetId });
+      } catch (err: unknown) {
+        logger.error("quote command failed", (err as { stack?: string })?.stack || getErrorMessage(err));
+        await editProgress(msg, `❌ quote 失败：${getErrorMessage(err)}`);
       }
   }
 }

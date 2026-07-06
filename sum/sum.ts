@@ -10,6 +10,10 @@ import * as path from "path";
 import { getGlobalClient } from "@utils/globalClient";
 import axios from "axios";
 import { safeGetMessages } from "@utils/safeGetMessages";
+import { logger } from "@utils/logger";
+import { getUsername, getTitle } from "@utils/entityTypeGuards";
+import { User } from "@mtcute/node";
+import { getErrorMessage } from "@utils/errorHelpers";
 
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
@@ -160,29 +164,29 @@ function makeCronKey(id: string) {
 }
 
 function parseInterval(interval: string): string | null {
-  console.log(`[sum] parseInterval 输入: "${interval}"`);
+  logger.info(`[sum] parseInterval 输入: "${interval}"`);
 
   // 1. 检查字段数量
   const fields = interval.trim().split(/\s+/);
-  console.log(`[sum] 字段数量: ${fields.length}, 字段: ${JSON.stringify(fields)}`);
+  logger.info(`[sum] 字段数量: ${fields.length}, 字段: ${JSON.stringify(fields)}`);
 
   // 2. 如果是 6 字段，直接返回（参考 sendat，不验证，让 cronManager 处理）
   if (fields.length === 6) {
-    console.log(`[sum] 返回 6 字段 cron: "${interval}"`);
+    logger.info(`[sum] 返回 6 字段 cron: "${interval}"`);
     return interval;
   }
 
   // 3. 如果是 5 字段，补 0（秒）
   if (fields.length === 5) {
     const result = `0 ${interval}`;
-    console.log(`[sum] 5 字段转 6 字段: "${result}"`);
+    logger.info(`[sum] 5 字段转 6 字段: "${result}"`);
     return result;
   }
 
   // 4. 尝试解析简化格式
   const match = interval.match(/^(\d+)(h|m)$/i);
   if (!match) {
-    console.log(`[sum] 无法解析简化格式，返回 null`);
+    logger.info(`[sum] 无法解析简化格式，返回 null`);
     return null;
   }
 
@@ -191,15 +195,15 @@ function parseInterval(interval: string): string | null {
 
   if (unit === 'h') {
     const result = `0 0 */${value} * * *`;
-    console.log(`[sum] 简化格式(小时): "${result}"`);
+    logger.info(`[sum] 简化格式(小时): "${result}"`);
     return result;
   } else if (unit === 'm') {
     const result = `0 */${value} * * * *`;
-    console.log(`[sum] 简化格式(分钟): "${result}"`);
+    logger.info(`[sum] 简化格式(分钟): "${result}"`);
     return result;
   }
 
-  console.log(`[sum] 未知情况，返回 null`);
+  logger.info(`[sum] 未知情况，返回 null`);
   return null;
 }
 
@@ -257,7 +261,7 @@ async function formatEntity(target: any) {
 
       try {
         // 先检查邀请链接信息
-        const inviteInfo: any = await client.call({ _: "messages.checkChatInvite", hash } as any);
+        const inviteInfo = await client.call({ _: "messages.checkChatInvite" as const, hash });
 
         if (inviteInfo?._ === "chatInviteAlready") {
           // 已经在群组中，直接使用返回的 chat 对象
@@ -265,26 +269,30 @@ async function formatEntity(target: any) {
           id = entity?.id;
         } else if (inviteInfo?._ === "chatInvite") {
           // 还未加入群组，需要先加入
-          const importResult: any = await client.call({ _: "messages.importChatInvite", hash } as any);
+          const importResult = await client.call({ _: "messages.importChatInvite" as const, hash });
 
           // 从导入结果中获取 chat 对象
-          if (importResult && 'chats' in importResult && importResult.chats.length > 0) {
-            entity = importResult.chats[0];
-            id = entity?.id;
+          // importResult 类型为 unknown，使用类型守卫安全访问
+          if (importResult && typeof importResult === 'object' && 'chats' in importResult) {
+            const chats = (importResult as Record<string, unknown>).chats;
+            if (Array.isArray(chats) && chats.length > 0) {
+              entity = chats[0] as typeof entity;
+              id = entity?.id;
+            }
           }
         }
-      } catch (inviteError: any) {
-        console.error("处理邀请链接失败:", inviteError);
-        throw new Error(`无法处理邀请链接: ${inviteError.message || "未知错误"}`);
+      } catch (inviteError: unknown) {
+        logger.error("处理邀请链接失败:", inviteError);
+        throw new Error(`无法处理邀请链接: ${getErrorMessage(inviteError) || "未知错误"}`);
       }
     } else {
       // 普通的 username 或 ID，直接获取 entity
       entity = await client.getChat(target);
       id = entity?.id;
     }
-  } catch (e: any) {
-    console.error(e);
-    throw new Error(`无法获取群组信息: ${e.message || "未知错误"}`);
+  } catch (e: unknown) {
+    logger.error(e);
+    throw new Error(`无法获取群组信息: ${getErrorMessage(e) || "未知错误"}`);
   }
 
   const displayParts: string[] = [];
@@ -512,18 +520,17 @@ async function getGroupMessages(chatId: string, count: number): Promise<MessageD
   let chatUsername: string | undefined;
   try {
     const entity = await client.getChat(chatId);
-    chatUsername = (entity as any).username;
-  } catch (e) {
-    // 忽略错误，使用私有链接格式
-  }
+    chatUsername = getUsername(entity) ?? undefined;
+  } catch (e: unknown) { logger.warn(`[sum] 忽略错误，使用私有链接格式:`, e) }
 
   const messageData: MessageData[] = [];
   for (const msg of messages) {
-    const message = msg as any;
+    const message = msg;
     // 跳过完全没有内容的消息
     if (!message.text && !message.media) continue;
 
-    const sender = message.sender?.firstName || message.sender?.username || "未知用户";
+    const senderPeer = message.sender;
+    const sender = senderPeer instanceof User ? senderPeer.firstName || senderPeer.username : senderPeer?.username || "未知用户";
     const time = formatDate(message.date instanceof Date ? message.date : new Date(message.date * 1000));
     const link = buildMessageLink(chatId, message.id, chatUsername);
     const urls = extractUrlsFromEntities(message);
@@ -563,19 +570,18 @@ async function getGroupMessagesByTime(chatId: string, hours: number): Promise<Me
   let chatUsername: string | undefined;
   try {
     const entity = await client.getChat(chatId);
-    chatUsername = (entity as any).username;
-  } catch (e) {
-    // 忽略错误，使用私有链接格式
-  }
+    chatUsername = getUsername(entity) ?? undefined;
+  } catch (e: unknown) { logger.warn(`[sum] 忽略错误，使用私有链接格式:`, e) }
 
   const messageData: MessageData[] = [];
   for (const msg of messages) {
-    const message = msg as any;
+    const message = msg;
     const msgEpoch = message.date instanceof Date ? Math.floor(message.date.getTime() / 1000) : message.date;
     if (msgEpoch < startTime) continue;
     if (!message.text && !message.media) continue;
 
-    const sender = message.sender?.firstName || message.sender?.username || "未知用户";
+    const senderPeer = message.sender;
+    const sender = senderPeer instanceof User ? senderPeer.firstName || senderPeer.username : senderPeer?.username || "未知用户";
     const time = formatDate(message.date instanceof Date ? message.date : new Date(message.date * 1000));
     const link = buildMessageLink(chatId, message.id, chatUsername);
     const urls = extractUrlsFromEntities(message);
@@ -677,9 +683,9 @@ async function summarizeMessages(
   const messages = formatMessagesForAI(messageData);
 
   // 调试日志：输出发送给 AI 的完整文本
-  console.log("[sum] ========== 发送给 AI 的文本 ==========");
-  console.log(messages);
-  console.log("[sum] ========== 文本结束 ==========");
+  logger.info("[sum] ========== 发送给 AI 的文本 ==========");
+  logger.info(messages);
+  logger.info("[sum] ========== 文本结束 ==========");
 
   const provider = aiConfig.providers[providerName];
   if (!provider) {
@@ -716,8 +722,8 @@ async function summarizeMessages(
     }
 
     return { success: true, result: aiResponse };
-  } catch (aiErr: any) {
-    return { success: false, error: `AI 调用失败: ${aiErr?.message || aiErr}` };
+  } catch (aiErr: unknown) {
+    return { success: false, error: `AI 调用失败: ${getErrorMessage(aiErr) || String(aiErr)}` };
   }
 }
 
@@ -776,8 +782,8 @@ async function executeSummary(task: SummaryTask): Promise<{ success: boolean; me
     await client.sendText(pushTarget, needHtmlParse ? html(summaryText) : (summaryText));
 
     return { success: true, message: `总结完成，已推送到 ${pushTarget}` };
-  } catch (e: any) {
-    return { success: false, message: `总结失败: ${e?.message || e}` };
+  } catch (e: unknown) {
+    return { success: false, message: `总结失败: ${getErrorMessage(e) || String(e)}` };
   }
 }
 
@@ -786,10 +792,10 @@ async function scheduleTask(task: SummaryTask) {
   const key = makeCronKey(task.id);
   if (task.disabled || cronManager.has(key)) return;
 
-  console.log(`[sum] 注册任务 ${task.id}: ${task.cron}`);
+  logger.info(`[sum] 注册任务 ${task.id}: ${task.cron}`);
 
   cronManager.set(key, task.cron, async () => {
-    console.log(`[sum] 开始执行任务 ${task.id}`);
+    logger.info(`[sum] 开始执行任务 ${task.id}`);
 
     const db = await getDB();
     const idx = db.data.tasks.findIndex((t: SummaryTask) => t.id === task.id);
@@ -808,12 +814,12 @@ async function scheduleTask(task: SummaryTask) {
         }
         await db.write();
       }
-      console.log(`[sum] 任务 ${task.id} 执行完成: ${result.success ? '成功' : '失败'}`);
-    } catch (e: any) {
-      console.error(`[sum] 任务 ${task.id} 执行失败:`, e);
+      logger.info(`[sum] 任务 ${task.id} 执行完成: ${result.success ? '成功' : '失败'}`);
+    } catch (e: unknown) {
+      logger.error(`[sum] 任务 ${task.id} 执行失败:`, e);
       if (idx >= 0) {
         db.data.tasks[idx].lastRunAt = String(now);
-        db.data.tasks[idx].lastError = String(e?.message || e);
+        db.data.tasks[idx].lastError = String(getErrorMessage(e) || e);
         await db.write();
       }
     }
@@ -824,29 +830,33 @@ async function scheduleTask(task: SummaryTask) {
 async function bootstrapTasks() {
   try {
     const db = await getDB();
-    console.log(`[sum] 启动加载，共 ${db.data.tasks.length} 个任务`);
+    logger.info(`[sum] 启动加载，共 ${db.data.tasks.length} 个任务`);
 
-    for (const t of db.data.tasks) {
-      if (!cron.validateCronExpression(t.cron).valid) {
-        console.error(`[sum] 任务 ${t.id} Cron 表达式无效: ${t.cron}`);
-        continue;
-      }
-      if (t.disabled) {
-        console.log(`[sum] 任务 ${t.id} 已禁用，跳过`);
-        continue;
-      }
-      await scheduleTask(t);
-    }
-    console.log(`[sum] 任务加载完成`);
-  } catch (e) {
-    console.error("[sum] bootstrap 失败:", e);
+    await Promise.all(
+      db.data.tasks
+        .filter((t) => {
+          if (!cron.validateCronExpression(t.cron).valid) {
+            logger.error(`[sum] 任务 ${t.id} Cron 表达式无效: ${t.cron}`);
+            return false;
+          }
+          if (t.disabled) {
+            logger.info(`[sum] 任务 ${t.id} 已禁用，跳过`);
+            return false;
+          }
+          return true;
+        })
+        .map((t) => scheduleTask(t))
+    );
+    logger.info(`[sum] 任务加载完成`);
+  } catch (e: unknown) {
+    logger.error("[sum] bootstrap 失败:", e);
   }
 }
 
 // 立即执行
 (async () => {
   await bootstrapTasks();
-  console.log("[sum] 插件初始化完成");
+  logger.info("[sum] 插件初始化完成");
 })();
 
 const help_text = `▎群消息总结
@@ -1010,7 +1020,7 @@ class SummaryPlugin extends Plugin {
           lines.push("💡 使用方法：");
           lines.push(`<code>${mainPrefix}sum config set prompt 您的提示词</code>`);
 
-          await msg.edit({ text: html(lines.join("\n"))});
+          await msg.edit({ text: html(lines.join("<br>"))});
           return;
         }
 
@@ -1080,12 +1090,14 @@ class SummaryPlugin extends Plugin {
             try {
               const chat = await client.getChat(chatId);
               const displayParts: string[] = [];
-              if ((chat as any).title) displayParts.push(htmlEscape((chat as any).title));
-              if ((chat as any).username) displayParts.push(htmlEscape(`@${(chat as any).username}`));
+              const chatTitle = getTitle(chat);
+              const chatUsername = getUsername(chat);
+              if (chatTitle) displayParts.push(htmlEscape(chatTitle));
+              if (chatUsername) displayParts.push(htmlEscape(`@${chatUsername}`));
               displayParts.push(codeTag(chatId));
               chatDisplay = displayParts.join(" ");
-            } catch (e) {
-              console.error("获取群组信息失败:", e);
+            } catch (e: unknown) {
+              logger.error("获取群组信息失败:", e);
             }
           }
 
@@ -1242,7 +1254,9 @@ class SummaryPlugin extends Plugin {
           await scheduleTask(task);
 
           const nextAt = cron.sendAt(cronExpr);
-          const nextDate = (nextAt as any).toJSDate ? (nextAt as any).toJSDate() : nextAt;
+          const nextDate = typeof (nextAt as unknown as { toJSDate?: () => Date }).toJSDate === 'function'
+            ? (nextAt as unknown as { toJSDate: () => Date }).toJSDate()
+            : nextAt as unknown as Date;
 
           const tip = [
             "✅ 已添加总结任务",
@@ -1279,7 +1293,9 @@ class SummaryPlugin extends Plugin {
 
           for (const t of sortedTasks) {
             const nextDt = cron.sendAt(t.cron);
-            const nextDate = (nextDt as any).toJSDate ? (nextDt as any).toJSDate() : nextDt;
+            const nextDate = typeof (nextDt as unknown as { toJSDate?: () => Date }).toJSDate === 'function'
+              ? (nextDt as unknown as { toJSDate: () => Date }).toJSDate()
+              : nextDt as unknown as Date;
 
             lines.push(`${codeTag(t.id)} • ${htmlEscape(t.remark || t.chatDisplay || t.chatId)}`);
             lines.push(`群组: ${htmlEscape(t.chatDisplay || t.chatId)}`);
@@ -1315,7 +1331,7 @@ class SummaryPlugin extends Plugin {
             lines.push("");
           }
 
-          await msg.edit({ text: html(lines.join("\n"))});
+          await msg.edit({ text: html(lines.join("<br>"))});
           return;
         }
 
@@ -1361,10 +1377,10 @@ class SummaryPlugin extends Plugin {
             const client = await getGlobalClient();
             if (client) {
               const entity = await client.getChat(task.chatId);
-              const username = (entity as any).username;
+              const username = getUsername(entity) ?? undefined;
               chatLink = buildChatLink(task.chatId, username);
             }
-          } catch { /* 忽略 */ }
+          } catch (e: unknown) { logger.warn('操作失败', e) }
 
           const chatDisplay = task.chatDisplay || task.chatId;
           const linkText = chatLink ? ` <a href="${attrEscape(chatLink)}">${htmlEscape(chatDisplay)}</a>` : ` ${htmlEscape(chatDisplay)}`;
@@ -1498,11 +1514,11 @@ class SummaryPlugin extends Plugin {
           db.data.seq = String(db.data.tasks.length);
 
           // 重新调度
-          for (const t of db.data.tasks) {
-            if (!t.disabled && cron.validateCronExpression(t.cron).valid) {
-              await scheduleTask(t);
-            }
-          }
+          await Promise.all(
+            db.data.tasks
+              .filter((t) => !t.disabled && cron.validateCronExpression(t.cron).valid)
+              .map((t) => scheduleTask(t))
+          );
 
           await db.write();
 
@@ -1549,7 +1565,7 @@ class SummaryPlugin extends Plugin {
             lines.push(`回复模式: ${cfg.reply_mode !== false ? "开启" : "关闭"}`);
             lines.push(`最大输出: ${cfg.max_output_length ? `${cfg.max_output_length}字符` : "不限制（默认）"}`);
 
-            await msg.edit({ text: html(lines.join("\n"))});
+            await msg.edit({ text: html(lines.join("<br>"))});
             return;
           }
 
@@ -1821,8 +1837,8 @@ class SummaryPlugin extends Plugin {
         }
 
         await msg.edit({ text: html(help_text)});
-      } catch (e: any) {
-        await msg.edit({ text: `❌ 错误: ${e?.message || e}` });
+      } catch (e: unknown) {
+        await msg.edit({ text: `❌ 错误: ${getErrorMessage(e) || String(e)}` });
       }
     }
   };

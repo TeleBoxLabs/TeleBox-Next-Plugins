@@ -3,26 +3,20 @@ import _ from "lodash";
 import { getPrefixes } from "@utils/pluginManager";
 import { Plugin } from "@utils/pluginBase";
 import type { MessageContext } from "@mtcute/dispatcher";
+import type { Message } from "@mtcute/node";
 import { html } from "@mtcute/html-parser";
 import { getGlobalClient } from "@utils/globalClient";
-
-const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+import { logger } from "@utils/logger";
+import { sleep } from "@utils/asyncHelpers";
+import { htmlEscape } from "@utils/htmlEscape";
 
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
-const htmlEscape = (text: string): string =>
-  text.replace(/[&<>"']/g, (m) => ({
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    '"': "&quot;",
-    "'": "&#x27;",
-  }[m] || m));
 
 const bots = {
   default: "@music_v1bot",
   vk: "@vkmusic_bot",
-  ym: "@ttaudiobot",
+  ym: "@ttaudiobot"
 };
 
 const pluginName = "music_bot";
@@ -75,17 +69,17 @@ async function searchAndSendMusic(
     await msg.edit({
       text: `🔎 搜索中：<code>${htmlEscape(displayKeyword ?? keyword)}</code>`,
     });
-  } catch {}
+  } catch (e: unknown) { logger.warn('[music_bot] edit msg failed:', e) }
 
   // Ensure bot is unblocked and muted
+  const inputPeer = await client.resolvePeer(bot);
   try {
-    await client.call({ _: "contacts.unblock", id: await client.resolvePeer(bot) });
-  } catch {}
+    await client.call({ _: "contacts.unblock", id: inputPeer });
+  } catch (e: unknown) { logger.warn('[music_bot] unblock bot failed:', e) }
 
   try {
-    const inputPeer = await client.resolvePeer(bot);
     await client.call({ _: "account.updateNotifySettings", peer: { _: "inputNotifyPeer", peer: inputPeer }, settings: { _: "inputPeerNotifySettings", silent: true, muteUntil: 2147483647 } });
-  } catch {}
+  } catch (e: unknown) { logger.warn('[music_bot] mute bot failed:', e) }
 
   
 
@@ -93,7 +87,7 @@ async function searchAndSendMusic(
   const startTs = Math.floor(Date.now() / 1000);
   try {
     await client.sendText(bot, ["vk", "ym"].includes(action) ? keyword : `/${action} ${keyword}`);
-  } catch {
+  } catch (e: unknown) {
     // Only on first failure, try to initialize the bot once per process
     if (!botReady.get(bot)) {
       try {
@@ -101,26 +95,26 @@ async function searchAndSendMusic(
         botReady.set(bot, true);
         await sleep(500);
         await client.sendText(bot, ["vk", "ym"].includes(action) ? keyword : `/${action} ${keyword}`);
-      } catch {
+      } catch (e: unknown) {
         try {
           await client.sendText(bot, keyword);
-        } catch {}
+        } catch (e: unknown) { logger.warn('[music_bot] send keyword to bot failed:', e) }
       }
     } else {
       try {
         await client.sendText(bot, keyword);
-      } catch {}
+      } catch (e: unknown) { logger.warn('[music_bot] send keyword to bot failed:', e) }
     }
   }
 
   // Wait for bot's reply that contains buttons, then click first
-  let replyWithButtons: any | undefined;
+  let replyWithButtons: Message | undefined;
   for (let i = 0; i < 15; i++) {
     await sleep(700);
     const msgs = await client.getHistory(bot, { limit: 1 });
     for (const m of msgs.slice().reverse()) {
       const mDate = m.date instanceof Date ? Math.floor(m.date.getTime() / 1000) : (m.date as number || 0);
-      if (!m.isOutgoing && mDate >= startTs && (m.raw as any)?.replyMarkup?._ === 'replyInlineMarkup') {
+      if (!m.isOutgoing && mDate >= startTs && (m.raw as { replyMarkup?: { _?: string } })?.replyMarkup?._ === 'replyInlineMarkup') {
         replyWithButtons = m;
         break;
       }
@@ -134,37 +128,41 @@ async function searchAndSendMusic(
   }
 
   let clicked = false;
-  try {
-    await (replyWithButtons as any).click(0);
-    clicked = true;
-  } catch {}
-  if (!clicked) {
+  // mtcute: use getCallbackAnswer instead of gramjs Message.click()
+  for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      await (replyWithButtons as any).click(0);
+      const rawMsg = replyWithButtons.raw as { replyMarkup?: { _?: string; rows: { buttons: { _?: string; data?: Uint8Array }[] }[] } };
+      const markup = rawMsg.replyMarkup;
+      if (markup?._ === 'replyInlineMarkup') {
+        const firstBtn = markup.rows[0]?.buttons[0];
+        if (firstBtn?._ === 'keyboardButtonCallback' && firstBtn.data) {
+          await client.getCallbackAnswer({
+            chatId: replyWithButtons.chat.id,
+            message: replyWithButtons.id,
+            data: firstBtn.data,
+            fireAndForget: true,
+          });
+        }
+      }
       clicked = true;
-    } catch {}
-  }
-  if (!clicked) {
-    try {
-      await (replyWithButtons as any).click(0);
-      clicked = true;
-    } catch {}
+      break;
+    } catch (e: unknown) { logger.warn(`[music_bot] click button attempt ${attempt} failed:`, e) }
   }
   if (!clicked) {
     try {
       await client.sendText(bot, "1");
       clicked = true;
-    } catch {}
+    } catch (e: unknown) { logger.warn('[music_bot] send fallback text failed:', e) }
   }
 
   // After clicking, wait for the next incoming message with media
-  let mediaMsg: any | undefined;
+  let mediaMsg: Message | undefined;
   for (let i = 0; i < 20; i++) {
     await sleep(700);
     const msgs = await client.getHistory(bot, { limit: 6 });
     for (const m of msgs.slice().reverse()) {
       const mDate = m.date instanceof Date ? Math.floor(m.date.getTime() / 1000) : (m.date as number || 0);
-      const replyDate = replyWithButtons?.date instanceof Date ? Math.floor(replyWithButtons.date.getTime() / 1000) : ((replyWithButtons?.date as any) || startTs);
+      const replyDate = replyWithButtons?.date instanceof Date ? Math.floor(replyWithButtons.date.getTime() / 1000) : (replyWithButtons?.date as number | undefined) ?? startTs;
       if (
         !m.isOutgoing &&
         mDate >= replyDate &&
@@ -182,16 +180,17 @@ async function searchAndSendMusic(
     return;
   }
 
-  // Send the media back to the user
+  // mtcute type limitation: sendMedia expects InputMediaLike but MessageMedia doesn't match
+  const audioMedia = mediaMsg.media as unknown as { _?: string; fileId?: string };
   if (action === "ym") {
-    await client.sendMedia(msg.chat.id, { type: "audio", file: mediaMsg.media as any }, { replyTo: msg.replyToMessage?.id ?? undefined });
+    await client.sendMedia(msg.chat.id, { type: "audio", file: audioMedia as never }, { replyTo: msg.replyToMessage?.id ?? undefined });
   } else {
-    await client.sendMedia(msg.chat.id, { type: "audio", file: mediaMsg.media as any, caption: `🎵 ${htmlEscape(displayKeyword ?? keyword)}` }, { replyTo: msg.replyToMessage?.id ?? undefined });
+    await client.sendMedia(msg.chat.id, { type: "audio", file: audioMedia as never, caption: `🎵 ${htmlEscape(displayKeyword ?? keyword)}` }, { replyTo: msg.replyToMessage?.id ?? undefined });
   }
 
   try {
     await msg.delete();
-  } catch {}
+  } catch (e: unknown) { logger.warn('[music_bot] delete msg failed:', e) }
 }
 
 function getRemarkFromMsg(msg: MessageContext | string, n: number): string {

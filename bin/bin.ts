@@ -2,16 +2,11 @@ import { Plugin } from "@utils/pluginBase";
 import { getPrefixes } from "@utils/pluginManager";
 import type { MessageContext } from "@mtcute/dispatcher";
 import { html } from "@mtcute/html-parser";
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
+import { htmlEscape } from "@utils/htmlEscape";
 
 const mainPrefix = getPrefixes()[0];
-const htmlEscape = (text: string): string =>
-  text.replace(/[&<>"']/g, (m) => ({
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    '"': "&quot;",
-    "'": "&#x27;",
-  }[m] || m));
 
 const help_text = `💳 <b>BIN 查询</b>
 
@@ -76,15 +71,6 @@ function toTitleCase(s: any): string {
     .join(" ");
 }
 
-function formatCountry(c: any): string {
-  if (!c) return "N/A";
-  const raw = c.name || "";
-  const name = raw.replace(" (Province of China)", "").trim();
-  const code = c.alpha2 ? ` (${c.alpha2})` : "";
-  const emoji = c.emoji ? c.emoji + " " : "";
-  return `${emoji}${name || "未知"}${code}`;
-}
-
 function currencyCn(code?: string): string {
   const map: Record<string, string> = {
     USD: "美元",
@@ -127,9 +113,7 @@ async function fetchFromBincheck(bin: string): Promise<Partial<{ scheme: string;
       const country = m[3]?.trim();
       return { scheme, bank, country };
     }
-  } catch (e) {
-    // ignore, fallback will be used
-  }
+  } catch (e: unknown) { logger.warn(`[bin] ignore, fallback will be used:`, e) }
   return {};
 }
 
@@ -165,23 +149,15 @@ class BinPlugin extends Plugin {
           timeout: 10000,
         });
         const d = r.data || {};
-        const country = d.country ? `${d.country.emoji || ""} ${d.country.name || ""} (${d.country.alpha2 || ""})` : "N/A";
-        const bank = d.bank
-          ? `${d.bank.name || ""}${d.bank.url ? ` | ${d.bank.url}` : ""}${d.bank.phone ? ` | ${d.bank.phone}` : ""}${d.bank.city ? ` | ${d.bank.city}` : ""}`
-          : "N/A";
-        const scheme = formatScheme(d.scheme);
         const brand = toTitleCase(d.brand);
         const typeZh = formatType(d.type);
-        const lenTxt = (d.number && Number.isFinite(d.number.length)) ? `${d.number.length}位` : "未知位数";
-        const luhnTxt = (d.number && typeof d.number.luhn === "boolean") ? (d.number.luhn ? "是" : "否") : "未知";
-        const num = `${lenTxt} | Luhn:${luhnTxt}`;
         // 计算品牌（方案名）优先取 Bincheck，其次 Binlist 的scheme
         const schemeDisp = schemeBrandDisplay(bc.scheme || d.scheme);
         // 等级：从 brand 中粗略提取（BUSINESS/CORPORATE/PLATINUM/GOLD/...）
         const level = (brand || "").toUpperCase().match(/BUSINESS|CORPORATE|PLATINUM|GOLD|CLASSIC|SIGNATURE|INFINITE|WORLD|PREMIUM/);
         const levelTxt = level ? level[0] : "—";
         const isBusiness = /BUSINESS|CORPORATE|COMMERCIAL/i.test(brand || "");
-        const prepaid = d.prepaid === true ? "✓" : "×";
+        const prepaid = d.prepaid ? "✓" : "×";
         const businessMark = isBusiness ? "✓" : "×";
         const countryName = bc.country || d.country?.name || "";
         const cnCountry = countryName.replace(" (Province of China)", "").replace("Taiwan, Province of China", "Taiwan");
@@ -201,17 +177,19 @@ class BinPlugin extends Plugin {
           `💰预付卡：${prepaid}\n` +
           `🧾商业卡：${businessMark}`;
         await msg.edit({ text: txt, disableWebPreview: true });
-      } catch (e: any) {
-        if (e?.response?.status === 404) {
+      } catch (e: unknown) {
+        const err = e as Record<string, unknown>;
+        const resp = err.response as Record<string, unknown> | undefined;
+        if (resp?.status === 404) {
           await msg.edit({ text: html(`❌ 未找到: <code>${bin}</code>`) });
-        } else if (e?.response?.status === 429) {
+        } else if (resp?.status === 429) {
           await msg.edit({ text: "⏳ 频率受限，请稍后重试" });
-        } else if (e?.code === "ECONNABORTED" || e?.message?.includes("timeout")) {
+        } else if (err.code === "ECONNABORTED" || getErrorMessage(e).includes("timeout")) {
           await msg.edit({ text: "❌ 请求超时，请稍后重试" });
-        } else if (e?.message?.includes("MESSAGE_TOO_LONG")) {
+        } else if (getErrorMessage(e).includes("MESSAGE_TOO_LONG")) {
           await msg.edit({ text: "❌ 消息过长，请缩短输出" });
         } else {
-          await msg.edit({ text: html(`❌ 查询失败: ${htmlEscape(e?.message || "未知错误")}`) });
+          await msg.edit({ text: html(`❌ 查询失败: ${htmlEscape(getErrorMessage(e) || "未知错误")}`) });
         }
       }
     },

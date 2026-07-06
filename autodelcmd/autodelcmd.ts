@@ -9,13 +9,8 @@ import { createDirectoryInAssets } from "@utils/pathHelpers";
 import fs from "fs/promises";
 import path from "path";
 import { safeGetMessages } from "@utils/safeGetMessages";
-
-// HTML转义工具（每个插件必须实现）
-const htmlEscape = (text: string): string => 
-  text.replace(/[&<>"']/g, m => ({ 
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', 
-    '"': '&quot;', "'": '&#x27;' 
-  }[m] || m));
+import { logger } from "@utils/logger";
+import { htmlEscape } from "@utils/htmlEscape";
 
 const CONFIG_FILE_PATH = path.join(
   createDirectoryInAssets("autodelcmd"),
@@ -60,8 +55,8 @@ function resolveAlias(command: string): string {
     const originalCommand = aliasDB.get(command);
     aliasDB.close();
     return originalCommand || command; // 如果没有别名，返回原始命令
-  } catch (error) {
-    console.error("[autodelcmd] 解析别名时出错:", error);
+  } catch (error: unknown) {
+    logger.error("[autodelcmd] 解析别名时出错:", error);
     return command; // 出错时返回原始命令
   }
 }
@@ -98,8 +93,8 @@ class AutoDeleteService {
       this.pendingTimeouts.delete(timer);
       try {
         await callback();
-      } catch (error) {
-        console.error("[autodelcmd] 定时任务执行失败:", error);
+      } catch (error: unknown) {
+        logger.error("[autodelcmd] 定时任务执行失败:", error);
       }
     }, delayMs);
     this.pendingTimeouts.add(timer);
@@ -174,7 +169,7 @@ class AutoDeleteService {
       
       // 检查是否需要版本迁移
       if (!this.config.configVersion || this.config.configVersion < CURRENT_CONFIG_VERSION) {
-        console.log("[autodelcmd] 检测到旧版本配置，正在迁移...");
+        logger.info("[autodelcmd] 检测到旧版本配置，正在迁移...");
         await this.migrateConfig();
         needSave = true;
       }
@@ -196,8 +191,8 @@ class AutoDeleteService {
       if (needSave) {
         await this.saveConfig();
       }
-    } catch (error) {
-      console.log("[autodelcmd] 首次运行，正在创建默认配置文件...");
+    } catch (_e: unknown) {
+      logger.info("[autodelcmd] 首次运行，正在创建默认配置文件...");
       // 首次运行时，将默认规则写入配置文件
       await this.initializeDefaultConfig();
     }
@@ -218,7 +213,7 @@ class AutoDeleteService {
     };
     
     await this.saveConfig();
-    console.log("[autodelcmd] 已创建默认配置文件，包含 " + defaultRules.length + " 条规则");
+    logger.info("[autodelcmd] 已创建默认配置文件，包含 " + defaultRules.length + " 条规则");
   }
 
   // 配置迁移方法
@@ -227,7 +222,7 @@ class AutoDeleteService {
     
     // 从版本 0 迁移到版本 1：添加默认规则
     if (currentVersion < 1) {
-      console.log("[autodelcmd] 从版本 0 迁移到版本 1");
+      logger.info("[autodelcmd] 从版本 0 迁移到版本 1");
       
       if (!this.config.customRules) {
         this.config.customRules = [];
@@ -253,7 +248,7 @@ class AutoDeleteService {
         }
       }
       
-      console.log(`[autodelcmd] 迁移完成，新增 ${addedCount} 条默认规则`);
+      logger.info(`[autodelcmd] 迁移完成，新增 ${addedCount} 条默认规则`);
       this.config.configVersion = 1;
     }
   }
@@ -265,8 +260,8 @@ class AutoDeleteService {
         CONFIG_FILE_PATH,
         JSON.stringify(this.config, null, 2)
       );
-    } catch (error) {
-      console.error("[autodelcmd] 保存配置失败:", error);
+    } catch (error: unknown) {
+      logger.error("[autodelcmd] 保存配置失败:", error);
     }
   }
 
@@ -275,7 +270,7 @@ class AutoDeleteService {
       await fs.access(EXIT_MSG_FILE_PATH);
       const data = await fs.readFile(EXIT_MSG_FILE_PATH, "utf-8");
       return JSON.parse(data);
-    } catch (error) {
+    } catch (_e: unknown) {
       return [];
     }
   }
@@ -287,18 +282,18 @@ class AutoDeleteService {
         EXIT_MSG_FILE_PATH,
         JSON.stringify(exitMsgs, null, 2)
       );
-    } catch (error) {
-      console.error("[autodelcmd] 保存退出消息失败:", error);
+    } catch (error: unknown) {
+      logger.error("[autodelcmd] 保存退出消息失败:", error);
     }
   }
 
   private async clearExitMessages() {
     try {
       await fs.unlink(EXIT_MSG_FILE_PATH);
-    } catch (error) {
+    } catch (error: unknown) {
       // 文件不存在时忽略错误
       if (error.code !== 'ENOENT') {
-        console.error("[autodelcmd] 清除退出消息文件失败:", error);
+        logger.error("[autodelcmd] 清除退出消息文件失败:", error);
       }
     }
   }
@@ -307,39 +302,39 @@ class AutoDeleteService {
     const exitMsgs = await this.loadExitMessages();
     
     if (exitMsgs.length === 0) {
-      console.log(`[autodelcmd] 没有未完成的删除任务`);
+      logger.info(`[autodelcmd] 没有未完成的删除任务`);
       return;
     }
     
-    console.log(`[autodelcmd] 检测到 ${exitMsgs.length} 个未完成的删除任务`);
+    logger.info(`[autodelcmd] 检测到 ${exitMsgs.length} 个未完成的删除任务`);
     
     // 处理每个待删除的消息
     for (const exitMsg of exitMsgs) {
       try {
         try {
           await this.client.getChat(exitMsg.cid);
-        } catch (e) {
-          console.error(`[autodelcmd] 解析聊天实体失败:`, e);
+        } catch (e: unknown) {
+          logger.error(`[autodelcmd] 解析聊天实体失败:`, e);
         }
 
         const message = await safeGetMessages(this.client, exitMsg.cid, { ids: [exitMsg.mid] });
         if (message && message[0]) {
-          console.log(`[autodelcmd] 找到消息 ID ${exitMsg.mid}，将在10秒后删除`);
+          logger.info(`[autodelcmd] 找到消息 ID ${exitMsg.mid}，将在10秒后删除`);
           
           // 使用较短的延迟时间完成未完成的删除任务
           this.scheduleTimeout(async () => {
             try {
-              console.log(`[autodelcmd] 正在执行未完成的删除任务，消息 ID ${exitMsg.mid}`);
+              logger.info(`[autodelcmd] 正在执行未完成的删除任务，消息 ID ${exitMsg.mid}`);
               await message[0].delete({ revoke: true });
-            } catch (error: any) {
-              console.error(`[autodelcmd] 删除消息 ID ${exitMsg.mid} 失败:`, error.message);
+            } catch (error: unknown) {
+              logger.error(`[autodelcmd] 删除消息 ID ${exitMsg.mid} 失败:`, error.message);
             }
           }, 10 * 1000);
         } else {
-          console.log(`[autodelcmd] 未找到消息 ID ${exitMsg.mid}，可能已被删除`);
+          logger.info(`[autodelcmd] 未找到消息 ID ${exitMsg.mid}，可能已被删除`);
         }
-      } catch (error) {
-        console.error(`[autodelcmd] 处理消息 ${exitMsg.mid} 时出错:`, error);
+      } catch (error: unknown) {
+        logger.error(`[autodelcmd] 处理消息 ${exitMsg.mid} 时出错:`, error);
       }
     }
     
@@ -353,7 +348,7 @@ class AutoDeleteService {
   }
 
   private async delayDelete(msg: MessageContext, seconds: number) {
-    console.log(`[autodelcmd] 设置定时器: ${seconds} 秒后删除消息 ID ${msg.id}`);
+    logger.info(`[autodelcmd] 设置定时器: ${seconds} 秒后删除消息 ID ${msg.id}`);
     
     // 保存退出消息信息，以便程序重启后能继续删除
     try {
@@ -361,19 +356,19 @@ class AutoDeleteService {
       if (chatId) {
         await this.saveExitMessage(chatId, msg.id);
       }
-    } catch (error) {
-      console.error(`[autodelcmd] 保存删除任务失败:`, error);
+    } catch (error: unknown) {
+      logger.error(`[autodelcmd] 保存删除任务失败:`, error);
     }
     
     this.scheduleTimeout(async () => {
       try {
-        console.log(`[autodelcmd] 正在删除消息 ID ${msg.id}`);
+        logger.info(`[autodelcmd] 正在删除消息 ID ${msg.id}`);
         await msg.delete({ revoke: true });
         
         // 删除成功后，从退出消息记录中移除此条记录
         await this.removeExitMessage(msg);
-      } catch (error: any) {
-        console.error(`[autodelcmd] 删除消息 ID ${msg.id} 失败:`, error.message);
+      } catch (error: unknown) {
+        logger.error(`[autodelcmd] 删除消息 ID ${msg.id} 失败:`, error.message);
         
         // 删除失败也要从记录中移除，避免重复尝试
         await this.removeExitMessage(msg);
@@ -439,7 +434,7 @@ class AutoDeleteService {
     
     if (matchedRule) {
       const paramStr = parameters && parameters.length > 0 ? ` ${parameters[0]}` : '';
-      console.log(`[autodelcmd] 匹配规则: ${originalCommand}${paramStr} -> ${matchedRule.delay}秒延迟, 删除响应: ${!!matchedRule.deleteResponse}`);
+      logger.info(`[autodelcmd] 匹配规则: ${originalCommand}${paramStr} -> ${matchedRule.delay}秒延迟, 删除响应: ${!!matchedRule.deleteResponse}`);
       
       if (matchedRule.deleteResponse) {
         // 删除命令及相关响应
@@ -478,18 +473,18 @@ class AutoDeleteService {
             }
             
             if (shouldDelete) {
-              console.log(`[autodelcmd] 找到响应消息 ID ${message.id}，将一同删除 (${deletedCount + 1}/${MAX_RESPONSE_MESSAGES})`);
+              logger.info(`[autodelcmd] 找到响应消息 ID ${message.id}，将一同删除 (${deletedCount + 1}/${MAX_RESPONSE_MESSAGES})`);
               await this.delayDelete(message, matchedRule.delay);
               deletedCount++;
             }
           }
           
-          console.log(`[autodelcmd] 共找到 ${deletedCount} 条响应消息`);
+          logger.info(`[autodelcmd] 共找到 ${deletedCount} 条响应消息`);
           
           // 删除命令消息本身
           await this.delayDelete(msg, matchedRule.delay);
-        } catch (error) {
-          console.error("[autodelcmd] 处理消息时出错:", error);
+        } catch (error: unknown) {
+          logger.error("[autodelcmd] 处理消息时出错:", error);
         }
       } else {
         // 只删除命令消息
@@ -534,8 +529,8 @@ class AutoDeleteService {
         );
         await this.saveExitMessages(filteredMsgs);
       }
-    } catch (error) {
-      console.error(`[autodelcmd] 清理删除任务失败:`, error);
+    } catch (error: unknown) {
+      logger.error(`[autodelcmd] 清理删除任务失败:`, error);
     }
   }
 
@@ -620,7 +615,7 @@ class AutoDeleteService {
       const mergedParams = [...new Set([...existingRule.parameters, ...rule.parameters])];
       existingRule.parameters = mergedParams;
       
-      console.log(`[autodelcmd] 合并规则参数: ${rule.command} -> [${mergedParams.join(', ')}]`);
+      logger.info(`[autodelcmd] 合并规则参数: ${rule.command} -> [${mergedParams.join(', ')}]`);
       await this.saveConfig();
       return { success: true, merged: true };
     } else {
@@ -698,8 +693,8 @@ async function ensureServiceInitialized(): Promise<boolean> {
     serviceInstance = new AutoDeleteService(client);
     await serviceInstance.initialize();
     return true;
-  } catch (error) {
-    console.error("[autodelcmd] 初始化服务时出错:", error);
+  } catch (error: unknown) {
+    logger.error("[autodelcmd] 初始化服务时出错:", error);
     return false;
   }
 }
@@ -713,15 +708,15 @@ class AutoDeletePlugin extends Plugin {
 
   private async initializeOnStartup() {
     try {
-      console.log("[autodelcmd] 插件启动，开始初始化...");
+      logger.info("[autodelcmd] 插件启动，开始初始化...");
       const initialized = await ensureServiceInitialized();
       if (initialized) {
-        console.log("[autodelcmd] 插件启动初始化成功");
+        logger.info("[autodelcmd] 插件启动初始化成功");
       } else {
-        console.log("[autodelcmd] 插件启动初始化失败，将在首次使用时重试");
+        logger.info("[autodelcmd] 插件启动初始化失败，将在首次使用时重试");
       }
-    } catch (error) {
-      console.error("[autodelcmd] 插件启动初始化出错:", error);
+    } catch (error: unknown) {
+      logger.error("[autodelcmd] 插件启动初始化出错:", error);
     }
   }
 
@@ -847,10 +842,10 @@ class AutoDeletePlugin extends Plugin {
     if (args.length < 2) {
       await msg.edit({ 
         text: html(`❌ 参数不足<br>用法: <code>${mainPrefix}autodelcmd add [命令] [延迟秒数] [参数...] [-r] [-e]</code><br><br>` +
-              `示例:\n` +
-              `• <code>${mainPrefix}autodelcmd add ping 30</code> - ping命令30秒删除(包含带参数的)\n` +
-              `• <code>${mainPrefix}autodelcmd add ping 30 -e</code> - 🎯只有无参数的ping命令30秒删除\n` +
-              `• <code>${mainPrefix}autodelcmd add speedtest 60 -r</code> - speedtest命令60秒删除(🔄含响应)\n` +
+              `示例:<br>` +
+              `• <code>${mainPrefix}autodelcmd add ping 30</code> - ping命令30秒删除(包含带参数的)<br>` +
+              `• <code>${mainPrefix}autodelcmd add ping 30 -e</code> - 🎯只有无参数的ping命令30秒删除<br>` +
+              `• <code>${mainPrefix}autodelcmd add speedtest 60 -r</code> - speedtest命令60秒删除(🔄含响应)<br>` +
               `• <code>${mainPrefix}autodelcmd add tpm 60 list ls search -r</code> - tpm list/ls/search任一命令60秒删除(🔄含响应)`)
       });
       return;
@@ -898,7 +893,7 @@ class AutoDeletePlugin extends Plugin {
     // 检查精确匹配标志与参数的冲突
     if (exactMatch && parameters.length > 0) {
       await msg.edit({ 
-        text: html("❌ 精确匹配模式（-e/--exact）不能与参数同时使用\n精确匹配专用于只匹配无参数的命令调用")
+        text: html("❌ 精确匹配模式（-e/--exact）不能与参数同时使用<br>精确匹配专用于只匹配无参数的命令调用")
       });
       return;
     }
@@ -1055,14 +1050,14 @@ class AutoDeletePlugin extends Plugin {
   private async handleEnable(msg: MessageContext) {
     await serviceInstance!.setEnabled(true);
     await msg.edit({ 
-      text: html("🟢 <b>自动删除功能已启用</b>\n\n符合规则的命令消息将自动延迟删除") 
+      text: html("🟢 <b>自动删除功能已启用</b><br><br>符合规则的命令消息将自动延迟删除") 
     });
   }
 
   private async handleDisable(msg: MessageContext) {
     await serviceInstance!.setEnabled(false);
     await msg.edit({ 
-      text: html("🔴 <b>自动删除功能已禁用</b>\n\n命令消息将不再自动删除") 
+      text: html("🔴 <b>自动删除功能已禁用</b><br><br>命令消息将不再自动删除") 
     });
   }
 
@@ -1097,8 +1092,8 @@ class AutoDeletePlugin extends Plugin {
         }
       }
       
-    } catch (error) {
-      console.error("[autodelcmd] 检查消息来源时出错:", error);
+    } catch (error: unknown) {
+      logger.error("[autodelcmd] 检查消息来源时出错:", error);
     }
     
     // 3. 其他情况不处理
@@ -1154,12 +1149,12 @@ class AutoDeletePlugin extends Plugin {
       
       if (!command) return; // 如果只有前缀没有命令，跳过
       
-      console.log(`[autodelcmd] 检测到命令: ${command}, 参数: ${JSON.stringify(parameters)}, 前缀: ${matchedPrefix}, 原始消息: ${messageText}`);
+      logger.info(`[autodelcmd] 检测到命令: ${command}, 参数: ${JSON.stringify(parameters)}, 前缀: ${matchedPrefix}, 原始消息: ${messageText}`);
 
       // 处理命令后删除
       await serviceInstance.handleCommandPostprocess(msg, command, parameters);
-    } catch (error) {
-      console.error("[autodelcmd] listenMessageHandler 错误:", error);
+    } catch (error: unknown) {
+      logger.error("[autodelcmd] listenMessageHandler 错误:", error);
     }
   };
 }

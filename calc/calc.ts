@@ -2,6 +2,7 @@ import { Plugin } from "@utils/pluginBase";
 import { getPrefixes } from "@utils/pluginManager";
 import type { MessageContext } from "@mtcute/dispatcher";
 import { html } from "@mtcute/html-parser";
+import { getErrorMessage } from "@utils/errorHelpers";
 
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
@@ -231,9 +232,9 @@ class CalcPlugin extends Plugin {
       let result: number;
       try {
         result = SafeMathParser.calculate(expression);
-      } catch (error: any) {
+      } catch (error: unknown) {
         await msg.edit({
-          text: html`🚫 <b>计算失败</b><br/><br/>表达式: <code>${this.htmlEscape(expression)}</code><br/>错误: ${this.htmlEscape(error?.message ?? "未知错误")}`,
+          text: html`🚫 <b>计算失败</b><br/><br/>表达式: <code>${this.htmlEscape(expression)}</code><br/>错误: ${this.htmlEscape(getErrorMessage(error) ?? "未知错误")}`,
         });
         return;
       }
@@ -251,9 +252,9 @@ class CalcPlugin extends Plugin {
         text: html`🧮 <b>计算结果</b><br/><br/><code>${this.htmlEscape(expression)}</code><br/>= <b>${formatted}</b>`,
         disableWebPreview: true,
       });
-    } catch (error: any) {
+    } catch (error: unknown) {
       await msg.edit({
-        text: html`❌ <b>插件错误</b><br/><br/>${this.htmlEscape(error?.message ?? "未知错误")}`,
+        text: html`❌ <b>插件错误</b><br/><br/>${this.htmlEscape(getErrorMessage(error) ?? "未知错误")}`,
       });
     }
   }

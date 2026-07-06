@@ -11,9 +11,32 @@ import { Converter } from "opencc-js";
 import * as https from "https";
 import * as http from "http";
 import Database from "better-sqlite3";
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
 
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
+
+interface HttpClientOptions {
+  method?: string;
+  headers?: Record<string, string>;
+  data?: unknown;
+  timeout?: number;
+}
+
+interface HttpClientRequestOptions {
+  hostname: string;
+  port: number;
+  path: string;
+  method: string;
+  headers: Record<string, string | number>;
+  timeout: number;
+}
+
+interface HttpClientResponse {
+  status: number;
+  data: unknown;
+}
 
 
 const execPromise = util.promisify(exec);
@@ -84,7 +107,7 @@ class GeminiConfigManager {
             this.db = new Database(GEMINI_CONFIG_DB_PATH);
             this.db.exec(`CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`);
             this.initialized = true;
-        } catch (error) { console.error("[yt-dlp] 初始化 Gemini 配置数据库失败:", error); }
+        } catch (error: unknown) { logger.error("[yt-dlp] 初始化 Gemini 配置数据库失败:", error); }
     }
     static get(key: string, defaultValue?: string): string {
         this.init();
@@ -92,68 +115,68 @@ class GeminiConfigManager {
         try {
             const row = this.db.prepare("SELECT value FROM config WHERE key = ?").get(key) as { value: string } | undefined;
             return row ? row.value : (defaultValue || GEMINI_DEFAULT_CONFIG[key] || "");
-        } catch (error) { console.error("[yt-dlp] 读取配置失败:", error); return ""; }
+        } catch (error: unknown) { logger.error("[yt-dlp] 读取配置失败:", error); return ""; }
     }
     static set(key: string, value: string): void {
         this.init();
         if (!this.db) return;
         try {
             this.db.prepare(`INSERT OR REPLACE INTO config (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)`).run(key, value);
-        } catch (error) { console.error("[yt-dlp] 保存配置失败:", error); }
+        } catch (error: unknown) { logger.error("[yt-dlp] 保存配置失败:", error); }
     }
 
-    static cleanup(): void {
-        if (this.db) {
-            try {
-                this.db.close();
-            } catch {}
-        }
+static cleanup(): void {
+    if (this.db) {
+        try {
+            this.db.close();
+        } catch (e: unknown) { logger.error('[yt-dlp] db close failed:', e); }
+    }
         this.db = null;
         this.initialized = false;
     }
 }
 
 class HttpClient {
-    static cleanResponseText(text: string): string {
-        if (!text) return text;
-        return text.replace(/^\uFEFF/, '').normalize('NFKC');
-    }
-    static async makeRequest(url: string, options: any = {}): Promise<any> {
-        const { method = 'GET', headers = {}, data, timeout = 30000 } = options;
-        return new Promise((resolve, reject) => {
-            try {
-                const parsed = new URL(url);
-                const client = parsed.protocol === 'https:' ? https : http;
-                const requestOptions: any = { hostname: parsed.hostname, port: parsed.port || (parsed.protocol === 'https:' ? 443 : 80), path: parsed.pathname + (parsed.search || ''), method, headers: { ...headers }, timeout };
-                let bodyStr: string | undefined;
-                if (data !== undefined) {
-                    bodyStr = typeof data === 'string' ? data : JSON.stringify(data);
-                    if (!requestOptions.headers['Content-Type']) { requestOptions.headers['Content-Type'] = 'application/json'; }
-                    requestOptions.headers['Content-Length'] = Buffer.byteLength(bodyStr);
-                }
-                const req = client.request(requestOptions, (res: any) => {
-                    res.setEncoding('utf8');
-                    let body = '';
-                    res.on('data', (chunk: string) => { body += chunk; });
-                    res.on('end', () => {
-                        const cleaned = HttpClient.cleanResponseText(body || '');
-                        try {
-                            const parsedJson = JSON.parse(cleaned);
-                            resolve({ status: res.statusCode || 0, data: parsedJson });
-                        } catch (err) {
-                            resolve({ status: res.statusCode || 0, data: cleaned });
-                        }
-                    });
-                });
-                req.on('error', (e: Error) => reject(new Error(`网络请求失败: ${e.message}`)));
-                req.on('timeout', () => { req.destroy(); reject(new Error('请求超时')); });
-                if (bodyStr) req.write(bodyStr);
-                req.end();
-            } catch (e: any) {
-                reject(new Error(`请求失败: ${e.message || e}`));
-            }
-        });
-    }
+    static cleanResponseText(text: string): string {
+        if (!text) return text;
+        return text.replace(/^\uFEFF/, '').normalize('NFKC');
+    }
+    static async makeRequest(url: string, options: HttpClientOptions = {}): Promise<HttpClientResponse> {
+        const { method = 'GET', headers = {}, data, timeout = 30000 } = options;
+        return new Promise((resolve, reject) => {
+            try {
+                const parsed = new URL(url);
+                const client = parsed.protocol === 'https:' ? https : http;
+                const requestOptions: HttpClientRequestOptions = { hostname: parsed.hostname, port: Number(parsed.port) || (parsed.protocol === 'https:' ? 443 : 80), path: parsed.pathname + (parsed.search || ''), method, headers: { ...headers }, timeout };
+                let bodyStr: string | undefined;
+                if (data !== undefined) {
+                    bodyStr = typeof data === 'string' ? data : JSON.stringify(data);
+                    if (!requestOptions.headers['Content-Type']) { requestOptions.headers['Content-Type'] = 'application/json'; }
+                    requestOptions.headers['Content-Length'] = Buffer.byteLength(bodyStr);
+                }
+                const req = client.request(requestOptions, (res: http.IncomingMessage) => {
+                    res.setEncoding('utf8');
+                    let body = '';
+                    res.on('data', (chunk: string) => { body += chunk; });
+                    res.on('end', () => {
+                        const cleaned = HttpClient.cleanResponseText(body || '');
+                        try {
+                            const parsedJson = JSON.parse(cleaned);
+                            resolve({ status: res.statusCode || 0, data: parsedJson });
+                        } catch (_e: unknown) {
+                            resolve({ status: res.statusCode || 0, data: cleaned });
+                        }
+                    });
+                });
+                req.on('error', (e: Error) => reject(new Error(`网络请求失败: ${getErrorMessage(e)}`)));
+                req.on('timeout', () => { req.destroy(); reject(new Error('请求超时')); });
+                if (bodyStr) req.write(bodyStr);
+                req.end();
+            } catch (e: unknown) {
+                reject(new Error(`请求失败: ${getErrorMessage(e)}`));
+            }
+        });
+    }
 }
 
 class GeminiClient {
@@ -209,13 +232,16 @@ class GeminiClient {
             "Content-Type": "application/json",
         };
 
-        const response = await HttpClient.makeRequest(url, { method: 'POST', headers: headers, data: requestData });
-        
-        if (response.status !== 200 || response.data?.error) {
-            throw new Error(response.data?.error?.message || `HTTP错误: ${response.status}`);
-        }
-        return HttpClient.cleanResponseText(response.data?.candidates?.[0]?.content?.parts?.[0]?.text || '');
-    }
+        const response = await HttpClient.makeRequest(url, { method: 'POST', headers: headers, data: requestData });
+        const resData = response.data as Record<string, unknown> | undefined;
+
+        if (response.status !== 200 || resData?.error) {
+            const errorObj = resData?.error as Record<string, unknown> | undefined;
+            throw new Error((errorObj?.message as string) || `HTTP错误: ${response.status}`);
+        }
+        const candidates = resData?.candidates as Array<{ content: { parts: Array<{ text: string }> } }> | undefined;
+        return HttpClient.cleanResponseText(candidates?.[0]?.content?.parts?.[0]?.text || '');
+    }
 }
 
 function extractSongInfo(geminiResponse: string, userInput: string): { title: string; artist: string; album?: string } {
@@ -256,7 +282,7 @@ async function downloadYtDlp(msg: MessageContext, isUpdate: boolean = false): Pr
             writer.on("finish", resolve).on("error", reject);
         });
         fs.chmodSync(YTDLP_PATH, 0o755);
-    } catch (error) {
+    } catch (error: unknown) {
         throw new Error(toSimplified(`yt-dlp 下载失败: ${error}`));
     }
 }
@@ -287,13 +313,13 @@ async function handleUpdateCommand(msg: MessageContext): Promise<void> {
             const { stdout } = await execPromise(`${YTDLP_PATH} --version`);
             const version = stdout.trim();
             await msg.edit({ text: toSimplified(`✅ yt-dlp 已更新至最新版本！\n\n当前版本: ${version}`) });
-        } catch {
+        } catch (_e: unknown) {
             await msg.edit({ text: toSimplified("✅ yt-dlp 已更新至最新版本！") });
         }
         
         // 删除备份
         if (fs.existsSync(backupPath)) fs.unlinkSync(backupPath);
-    } catch (error: any) {
+    } catch (error: unknown) {
         // 恢复备份
         if (fs.existsSync(backupPath)) {
             fs.copyFileSync(backupPath, YTDLP_PATH);
@@ -316,8 +342,8 @@ async function getVideoInfo(query: string): Promise<{ title: string; uploader: s
                 duration: videoData.duration || 0,
             };
         }
-    } catch (error) {
-        console.error("获取视频信息失败:", error);
+    } catch (error: unknown) {
+        logger.error("获取视频信息失败:", error);
     }
     return null;
 }
@@ -361,8 +387,8 @@ async function downloadAndUploadSong(msg: MessageContext, songQuery: string, pre
                     if (!videoInfo) throw new Error(toSimplified("AI识别成功，但未找到可下载的视频源。"));
                     videoDuration = videoInfo.duration;
                 } else { throw new Error("AI 返回信息不足，使用标准解析"); }
-            } catch (error: any) {
-                console.warn("[yt-dlp] AI 处理失败:", error.message);
+            } catch (error: unknown) {
+                logger.warn("[yt-dlp] AI 处理失败:", getErrorMessage(error));
                 await msg.edit({ text: toSimplified("AI 识别失败，转为标准搜索...") });
               const videoInfo = await getVideoInfo(songQuery);
               if (!videoInfo) throw new Error(toSimplified("未找到相关歌曲。"));
@@ -398,8 +424,8 @@ async function downloadAndUploadSong(msg: MessageContext, songQuery: string, pre
 
     try {
         await execPromise(command, { timeout: 180000 }); 
-    } catch (error: any) {
-        const errorMessage = error.stderr || error.message || "未知错误";
+    } catch (error: unknown) {
+        const errorMessage = (error as { stderr?: string }).stderr || getErrorMessage(error) || "未知错误";
         if (errorMessage.includes("HTTP Error 403")) {
             throw new Error(toSimplified(`下载失败：YouTube拒绝了请求(403)。这通常是由于下载核心版本过旧。\n\n请尝试使用 \`${mainPrefix}yt update\` 命令更新后再试。`));
         }
@@ -423,15 +449,15 @@ try {
         title: songTitle,
         performer: artistName,
         duration: Math.round(videoDuration),
-    } as any);
-} catch (uploadError) {
-    console.error("音频作为 'Audio' 上传失败, 尝试作为 'Document' 上传:", uploadError);
+    });
+} catch (uploadError: unknown) {
+    logger.error("音频作为 'Audio' 上传失败, 尝试作为 'Document' 上传:", uploadError);
     await client.sendMedia(msg.chat.id, {
         type: "document",
         file: downloadedFilePath,
         fileName: `${cleanFileName}.mp3`,
         thumb: thumbPath,
-    } as any);
+    });
 }
 
     await msg.delete();
@@ -458,16 +484,18 @@ async function handleApiKeyCommand(msg: MessageContext, apiKey: string): Promise
     try {
         await msg.edit({ text: toSimplified("🔄 正在验证 API Key...") });
         const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`;
-        const res = await HttpClient.makeRequest(url, { method: 'GET' });
-        if (res?.status === 200 && Array.isArray(res.data?.models)) {
-            GeminiConfigManager.set(GEMINI_CONFIG_KEYS.API_KEY, apiKey);
-            await msg.edit({ text: toSimplified(`✅ API Key 配置成功！`) });
-        } else {
-            throw new Error(res?.data?.error?.message || `验证失败: ${res?.status}`);
-        }
-    } catch (error: any) {
-        console.error("[yt-dlp] API Key 验证失败:", error);
-        await msg.edit({ text: toSimplified(`❌ API Key 验证失败\n\n错误: ${error.message}`) });
+        const res = await HttpClient.makeRequest(url, { method: 'GET' });
+        const resData = res.data as Record<string, unknown> | undefined;
+        if (res?.status === 200 && Array.isArray(resData?.models)) {
+            GeminiConfigManager.set(GEMINI_CONFIG_KEYS.API_KEY, apiKey);
+            await msg.edit({ text: toSimplified(`✅ API Key 配置成功！`) });
+        } else {
+            const errorObj = resData?.error as Record<string, unknown> | undefined;
+            throw new Error((errorObj?.message as string) || `验证失败: ${res?.status}`);
+        }
+    } catch (error: unknown) {
+        logger.error("[yt-dlp] API Key 验证失败:", error);
+        await msg.edit({ text: toSimplified(`❌ API Key 验证失败\n\n错误: ${getErrorMessage(error)}`) });
     }
 }
 
@@ -499,9 +527,9 @@ const yt = async (msg: MessageContext) => {
             preferredArtist = sepParts.slice(1).join(" ").trim();
         }
         await downloadAndUploadSong(msg, args.trim(), preferredTitle, preferredArtist);
-    } catch (error: any) {
-console.error("YouTube music download error:", error);
-await msg.edit({ text: toSimplified(`下载失败\n原因: ${(error as Error).message}`), disableWebPreview: true });
+    } catch (error: unknown) {
+logger.error("YouTube music download error:", error);
+await msg.edit({ text: toSimplified(`下载失败\n原因: ${getErrorMessage(error)}`), disableWebPreview: true });
     }
 };
 

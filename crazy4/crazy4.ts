@@ -3,13 +3,9 @@ import { getGlobalClient } from "@utils/globalClient";
 import { getPrefixes } from "@utils/pluginManager";
 import type { MessageContext } from "@mtcute/dispatcher";
 import { html } from "@mtcute/html-parser";
-
-// HTML转义函数
-const htmlEscape = (text: string): string => 
-  text.replace(/[&<>"']/g, m => ({ 
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', 
-    '"': '&quot;', "'": '&#x27;' 
-  }[m] || m));
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
+import { htmlEscape } from "@utils/htmlEscape";
 
 // 获取命令前缀
 const prefixes = getPrefixes();
@@ -217,10 +213,10 @@ class Crazy4Plugin extends Plugin {
         // 删除原命令消息
         await msg.delete();
 
-      } catch (error: any) {
-        console.error("[crazy4] 插件执行失败:", error);
+      } catch (error: unknown) {
+        logger.error("[crazy4] 插件执行失败:", error);
         await msg.edit({
-          text: html`❌ <b>插件执行失败:</b> ${htmlEscape(error.message || "未知错误")}`
+          text: html`❌ <b>插件执行失败:</b> ${htmlEscape(getErrorMessage(error) || "未知错误")}`
         });
       }
     }

@@ -2,18 +2,12 @@ import { Plugin } from "@utils/pluginBase";
 import type { MessageContext } from "@mtcute/dispatcher";
 import { html } from "@mtcute/html-parser";
 import { safeGetReplyMessage } from "@utils/safeGetMessages";
-
-const htmlEscape = (text: string): string =>
-  text.replace(/[&<>"']/g, (m) => ({
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    '"': "&quot;",
-    "'": "&#x27;",
-  }[m] || m));
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
+import { htmlEscape } from "@utils/htmlEscape";
 
 const gt = async (msg: MessageContext) => {
-  let translate: any;
+  let translate: (text: string, options: { to: string; timeout: number }) => Promise<{ text: string } | string>;
 
   try {
     // 动态导入翻译库
@@ -26,10 +20,10 @@ const gt = async (msg: MessageContext) => {
       });
       return;
     }
-  } catch (importError: any) {
-    console.error("Failed to import translation service:", importError);
+  } catch (importError: unknown) {
+    logger.error("Failed to import translation service:", importError);
     await msg.edit({
-      text: html(`❌ <b>翻译服务加载失败:</b> ${htmlEscape(String(importError.message || importError))}`),
+      text: html(`❌ <b>翻译服务加载失败:</b> ${htmlEscape(getErrorMessage(importError))}`),
     });
     return;
   }
@@ -79,8 +73,8 @@ const gt = async (msg: MessageContext) => {
           });
           return;
         }
-      } catch (replyError: any) {
-        console.error("Failed to get reply message:", replyError);
+      } catch (replyError: unknown) {
+        logger.error("Failed to get reply message:", replyError);
         await msg.edit({
           text: "❌ 请提供要翻译的文本（无法获取回复消息）",
         });
@@ -102,8 +96,8 @@ const gt = async (msg: MessageContext) => {
     });
 
     // Perform translation using @vitalets/google-translate-api
-    let result;
-    let translated;
+    let result: { text: string } | string;
+    let translated: string;
 
     try {
       // 设置超时和重试机制
@@ -113,7 +107,7 @@ const gt = async (msg: MessageContext) => {
       };
 
       result = await translate(text, translateOptions);
-      translated = result?.text || result;
+      translated = typeof result === 'string' ? result : result.text;
 
       if (
         !translated ||
@@ -125,14 +119,14 @@ const gt = async (msg: MessageContext) => {
 
       // 检查翻译质量（避免原文和译文完全相同）
       if (translated.trim() === text.trim() && text.length > 10) {
-        console.warn("翻译结果与原文相同，可能翻译失败");
+        logger.warn("翻译结果与原文相同，可能翻译失败");
       }
-    } catch (translateError: any) {
-      console.error("Translation API error:", translateError);
+    } catch (translateError: unknown) {
+      logger.error("Translation API error:", translateError);
 
       // 分类处理不同类型的错误
       let errorMsg = "翻译服务暂时不可用";
-      const errorStr = String(translateError.message || translateError);
+      const errorStr = getErrorMessage(translateError);
 
       if (errorStr.includes("timeout") || errorStr.includes("TIMEOUT")) {
         errorMsg = "翻译请求超时，请稍后重试";
@@ -159,9 +153,9 @@ const gt = async (msg: MessageContext) => {
 <b>译文:</b>
 ${htmlEscape(translated)}`),
     });
-  } catch (error: any) {
-    console.error("Translation error:", error);
-    const errorMessage = error.message || String(error);
+  } catch (error: unknown) {
+    logger.error("Translation error:", error);
+    const errorMessage = getErrorMessage(error) || String(error);
     const displayError =
       errorMessage.length > 100
         ? errorMessage.substring(0, 100) + "..."

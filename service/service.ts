@@ -3,6 +3,9 @@ import type { MessageContext } from "@mtcute/dispatcher";
 import { html } from "@mtcute/html-parser";
 import { execFile } from "child_process";
 import { promisify } from "util";
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
+import { htmlEscape } from "@utils/htmlEscape";
 
 const execFileAsync = promisify(execFile);
 
@@ -67,9 +70,7 @@ async function getCurrentServiceName(): Promise<string> {
         }
         return unitName;
       }
-    } catch (error) {
-      // 忽略错误，继续尝试其他方法
-    }
+    } catch (error: unknown) { logger.warn(`[service] 忽略错误，继续尝试其他方法:`, error) }
     
     // 方法2：使用systemctl status PID
     try {
@@ -81,29 +82,28 @@ async function getCurrentServiceName(): Promise<string> {
           return match[1];
         }
       }
-    } catch (error) {
-      // 忽略错误，继续尝试其他方法
-    }
+    } catch (error: unknown) { logger.warn(`[service] 忽略错误，继续尝试其他方法:`, error) }
     
     // 方法3：通过进程名称猜测（回退方案）
     try {
-      // 检查常见的pagermaid服务名称
+      // 并行检查常见的pagermaid服务名称
       const commonNames = ["pagermaid", "pgm", "pagermaid-modify", "pgm-sg", "pgm-hk"];
-      for (const name of commonNames) {
-        try {
-          const { stdout } = await execFileAsync("systemctl", ["is-active", name]);
-          if (stdout && stdout.includes("active")) {
-            return name;
+      const results = await Promise.all(
+        commonNames.map(async (name) => {
+          try {
+            const { stdout } = await execFileAsync("systemctl", ["is-active", name]);
+            return { name, active: stdout?.includes("active") ?? false };
+          } catch (error: unknown) {
+            logger.warn(`[service] 检查 ${name} 失败:`, error);
+            return { name, active: false };
           }
-        } catch (error) {
-          // 继续检查下一个
-        }
-      }
-    } catch (error) {
-      // 忽略错误
-    }
-  } catch (error) {
-    console.error("Error detecting service name:", error);
+        })
+      );
+      const activeService = results.find((r) => r.active);
+      if (activeService) return activeService.name;
+    } catch (error: unknown) { logger.warn(`[service] 忽略错误:`, error) }
+  } catch (error: unknown) {
+    logger.error("Error detecting service name:", error);
   }
   
   // 如果所有方法都失败，返回默认值
@@ -142,24 +142,11 @@ function formatChineseTime(timeStr: string): string {
     
     // 如果匹配失败，返回原始字符串
     return timeStr;
-  } catch (error) {
+  } catch (_e: unknown) {
     return timeStr;
   }
 }
 
-// HTML转义函数
-const htmlEscape = (text: string): string =>
-  text.replace(
-    /[&<>"']/g,
-    (m) =>
-      ({
-        "&": "&amp;",
-        "<": "&lt;",
-        ">": "&gt;",
-        '"': "&quot;",
-        "'": "&#x27;",
-      }[m] || m)
-  );
 
 // 将系统状态信息翻译成中文
 function translateToChinese(text: string): string {
@@ -310,13 +297,13 @@ async function handleServiceRequest(msg: MessageContext): Promise<void> {
         text: html(text)
       });
       
-    } catch (error: any) {
-      await msg.edit({ text: `❌ 获取服务详情时发生错误: ${error.message}` });
+    } catch (error: unknown) {
+      await msg.edit({ text: `❌ 获取服务详情时发生错误: ${getErrorMessage(error)}` });
     }
-    
-  } catch (error: any) {
-    console.error("Service处理错误:", error);
-    await msg.edit({ text: `❌ 错误：${error.message}` });
+
+  } catch (error: unknown) {
+    logger.error("Service处理错误:", error);
+    await msg.edit({ text: `❌ 错误：${getErrorMessage(error)}` });
   }
 }
 

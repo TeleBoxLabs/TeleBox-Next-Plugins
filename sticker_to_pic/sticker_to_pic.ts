@@ -1,24 +1,22 @@
 import { Plugin } from "@utils/pluginBase";
 import { getGlobalClient } from "@utils/globalClient";
 import { getPrefixes } from "@utils/pluginManager";
+import type { Sticker, InputMediaDocument, InputMediaPhoto } from "@mtcute/core";
 import type { MessageContext } from "@mtcute/dispatcher";
+import type { TelegramClient } from "@mtcute/core/highlevel/client.js";
 import { html } from "@mtcute/html-parser";
 import * as fs from "fs";
 import * as path from "path";
 import { execSync } from "child_process";
 import * as os from "os";
 import { safeGetReplyMessage } from "@utils/safeGetMessages";
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
+import { htmlEscape } from "@utils/htmlEscape";
 
 // 获取命令前缀
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
-
-// HTML转义工具
-const htmlEscape = (text: string): string => 
-  text.replace(/[&<>"']/g, m => ({ 
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', 
-    '"': '&quot;', "'": '&#x27;' 
-  }[m] || m));
 
 // 自动安装ImageMagick（静默安装，无需用户干预）
 const ensureImageMagick = async (showProgress: boolean = false, msg?: MessageContext): Promise<boolean> => {
@@ -26,8 +24,8 @@ const ensureImageMagick = async (showProgress: boolean = false, msg?: MessageCon
     // 检查是否已安装
     execSync('which convert', { stdio: 'ignore' });
     return true;
-  } catch (error) {
-    console.log('[sticker_to_pic] ImageMagick未安装，正在自动安装...');
+  } catch (error: unknown) {
+    logger.info('[sticker_to_pic] ImageMagick未安装，正在自动安装...');
     
     if (showProgress && msg) {
       await msg.edit({ text: html("⚙️ 正在自动安装ImageMagick依赖...") });
@@ -43,36 +41,36 @@ const ensureImageMagick = async (showProgress: boolean = false, msg?: MessageCon
           try {
             execSync('sudo -n true', { stdio: 'ignore' });
             execSync('sudo apt-get update && sudo apt-get install -y imagemagick', { stdio: 'pipe' });
-          } catch {
+          } catch (_e: unknown) {
             // 无sudo权限，尝试直接安装
             execSync('apt-get update && apt-get install -y imagemagick', { stdio: 'pipe' });
           }
-          console.log('[sticker_to_pic] ImageMagick自动安装成功 (apt)');
+          logger.info('[sticker_to_pic] ImageMagick自动安装成功 (apt)');
           return true;
-        } catch (aptError) {
+        } catch (_e: unknown) {
           // 尝试yum (CentOS/RHEL)
           try {
             try {
               execSync('sudo -n true', { stdio: 'ignore' });
               execSync('sudo yum install -y ImageMagick', { stdio: 'pipe' });
-            } catch {
+            } catch (_e: unknown) {
               execSync('yum install -y ImageMagick', { stdio: 'pipe' });
             }
-            console.log('[sticker_to_pic] ImageMagick自动安装成功 (yum)');
+            logger.info('[sticker_to_pic] ImageMagick自动安装成功 (yum)');
             return true;
-          } catch (yumError) {
+          } catch (_e: unknown) {
             // 尝试dnf (Fedora)
             try {
               try {
                 execSync('sudo -n true', { stdio: 'ignore' });
                 execSync('sudo dnf install -y ImageMagick', { stdio: 'pipe' });
-              } catch {
+              } catch (_e: unknown) {
                 execSync('dnf install -y ImageMagick', { stdio: 'pipe' });
               }
-              console.log('[sticker_to_pic] ImageMagick自动安装成功 (dnf)');
+              logger.info('[sticker_to_pic] ImageMagick自动安装成功 (dnf)');
               return true;
-            } catch (dnfError) {
-              console.error('[sticker_to_pic] Linux系统自动安装失败，可能需要手动安装');
+            } catch (_e: unknown) {
+              logger.error('[sticker_to_pic] Linux系统自动安装失败，可能需要手动安装');
               return false;
             }
           }
@@ -83,18 +81,18 @@ const ensureImageMagick = async (showProgress: boolean = false, msg?: MessageCon
           // 检查是否有Homebrew
           execSync('which brew', { stdio: 'ignore' });
           execSync('brew install imagemagick', { stdio: 'pipe' });
-          console.log('[sticker_to_pic] ImageMagick自动安装成功 (brew)');
+          logger.info('[sticker_to_pic] ImageMagick自动安装成功 (brew)');
           return true;
-        } catch (brewError) {
+        } catch (_e: unknown) {
           // 尝试安装Homebrew后再安装ImageMagick
           try {
-            console.log('[sticker_to_pic] 正在安装Homebrew...');
+            logger.info('[sticker_to_pic] 正在安装Homebrew...');
             execSync('/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"', { stdio: 'pipe' });
             execSync('brew install imagemagick', { stdio: 'pipe' });
-            console.log('[sticker_to_pic] ImageMagick自动安装成功 (brew)');
+            logger.info('[sticker_to_pic] ImageMagick自动安装成功 (brew)');
             return true;
-          } catch {
-            console.error('[sticker_to_pic] macOS自动安装失败');
+          } catch (e: unknown) {
+            logger.error('[sticker_to_pic] macOS自动安装失败:', e);
             return false;
           }
         }
@@ -103,25 +101,25 @@ const ensureImageMagick = async (showProgress: boolean = false, msg?: MessageCon
         try {
           execSync('where choco', { stdio: 'ignore' });
           execSync('choco install imagemagick -y', { stdio: 'pipe' });
-          console.log('[sticker_to_pic] ImageMagick自动安装成功 (chocolatey)');
+          logger.info('[sticker_to_pic] ImageMagick自动安装成功 (chocolatey)');
           return true;
-        } catch {
+        } catch (e: unknown) {
           try {
             execSync('where scoop', { stdio: 'ignore' });
             execSync('scoop install imagemagick', { stdio: 'pipe' });
-            console.log('[sticker_to_pic] ImageMagick自动安装成功 (scoop)');
+            logger.info('[sticker_to_pic] ImageMagick自动安装成功 (scoop)');
             return true;
-          } catch {
-            console.error('[sticker_to_pic] Windows系统需要手动安装ImageMagick');
+          } catch (e: unknown) {
+            logger.error('[sticker_to_pic] Windows系统需要手动安装ImageMagick:', e);
             return false;
           }
         }
       } else {
-        console.error('[sticker_to_pic] 不支持的操作系统');
+        logger.error('[sticker_to_pic] 不支持的操作系统');
         return false;
       }
-    } catch (installError) {
-      console.error('[sticker_to_pic] ImageMagick自动安装出错:', installError);
+    } catch (installError: unknown) {
+      logger.error('[sticker_to_pic] ImageMagick自动安装出错:', installError);
       return false;
     }
   }
@@ -211,14 +209,14 @@ class StickerToPicPlugin extends Plugin {
             await msg.edit({
               text: html(`✅ <b>ImageMagick状态正常</b><br><br><b>版本信息:</b><br><code>${htmlEscape(versionLine)}</code><br><br>🎯 <b>功能状态:</b> 可正常使用贴纸转换功能`)
             });
-          } catch (error) {
+          } catch (_e: unknown) {
             await msg.edit({
-              text: html("✅ <b>ImageMagick已安装</b>\n\n⚠️ 无法获取版本信息，但可正常使用")
+              text: html("✅ <b>ImageMagick已安装</b><br><br>⚠️ 无法获取版本信息，但可正常使用")
             });
           }
-        } catch (error) {
+        } catch (_e: unknown) {
           // 未安装，尝试自动安装
-          await msg.edit({ text: html("❌ <b>ImageMagick未安装</b>\n\n🔄 正在自动安装，请稍候...") });
+          await msg.edit({ text: html("❌ <b>ImageMagick未安装</b><br><br>🔄 正在自动安装，请稍候...") });
           
           const isInstalled = await ensureImageMagick(true, msg);
           if (isInstalled) {
@@ -228,9 +226,9 @@ class StickerToPicPlugin extends Plugin {
               await msg.edit({
                 text: html(`🎉 <b>ImageMagick自动安装成功！</b><br><br><b>版本信息:</b><br><code>${htmlEscape(versionLine)}</code><br><br>✅ <b>状态:</b> 现在可以正常使用贴纸转换功能`)
               });
-            } catch (versionError) {
+            } catch (_e: unknown) {
               await msg.edit({
-                text: html("🎉 <b>ImageMagick自动安装成功！</b>\n\n✅ <b>状态:</b> 现在可以正常使用贴纸转换功能")
+                text: html("🎉 <b>ImageMagick自动安装成功！</b><br><br>✅ <b>状态:</b> 现在可以正常使用贴纸转换功能")
               });
             }
           } else {
@@ -287,56 +285,34 @@ class StickerToPicPlugin extends Plugin {
 
       await this.processStickerConversion(msg, client, outputFormat, keepTransparency, sendAsDocument);
 
-    } catch (error: any) {
-      console.error("[sticker_to_pic] 插件执行失败:", error);
+    } catch (error: unknown) {
+      logger.error("[sticker_to_pic] 插件执行失败:", error);
       await msg.edit({
-        text: html(`❌ <b>插件执行失败:</b> ${htmlEscape(error.message)}`)
+        text: html(`❌ <b>插件执行失败:</b> ${htmlEscape(getErrorMessage(error))}`)
       });
     }
   }
 
   private async processStickerConversion(
-    msg: MessageContext, 
-    client: any, 
+    msg: MessageContext,
+    client: TelegramClient, 
     outputFormat: string, 
     keepTransparency: boolean, 
     sendAsDocument: boolean
   ): Promise<void> {
     try {
-       
-      let targetMsg: any = msg;
-      
       const reply = await safeGetReplyMessage(msg);
-      if (reply) {
-        targetMsg = reply;
-      }
-       
-      const targetMedia = (targetMsg as any).media;
-      if (!targetMedia || (targetMedia as any)._ !== 'messageMediaDocument') {
+      const targetMsg = reply || msg;
+
+      const media = targetMsg.media;
+      if (!media || media.type !== 'sticker') {
         await msg.edit({
           text: html("❌ <b>请回复一个贴纸消息</b>")
         });
         return;
       }
 
-      const document = (targetMedia as any).document;
-      if (!document || (document as any)._ !== 'document') {
-        await msg.edit({
-          text: html("❌ <b>无效的文档类型</b>")
-        });
-        return;
-      }
-
-      const isSticker = (document as any).attributes?.some((attr: any) => 
-        (attr as any)._ === 'documentAttributeSticker'
-      );
-      
-      if (!isSticker) {
-        await msg.edit({
-          text: html("❌ <b>这不是一个贴纸文件</b>")
-        });
-        return;
-      }
+      const sticker = media as Sticker;
 
       await msg.edit({
         text: html("📥 正在下载贴纸...")
@@ -352,7 +328,7 @@ class StickerToPicPlugin extends Plugin {
       const outputPath = path.join(tempDir, `pic_${timestamp}.${outputFormat}`);
 
       try {
-        await client.downloadToFile(stickerPath, targetMedia);
+        await client.downloadToFile(stickerPath, sticker);
 
         if (!fs.existsSync(stickerPath)) {
           await msg.edit({
@@ -418,10 +394,10 @@ class StickerToPicPlugin extends Plugin {
             throw new Error('转换失败：输出文件未生成');
           }
           
-        } catch (convertError: any) {
-          console.error('[sticker_to_pic] ImageMagick转换失败:', convertError);
+        } catch (convertError: unknown) {
+          logger.error('[sticker_to_pic] ImageMagick转换失败:', convertError);
           await msg.edit({
-            text: html(`❌ <b>贴纸转换失败</b><br><br><b>错误详情:</b> ${htmlEscape(convertError.message)}<br><br>💡 请确保贴纸格式正确`)
+            text: html(`❌ <b>贴纸转换失败</b><br><br><b>错误详情:</b> ${htmlEscape(getErrorMessage(convertError))}<br><br>💡 请确保贴纸格式正确`)
           });
           return;
         }
@@ -432,20 +408,22 @@ class StickerToPicPlugin extends Plugin {
 
         if (sendAsDocument) {
           // 发送为文档（原图）
-          await client.sendMedia(msg.chat.id, {
+          const docMedia: InputMediaDocument = {
             type: "document",
             file: outputPath,
             caption: html(`📄 <b>贴纸已转换为${outputFormat.toUpperCase()}格式（原图）</b>`)
-          } as any, {
+          };
+          await client.sendMedia(msg.chat.id, docMedia, {
             replyTo: msg.id
           });
         } else {
           // 发送为图片
-          await client.sendMedia(msg.chat.id, {
+          const photoMedia: InputMediaPhoto = {
             type: "photo",
             file: outputPath,
             caption: html(`🖼️ <b>贴纸已转换为${outputFormat.toUpperCase()}格式</b>${keepTransparency ? '（透明背景）' : ''}`)
-          } as any, {
+          };
+          await client.sendMedia(msg.chat.id, photoMedia, {
             replyTo: msg.id
           });
         }
@@ -460,23 +438,23 @@ class StickerToPicPlugin extends Plugin {
           if (fs.existsSync(outputPath)) {
             fs.unlinkSync(outputPath);
           }
-        } catch (cleanupError) {
-          console.error('[sticker_to_pic] 清理临时文件失败:', cleanupError);
+        } catch (cleanupError: unknown) {
+          logger.error('[sticker_to_pic] 清理临时文件失败:', cleanupError);
         }
       }
-    } catch (error: any) {
-      console.error("[sticker_to_pic] 处理贴纸转换失败:", error);
+    } catch (error: unknown) {
+      logger.error("[sticker_to_pic] 处理贴纸转换失败:", error);
       
       let errorMsg = "❌ <b>转换贴纸为图片时出现错误</b>";
       
-      if (error.message.includes('MEDIA_INVALID')) {
+      if (getErrorMessage(error).includes('MEDIA_INVALID')) {
         errorMsg = "❌ <b>无效的媒体文件</b>";
-      } else if (error.message.includes('FILE_PARTS_INVALID')) {
+      } else if (getErrorMessage(error).includes('FILE_PARTS_INVALID')) {
         errorMsg = "❌ <b>文件损坏或格式不支持</b>";
-      } else if (error.message.includes('DOCUMENT_INVALID')) {
+      } else if (getErrorMessage(error).includes('DOCUMENT_INVALID')) {
         errorMsg = "❌ <b>无效的文档文件</b>";
       } else {
-        errorMsg += `\n\n<b>错误详情:</b> ${htmlEscape(error.message)}`;
+        errorMsg += `<br><br><b>错误详情:</b> ${htmlEscape(getErrorMessage(error))}`;
       }
       
       await msg.edit({

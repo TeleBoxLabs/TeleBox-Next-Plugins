@@ -4,17 +4,15 @@ import type { MessageContext } from "@mtcute/dispatcher";
 import { html } from "@mtcute/html-parser";
 import { getGlobalClient } from "@utils/globalClient";
 import axios from "axios";
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
+import { htmlEscape } from "@utils/htmlEscape";
 
 // 获取命令前缀
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
 
-// HTML转义工具
-const htmlEscape = (text: string): string => 
-  text.replace(/[&<>"']/g, m => ({ 
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', 
-    '"': '&quot;', "'": '&#x27;' 
-  }[m] || m));
+// HTML转义工具已移至 @utils/htmlEscape
 
 // 详细帮助文档（help子命令时显示）
 const help_text = `🗞️ <b>每日新闻插件</b>
@@ -125,10 +123,10 @@ class NewsPlugin extends Plugin {
           text: `❌ <b>未知命令:</b> <code>${htmlEscape(sub)}</code>`
         });
 
-      } catch (error: any) {
-        console.error("[news] 插件执行失败:", error);
+      } catch (error: unknown) {
+        logger.error("[news] 插件执行失败:", error);
         await msg.edit({
-          text: `❌ <b>插件执行失败:</b> ${htmlEscape(error.message)}`
+          text: `❌ <b>插件执行失败:</b> ${htmlEscape(getErrorMessage(error))}`
         });
       }
     }
@@ -280,10 +278,10 @@ class NewsPlugin extends Plugin {
         }
       }
 
-    } catch (error: any) {
-      console.error("[news] 获取新闻失败:", error);
+    } catch (error: unknown) {
+      logger.error("[news] 获取新闻失败:", error);
       await msg.edit({
-        text: `❌ <b>获取失败:</b> ${htmlEscape(error.message || "网络请求失败")}`
+        text: `❌ <b>获取失败:</b> ${htmlEscape(getErrorMessage(error) || "网络请求失败")}`
       });
     }
   }

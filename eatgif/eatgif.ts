@@ -15,6 +15,9 @@ import { encode, UnencodedFrame } from "modern-gif";
 import { exec } from "child_process";
 import { promisify } from "util";
 import { safeGetReplyMessage } from "@utils/safeGetMessages";
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
+import { htmlEscape } from "@utils/htmlEscape";
 
 const execAsync = promisify(exec);
 
@@ -76,21 +79,6 @@ const help_text = `🧩 <b>头像动图表情</b>
 <code>${commandName} [list|ls|clear|名称]</code>
 • <b>空/ list</b>：查看表情列表
 • <b>生成</b>：回复目标并输入名称`;
-
-const htmlEscape = (text: string): string =>
-  String(text || "").replace(
-    /[&<>"']/g,
-    (m) =>
-      ((
-        {
-          "&": "&amp;",
-          "<": "&lt;",
-          ">": "&gt;",
-          '"': "&quot;",
-          "'": "&#x27;",
-        } as any
-      )[m] || m)
-  );
 
 async function ensureConfig(): Promise<void> {
   if (!config) await loadGifListConfig(baseConfigURL);
@@ -171,9 +159,9 @@ class EatGifPlugin extends Plugin {
         text: html`⏳ 正在生成 <b>${htmlEscape(config[sub].desc)}</b>...`,
       });
       await this.generateGif(sub, { msg, trigger });
-    } catch (e: any) {
+    } catch (e: unknown) {
       await msg.edit({
-        text: html`❌ 失败：${htmlEscape(e?.message || String(e))}`,
+        text: html`❌ 失败：${htmlEscape(getErrorMessage(e) || String(e))}`,
       });
     }
   }
@@ -271,8 +259,8 @@ class EatGifPlugin extends Plugin {
       }, {
         replyTo: replyMsg?.id,
       });
-    } catch (e) {
-      console.log("exec ffmpeg error", e);
+    } catch (e: unknown) {
+      logger.info("exec ffmpeg error", e);
       await msg.edit({ text: html`生成 webm 失败 ${String(e)}` });
 
       const client = await getGlobalClient();
@@ -384,23 +372,27 @@ class EatGifPlugin extends Plugin {
     const client = await getGlobalClient();
     if (!client) return undefined;
     try {
-      const peer = await client.resolvePeer(userId) as any;
+      // TL-layer: resolvePeer returns high-level type but getFullUser needs raw InputUser
+      const peer = await client.resolvePeer(userId);
       const fullUser = await client.call({
         _: 'users.getFullUser',
         id: peer,
-      }) as any;
-      const photo = fullUser?.full_user?.photo;
+      } as never);
+      // TL-layer: access raw userFull.photo (TypeUserProfilePhoto) which has photoId
+      const fullUserAny = fullUser as unknown as { fullUser?: { photo?: { _?: string; photoId?: bigint } } };
+      const photo = fullUserAny?.fullUser?.photo;
       if (!photo || photo._ !== 'userProfilePhoto') return undefined;
+      // TL-layer: inputPeerPhotoFileLocation needs raw peer object
       const location = {
         _: 'inputPeerPhotoFileLocation' as const,
         big: false,
         peer: peer,
-        photo_id: photo.photo_id,
-      } as any;
+        photo_id: photo.photoId,
+      } as never;
       const buffer = await client.downloadAsBuffer(location);
       return Buffer.from(buffer);
-    } catch (err) {
-      console.error("[eatgif] downloadProfilePhoto failed:", err);
+    } catch (err: unknown) {
+      logger.error("[eatgif] downloadProfilePhoto failed:", err);
       return undefined;
     }
   }

@@ -9,6 +9,13 @@ import * as path from "path";
 import * as yaml from "js-yaml";
 import { createDirectoryInAssets, createDirectoryInTemp } from "@utils/pathHelpers";
 
+interface NeZhaYamlConfig {
+  jwt_secret_key?: string;
+  jwtSecretKey?: string;
+}
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
+
 interface NeZhaConfig {
   url: string;
   secret: string;
@@ -101,7 +108,7 @@ function loadConfig(): NeZhaConfig | null {
       configCache = JSON.parse(content);
       return configCache;
     }
-  } catch {}
+  } catch (e: unknown) { logger.error('[nezha] loadConfig failed:', e); }
   return null;
 }
 
@@ -110,8 +117,8 @@ function saveConfig(config: NeZhaConfig): void {
     const file = getConfigPath();
     fs.writeFileSync(file, JSON.stringify(config, null, 2), "utf-8");
     configCache = config;
-  } catch (e) {
-    console.error("Failed to save nezha config:", e);
+  } catch (e: unknown) {
+    logger.error("Failed to save nezha config:", e);
   }
 }
 
@@ -194,9 +201,9 @@ function readSecretFromConfig(configPath: string): string | null {
       return null;
     }
     const content = fs.readFileSync(configPath, "utf-8");
-    const config = yaml.load(content) as any;
+    const config = yaml.load(content) as NeZhaYamlConfig | null | undefined;
     return config?.jwt_secret_key || config?.jwtSecretKey || null;
-  } catch {
+  } catch (_e: unknown) {
     return null;
   }
 }
@@ -227,7 +234,7 @@ async function fetchServers(config: NeZhaConfig): Promise<Server[]> {
   if (Array.isArray(response.data)) {
     return response.data;
   }
-  throw new Error((response.data as any).error || "获取服务器列表失败");
+  throw new Error((response.data as { error?: string }).error || "获取服务器列表失败");
 }
 
 function isServerOnline(server: Server): boolean {
@@ -265,8 +272,8 @@ async function fetchServiceMonitor(
         }
       }
     }
-  } catch (error: any) {
-    console.error(`[NeZha Debug] Service monitor API error for server ${serverId}:`, error.message || error);
+  } catch (error: unknown) {
+    logger.error(`[NeZha Debug] Service monitor API error for server ${serverId}:`, getErrorMessage(error) || error);
   }
   return result;
 }
@@ -293,8 +300,8 @@ async function fetchServiceMonitorFull(
     if (response.data.success && response.data.data) {
       return response.data.data;
     }
-  } catch (error: any) {
-    console.error(`[NeZha Debug] Service monitor full API error:`, error.message || error);
+  } catch (error: unknown) {
+    logger.error(`[NeZha Debug] Service monitor full API error:`, getErrorMessage(error) || error);
   }
   return [];
 }
@@ -410,8 +417,8 @@ async function downloadChart(chartConfig: object): Promise<Buffer | null> {
       }
     );
     return Buffer.from(response.data);
-  } catch (error: any) {
-    console.error("Failed to download chart:", error.message);
+  } catch (error: unknown) {
+    logger.error("Failed to download chart:", getErrorMessage(error));
     return null;
   }
 }
@@ -443,7 +450,7 @@ function formatServerInfo(
       const delayMs = delay.toFixed(1);
       monitors.push(`${htmlEscape(name)}:${delayMs}ms`);
     });
-    title += `\n📶 ${monitors.join(" | ")}`;
+    title += `<br>📶 ${monitors.join(" | ")}`;
   }
 
   if (!online) {
@@ -462,22 +469,22 @@ function formatServerInfo(
         ? ((state.disk_used / host.disk_total) * 100).toFixed(1)
         : "0";
 
-    let details = `├ CPU: ${getUsageBar(parseFloat(cpuPercent))} ${cpuPercent}%\n`;
+    let details = `├ CPU: ${getUsageBar(parseFloat(cpuPercent))} ${cpuPercent}%<br>`;
     details += `├ 内存: ${getUsageBar(parseFloat(memPercent))} ${memPercent}%`;
     if (state.mem_used && host?.mem_total) {
       details += ` (${formatBytes(state.mem_used)}/${formatBytes(host.mem_total)})`;
     }
-    details += `\n`;
+    details += `<br>`;
     details += `├ 硬盘: ${getUsageBar(parseFloat(diskPercent))} ${diskPercent}%`;
     if (state.disk_used && host?.disk_total) {
       details += ` (${formatBytes(state.disk_used)}/${formatBytes(host.disk_total)})`;
     }
-    details += `\n`;
-    details += `├ 网络: ↑${formatSpeed(state.net_out_speed || 0)} ↓${formatSpeed(state.net_in_speed || 0)}\n`;
-    details += `├ 流量: ↑${formatBytes(state.net_out_transfer || 0)} ↓${formatBytes(state.net_in_transfer || 0)}\n`;
+    details += `<br>`;
+    details += `├ 网络: ↑${formatSpeed(state.net_out_speed || 0)} ↓${formatSpeed(state.net_in_speed || 0)}<br>`;
+    details += `├ 流量: ↑${formatBytes(state.net_out_transfer || 0)} ↓${formatBytes(state.net_in_transfer || 0)}<br>`;
     details += `└ 运行: ${formatUptime(state.uptime || 0)}`;
 
-    return `${title}\n<blockquote expandable>${details}</blockquote>`;
+    return `${title}<br><blockquote expandable>${details}</blockquote>`;
   }
 
   return title;
@@ -542,7 +549,7 @@ const nezha = async (msg: MessageContext) => {
 
       await msg.edit({ text: "📈 正在生成图表..." });
       
-      console.log("[NeZha Chart Debug] monitorData sample:", JSON.stringify({
+      logger.info("[NeZha Chart Debug] monitorData sample:", JSON.stringify({
         count: monitorData.length,
         first: monitorData[0] ? {
           name: monitorData[0].monitor_name,
@@ -569,13 +576,13 @@ const nezha = async (msg: MessageContext) => {
 
       try {
         const client = await getGlobalClient();
-        const caption = `📊 <b>${htmlEscape(targetServer.name)}</b> 服务监控\n\n监控项: ${monitorData.map((m) => htmlEscape(m.monitor_name)).join(", ")}`;
+        const caption = `📊 <b>${htmlEscape(targetServer.name)}</b> 服务监控<br><br>监控项: ${monitorData.map((m) => htmlEscape(m.monitor_name)).join(", ")}`;
 
         await client.sendMedia(msg.chat.id, {
           type: "photo",
           file: tempFile,
           caption: html(caption),
-        } as any);
+        });
         await msg.delete({ revoke: true });
       } finally {
         if (fs.existsSync(tempFile)) {
@@ -677,11 +684,11 @@ const nezha = async (msg: MessageContext) => {
 <br>
 使用 <code>nezha</code> 查看服务器状态`,
         });
-      } catch (error: any) {
+      } catch (error: unknown) {
         await msg.edit({
           text: html`❌ <b>配置验证失败</b><br><br>
 <br><br>
-<b>错误:</b> ${htmlEscape(error.message)}<br>
+<b>错误:</b> ${htmlEscape(getErrorMessage(error))}<br>
 <br>
 请检查面板地址和 Secret 是否正确`,
         });
@@ -725,7 +732,7 @@ const nezha = async (msg: MessageContext) => {
 
     if (!servers.length) {
       await msg.edit({
-        text: html("📊 <b>哪吒监控</b>\n\n暂无服务器数据"),
+        text: html("📊 <b>哪吒监控</b><br><br>暂无服务器数据"),
       });
       return;
     }
@@ -740,32 +747,32 @@ const nezha = async (msg: MessageContext) => {
     const onlineCount = servers.filter(isServerOnline).length;
     const totalCount = servers.length;
 
-    let resultText = `📊 <b>哪吒监控</b> (${onlineCount}/${totalCount} 在线)\n\n`;
+    let resultText = `📊 <b>哪吒监控</b> (${onlineCount}/${totalCount} 在线)<br><br>`;
     resultText += servers
       .map((s) => formatServerInfo(s, serviceDataMap.get(s.id)))
-      .join("\n\n");
+      .join("<br><br>");
 
     if (resultText.length > 4000) {
       const onlineOnly = servers.filter(isServerOnline);
-      resultText = `📊 <b>哪吒监控</b> (${onlineCount}/${totalCount} 在线)\n\n`;
+      resultText = `📊 <b>哪吒监控</b> (${onlineCount}/${totalCount} 在线)<br><br>`;
       resultText += onlineOnly
         .map((s) => formatServerInfo(s, serviceDataMap.get(s.id)))
-        .join("\n\n");
+        .join("<br><br>");
 
       if (totalCount - onlineCount > 0) {
-        resultText += `\n\n🔴 还有 ${totalCount - onlineCount} 台服务器离线`;
+        resultText += `<br><br>🔴 还有 ${totalCount - onlineCount} 台服务器离线`;
       }
     }
 
     await msg.edit({
       text: html(resultText),
     });
-  } catch (error: any) {
-    console.error("NeZha plugin error:", error);
+  } catch (error: unknown) {
+    logger.error("NeZha plugin error:", error);
     await msg.edit({
       text: html`❌ <b>获取失败</b><br><br>
 <br><br>
-<b>错误:</b> ${htmlEscape(error.message || "未知错误")}<br>
+<b>错误:</b> ${htmlEscape(getErrorMessage(error) || "未知错误")}<br>
 <br>
 请检查网络连接或重新配置`,
     });

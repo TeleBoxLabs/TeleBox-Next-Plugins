@@ -1,7 +1,6 @@
 import { Plugin } from "@utils/pluginBase";
 import { getGlobalClient } from "@utils/globalClient";
 import type { MessageContext } from "@mtcute/dispatcher";
-import { tl } from "@mtcute/core";
 import * as fs from "fs";
 import * as path from "path";
 import { promisify } from "util";
@@ -9,6 +8,51 @@ import archiver from "archiver";
 import { exec } from "child_process";
 import { getPrefixes } from "@utils/pluginManager";
 import { safeGetReplyMessage } from "@utils/safeGetMessages";
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
+
+interface StickerAttribute {
+  _?: string;
+  video?: boolean;
+  animated?: boolean;
+  stickerset?: StickerSetRef;
+}
+
+interface StickerSetRef {
+  _?: string;
+  shortName?: string;
+  short_name?: string;
+  id?: string | number | bigint;
+  accessHash?: string | number | bigint;
+  access_hash?: string | number | bigint;
+}
+
+interface StickerDocument {
+  _?: string;
+  id?: string | number | bigint;
+  accessHash?: string | number | bigint;
+  access_hash?: string | number | bigint;
+  attributes?: StickerAttribute[];
+  mimeType?: string;
+  mime_type?: string;
+}
+
+interface RawMediaMessage {
+  _?: string;
+  media?: {
+    _?: string;
+    document?: StickerDocument;
+  };
+}
+
+interface MessageLike {
+  sticker?: StickerDocument;
+  document?: StickerDocument;
+  media?: { caption?: string } | null;
+  raw?: RawMediaMessage;
+  replyToMessage?: { id: number };
+}
+
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
 
@@ -67,7 +111,7 @@ class GetStickersPlugin extends Plugin {
       }
       
       if (!tools.lottie) {
-        console.log('lottie 未安装，tgs格式将无法转换');
+        logger.info('lottie 未安装，tgs格式将无法转换');
       }
 
       const dataDir = path.join(process.cwd(), 'data', 'sticker');
@@ -81,40 +125,42 @@ class GetStickersPlugin extends Plugin {
       const replyMsg = await safeGetReplyMessage(msg);
       if (replyMsg) {
         try {
-          if ((replyMsg as any).sticker) {
-            sticker = (replyMsg as any).sticker;
-          } else if ((replyMsg as any).document && (replyMsg as any).document.mimeType?.includes('sticker')) {
-            sticker = (replyMsg as any).document;
-          } else if ((replyMsg as any).media) {
+          const replyLike = replyMsg as MessageLike;
+          if (replyLike.sticker) {
+            sticker = replyLike.sticker;
+          } else if (replyLike.document && replyLike.document.mimeType?.includes('sticker')) {
+            sticker = replyLike.document;
+          } else if (replyLike.raw) {
             // Try raw media for sticker/document
-            const raw = (replyMsg as any).raw;
+            const raw = replyLike.raw;
             if (raw?.media?._ === 'messageMediaDocument' && raw.media.document?._ === 'document') {
               const doc = raw.media.document;
               const isSticker = doc.attributes?.some(
-                (a: any) => a._ === 'documentAttributeSticker'
+                (a: StickerAttribute) => a._ === 'documentAttributeSticker'
               );
               if (isSticker || doc.mime_type?.includes('sticker')) {
                 sticker = doc;
               }
             }
           }
-        } catch (error) {
-          console.error('Failed to get reply message:', error);
+        } catch (error: unknown) {
+          logger.error('Failed to get reply message:', error);
         }
       }
       
       if (!sticker) {
         // Check if current message has a sticker
-        if ((msg as any).sticker) {
-          sticker = (msg as any).sticker;
-        } else if ((msg as any).document && (msg as any).document.mimeType?.includes('sticker')) {
-          sticker = (msg as any).document;
-        } else if ((msg as any).media) {
-          const raw = (msg as any).raw;
+        const msgLike = msg as MessageLike;
+        if (msgLike.sticker) {
+          sticker = msgLike.sticker;
+        } else if (msgLike.document && msgLike.document.mimeType?.includes('sticker')) {
+          sticker = msgLike.document;
+        } else if (msgLike.raw) {
+          const raw = msgLike.raw;
           if (raw?.media?._ === 'messageMediaDocument' && raw.media.document?._ === 'document') {
             const doc = raw.media.document;
             const isSticker = doc.attributes?.some(
-              (a: any) => a._ === 'documentAttributeSticker'
+              (a: StickerAttribute) => a._ === 'documentAttributeSticker'
             );
             if (isSticker || doc.mime_type?.includes('sticker')) {
               sticker = doc;
@@ -141,8 +187,8 @@ class GetStickersPlugin extends Plugin {
       
       await this.downloadStickers(client, msg, stickerSetName);
       
-    } catch (error) {
-      console.error("GetStickers plugin error:", error);
+    } catch (error: unknown) {
+      logger.error("GetStickers plugin error:", error);
       
       await msg.edit({
         text: "❌ 处理贴纸时出现错误"
@@ -150,71 +196,71 @@ class GetStickersPlugin extends Plugin {
     }
   }
   
-  private getStickerSetName(sticker: any): string | null {
-    if (sticker.attributes) {
+  private getStickerSetName(sticker: StickerDocument | null): string | null {
+    if (sticker?.attributes) {
       for (const attr of sticker.attributes) {
-        if ((attr as any)._ === 'documentAttributeSticker' && attr.stickerset) {
-          console.log('贴纸包类型:', (attr.stickerset as any)._ || typeof attr.stickerset);
+        if (attr._ === 'documentAttributeSticker' && attr.stickerset) {
+          const ss = attr.stickerset;
+          logger.info('贴纸包类型:', ss._ || typeof ss);
           
           // 优先使用shortName，这与Python版本一致
-          if ((attr.stickerset as any)._ === 'inputStickerSetShortName') {
-            console.log('找到贴纸包名称:', attr.stickerset.shortName);
-            return attr.stickerset.shortName;
-          } else if ((attr.stickerset as any)._ === 'inputStickerSetEmpty') {
-            console.log('空贴纸包，跳过');
+          if (ss._ === 'inputStickerSetShortName') {
+            logger.info('找到贴纸包名称:', ss.shortName);
+            return ss.shortName ?? null;
+          } else if (ss._ === 'inputStickerSetEmpty') {
+            logger.info('空贴纸包，跳过');
             continue;
-          } else if (attr.stickerset && typeof attr.stickerset === 'object') {
+          } else if (ss && typeof ss === 'object') {
             // 处理VirtualClass和其他类型的贴纸包
-            const stickerSet = attr.stickerset as any;
             
             // 尝试多种属性名称来获取贴纸包名称
-            if (stickerSet.shortName && typeof stickerSet.shortName === 'string') {
-              console.log('从对象提取贴纸包名称 (shortName):', stickerSet.shortName);
-              return stickerSet.shortName;
+            if (ss.shortName && typeof ss.shortName === 'string') {
+              logger.info('从对象提取贴纸包名称 (shortName):', ss.shortName);
+              return ss.shortName;
             }
             
             // 对于VirtualClass类型，尝试其他可能的属性
-            if (stickerSet.short_name && typeof stickerSet.short_name === 'string') {
-              console.log('从对象提取贴纸包名称 (short_name):', stickerSet.short_name);
-              return stickerSet.short_name;
+            if (ss.short_name && typeof ss.short_name === 'string') {
+              logger.info('从对象提取贴纸包名称 (short_name):', ss.short_name);
+              return ss.short_name;
             }
             
             // 如果有id/access_hash属性，尝试通过id+access_hash获取贴纸包信息
-            const toPlainString = (v: any): string | null => {
+            const toPlainString = (v: unknown): string | null => {
               if (v === undefined || v === null) return null;
               if (typeof v === 'string') return v;
               if (typeof v === 'number') return String(v);
               if (typeof v === 'bigint') return v.toString();
               try {
                 // 常见: { value: 123n }
-                if (typeof v.value !== 'undefined') {
-                  const val = v.value;
+                const valObj = v as { value?: unknown };
+                if (typeof valObj.value !== 'undefined') {
+                  const val = valObj.value;
                   if (typeof val === 'bigint') return val.toString();
                   if (typeof val === 'number' || typeof val === 'string') return String(val);
                 }
-                const s = v.toString?.();
+                const s = (v as { toString?: () => string }).toString?.();
                 if (s && !s.includes('[object')) return s;
-              } catch {}
+              } catch (e: unknown) { logger.warn('操作失败', e) }
               return String(v);
             };
-            const idVal = toPlainString(stickerSet.id) || toPlainString(stickerSet._id);
-            const hashVal = toPlainString(stickerSet.accessHash) || toPlainString(stickerSet.access_hash);
+            const idVal = toPlainString(ss.id) || toPlainString((ss as { _id?: unknown })._id);
+            const hashVal = toPlainString(ss.accessHash) || toPlainString(ss.access_hash);
             if (idVal && hashVal) {
-              console.log('找到贴纸包ID与access_hash，将尝试通过ID查询:', idVal, hashVal);
-              // 返回一个包含id与hash的特殊标记，让downloadStickers方法处理ID查询
+              logger.info('找到贴纸包ID与access_hash，将尝试通过ID查询:', idVal, hashVal);
               return `__ID__${idVal}__HASH__${hashVal}`;
             }
             if (idVal) {
-              console.log('找到贴纸包ID（缺少access_hash）:', idVal);
+              logger.info('找到贴纸包ID（缺少access_hash）:', idVal);
               return `__ID__${idVal}`;
             }
             
-            console.log('VirtualClass贴纸包对象属性:', Object.keys(stickerSet));
+            logger.info('VirtualClass贴纸包对象属性:', Object.keys(ss));
           }
         }
       }
     }
-    console.log('未找到贴纸包信息');
+    logger.info('未找到贴纸包信息');
     return null;
   }
   
@@ -237,11 +283,11 @@ class GetStickersPlugin extends Plugin {
         const idStr = match?.[1]?.trim();
         const hashStr = match?.[2]?.trim();
         if (!idStr || !hashStr) {
-          console.warn('ID查询缺少access_hash，无法通过ID获取贴纸包，建议通过shortName查询');
+          logger.warn('ID查询缺少access_hash，无法通过ID获取贴纸包，建议通过shortName查询');
           await msg.edit({ text: '❌ 贴纸包信息不足（缺少 access_hash），无法通过ID查询。请回复来源贴纸或尝试使用短名称。' });
           return;
         }
-        console.log('使用ID查询贴纸包:', idStr, 'access_hash:', hashStr);
+        logger.info('使用ID查询贴纸包:', idStr, 'access_hash:', hashStr);
         stickerSetInput = {
           _: 'inputStickerSetID',
           id: BigInt(idStr),
@@ -249,7 +295,7 @@ class GetStickersPlugin extends Plugin {
         };
       } else {
         // 使用shortName查询，与Python版本保持一致
-        console.log('使用短名称查询贴纸包:', stickerSetName.trim());
+        logger.info('使用短名称查询贴纸包:', stickerSetName.trim());
         stickerSetInput = {
           _: 'inputStickerSetShortName',
           shortName: stickerSetName.trim()
@@ -311,10 +357,10 @@ class GetStickersPlugin extends Plugin {
           let fileExt = 'webp';
           if (document.attributes) {
             for (const attr of document.attributes) {
-              if ((attr as any)._ === 'documentAttributeSticker') {
-                if ((attr as any).video) {
+              if (attr._ === 'documentAttributeSticker') {
+                if (attr.video) {
                   fileExt = 'mp4';
-                } else if ((attr as any).animated) {
+                } else if (attr.animated) {
                   fileExt = 'tgs';
                 }
                 break;
@@ -337,8 +383,8 @@ class GetStickersPlugin extends Plugin {
               await this.convertWebpToGif(filePath, gifPath);
               fs.unlinkSync(filePath);
               finalFileName = gifFileName;
-            } catch (convertError) {
-              console.error(`转换webp失败，保留原格式:`, convertError);
+            } catch (convertError: unknown) {
+              logger.error(`转换webp失败，保留原格式:`, convertError);
             }
           } else if (fileExt === 'tgs') {
             try {
@@ -347,8 +393,8 @@ class GetStickersPlugin extends Plugin {
               await this.convertTgsToGif(filePath, gifPath);
               fs.unlinkSync(filePath);
               finalFileName = gifFileName;
-            } catch (convertError) {
-              console.error(`转换tgs失败，保留原格式:`, convertError);
+            } catch (convertError: unknown) {
+              logger.error(`转换tgs失败，保留原格式:`, convertError);
             }
           } else if (fileExt === 'mp4') {
             try {
@@ -357,8 +403,8 @@ class GetStickersPlugin extends Plugin {
               await this.convertMp4ToGif(filePath, gifPath);
               fs.unlinkSync(filePath);
               finalFileName = gifFileName;
-            } catch (convertError) {
-              console.error(`转换mp4失败，保留原格式:`, convertError);
+            } catch (convertError: unknown) {
+              logger.error(`转换mp4失败，保留原格式:`, convertError);
             }
           }
           
@@ -371,16 +417,16 @@ class GetStickersPlugin extends Plugin {
             await msg.edit({ text: `正在下载 ${setShortName} 中的 ${setCount} 张贴纸...\n进度：${downloaded}/${total}` });
           }
           
-        } catch (error) {
-          console.error(`下载贴纸 ${index} 失败:`, error);
+        } catch (error: unknown) {
+          logger.error(`下载贴纸 ${index} 失败:`, error);
         }
       }
       
       // 打包上传
       await this.uploadStickerPack(client, msg, setInfo, packDir);
       
-    } catch (error: any) {
-      console.error('下载贴纸包失败:', error);
+    } catch (error: unknown) {
+      logger.error('下载贴纸包失败:', error);
 
       // Clean up temporary sticker directory on failure to avoid disk leaks
       if (packDir) {
@@ -388,15 +434,17 @@ class GetStickersPlugin extends Plugin {
           if (fs.existsSync(packDir)) {
             fs.rmSync(packDir, { recursive: true, force: true });
           }
-        } catch (cleanupErr) {
-          console.error('清理贴纸临时目录失败:', cleanupErr);
+        } catch (cleanupErr: unknown) {
+          logger.error('清理贴纸临时目录失败:', cleanupErr);
         }
       }
 
       let errorMessage = "❌ 下载贴纸包时出现错误";
-      
-      if (error.errorMessage) {
-        switch (error.errorMessage) {
+      const errObj = error as Record<string, unknown>;
+      const innerMsg = errObj.errorMessage as string | undefined;
+
+      if (innerMsg) {
+        switch (innerMsg) {
           case 'STICKERSET_INVALID':
             errorMessage = `❌ 贴纸包 "${stickerSetName}" 不存在或无效`;
             break;
@@ -407,7 +455,7 @@ class GetStickersPlugin extends Plugin {
             errorMessage = "❌ 无效的用户或群组ID";
             break;
           default:
-            errorMessage = `❌ 下载失败: ${error.errorMessage}`;
+            errorMessage = `❌ 下载失败: ${innerMsg}`;
         }
       }
       
@@ -440,13 +488,13 @@ class GetStickersPlugin extends Plugin {
         throw new Error('ZIP文件为空');
       }
       
-      console.log(`ZIP文件创建成功，大小: ${stats.size} 字节`);
+      logger.info(`ZIP文件创建成功，大小: ${stats.size} 字节`);
       
       // 检查文件权限和可读性
       try {
         fs.accessSync(zipPath, fs.constants.R_OK);
-        console.log('ZIP文件权限检查通过');
-      } catch (accessError) {
+        logger.info('ZIP文件权限检查通过');
+      } catch (accessError: unknown) {
         throw new Error(`ZIP文件无法读取: ${accessError}`);
       }
       
@@ -458,32 +506,32 @@ class GetStickersPlugin extends Plugin {
          }
          // 检查ZIP文件头（应该以PK开头）
          if (buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4B) {
-           console.log('ZIP文件完整性检查通过');
+           logger.info('ZIP文件完整性检查通过');
          } else {
            throw new Error('ZIP文件格式无效');
          }
-       } catch (readError) {
+       } catch (readError: unknown) {
           throw new Error(`ZIP文件读取测试失败: ${readError}`);
         }
         
         // 等待一小段时间确保文件完全写入磁盘
         await new Promise(resolve => setTimeout(resolve, 1000));
-        console.log('文件写入等待完成');
+        logger.info('文件写入等待完成');
         
         // 上传ZIP文件
-        console.log('开始上传ZIP文件...');
+        logger.info('开始上传ZIP文件...');
       const fileName = path.basename(zipPath);
       const fileBuffer = fs.readFileSync(zipPath);
-      const replyToMsgId = (msg as any).replyToMessage?.id;
+      const replyToMsgId = (msg as MessageLike).replyToMessage?.id;
       await client.sendMedia(msg.chat.id, {
         type: 'document',
         file: fileBuffer,
         fileName: fileName
-      } as any, {
+      } as { type: string; file: Buffer; fileName: string }, {
         caption: setShortName,
         replyTo: replyToMsgId
       });
-      console.log('ZIP文件发送成功');
+      logger.info('ZIP文件发送成功');
       
       // 清理临时文件
       if (fs.existsSync(zipPath)) {
@@ -496,29 +544,30 @@ class GetStickersPlugin extends Plugin {
       // 删除原消息
       await msg.delete();
       
-    } catch (error: any) {
-      console.error('上传贴纸包失败:', error);
+    } catch (error: unknown) {
+      logger.error('上传贴纸包失败:', error);
       
       // 清理临时文件
       try {
         if (zipPath && fs.existsSync(zipPath)) {
           fs.unlinkSync(zipPath);
-          console.log('已清理ZIP文件:', zipPath);
+          logger.info('已清理ZIP文件:', zipPath);
         }
         if (fs.existsSync(packDir)) {
           fs.rmSync(packDir, { recursive: true, force: true });
-          console.log('已清理贴纸目录:', packDir);
+          logger.info('已清理贴纸目录:', packDir);
         }
-      } catch (cleanupError) {
-        console.error('清理临时文件失败:', cleanupError);
+      } catch (cleanupError: unknown) {
+        logger.error('清理临时文件失败:', cleanupError);
       }
       
       let errorMessage = "❌ 上传贴纸包时出现错误";
-      if (error.message) {
-        if (error.message.includes('Could not create buffer')) {
+      const errMsg = getErrorMessage(error);
+      if (errMsg) {
+        if (errMsg.includes('Could not create buffer')) {
           errorMessage = "❌ 文件读取失败，可能是ZIP文件损坏";
         } else {
-          errorMessage = `❌ 上传失败: ${error.message}`;
+          errorMessage = `❌ 上传失败: ${errMsg}`;
         }
       }
       
@@ -534,17 +583,17 @@ class GetStickersPlugin extends Plugin {
     try {
       await execAsync('ffmpeg -version');
       result.ffmpeg = true;
-      console.log('FFmpeg 已安装');
-    } catch {
-      console.log('FFmpeg 未安装');
+      logger.info('FFmpeg 已安装');
+    } catch (e: unknown) {
+      logger.info('FFmpeg 未安装:', e);
     }
     
     try {
       await execAsync('pip show lottie');
       result.lottie = true;
-      console.log('lottie 已安装');
-    } catch {
-      console.log('lottie 未安装');
+      logger.info('lottie 已安装');
+    } catch (e: unknown) {
+      logger.info('lottie 未安装:', e);
     }
     
     return result;
@@ -613,24 +662,24 @@ export_gif(animation, gif_path, 512, 512, 30)
       
       // 监听错误事件
        output.on('error', (err: Error) => {
-         console.error('输出流错误:', err);
+         logger.error('输出流错误:', err);
          reject(err);
        });
        
        archive.on('error', (err: Error) => {
-         console.error('Archive错误:', err);
+         logger.error('Archive错误:', err);
          reject(err);
        });
       
       // 监听完成事件
       output.on('close', () => {
-        console.log(`ZIP文件创建完成，总大小: ${archive.pointer()} 字节`);
+        logger.info(`ZIP文件创建完成，总大小: ${archive.pointer()} 字节`);
         
         // 验证文件是否正确创建
         if (fs.existsSync(zipPath)) {
           const stats = fs.statSync(zipPath);
           if (stats.size > 0) {
-            console.log('ZIP文件验证成功');
+            logger.info('ZIP文件验证成功');
             resolve();
           } else {
             reject(new Error('ZIP文件为空'));

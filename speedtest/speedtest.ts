@@ -4,8 +4,6 @@
  */
 
 import { Plugin } from "@utils/pluginBase";
-import type { MessageContext } from "@mtcute/dispatcher";
-import { html } from "@mtcute/html-parser";
 import { getGlobalClient } from "@utils/globalClient";
 import {
   createDirectoryInAssets,
@@ -18,6 +16,10 @@ import { promisify } from "util";
 import axios from "axios";
 import sharp from "sharp";
 import { getPrefixes } from "@utils/pluginManager";
+import { logger } from "@utils/logger";
+import { getErrorMessage, getErrorCode } from "@utils/errorHelpers";
+import { htmlEscape } from "@utils/htmlEscape";
+import type { ClientInternals } from "@utils/clientInternals";
 
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
@@ -44,17 +46,6 @@ const help_txt = `<b>使用方法:</b>
 <b>系统speedtest支持:</b>
 在任何测试命令中添加 <code>--system</code> 或 <code>-s</code> 标志使用系统已安装的speedtest
 例: <code>${commandName} --system</code> 或 <code>${commandName} -s 12345</code>`;
-// HTML escape function
-function htmlEscape(text: unknown): string {
-  const textStr = typeof text === "string" ? text : String(text ?? "");
-  return textStr
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/\'/g, "&#x27;");
-}
-
 
 const execAsync = promisify(exec);
 const ASSETS_DIR = createDirectoryInAssets("speedtest");
@@ -75,6 +66,27 @@ const DEFAULT_ORDER: MessageType[] = ["photo", "sticker", "file", "txt"];
 interface SpeedtestConfig {
   default_server_id?: number | null;
   preferred_type?: MessageType;
+}
+
+/** Raw JSON output from speedtest CLI. */
+interface SpeedtestJsonResult {
+  error?: string;
+  upload?: { bandwidth?: number; bytes?: number; elapsed?: number };
+  download?: { bandwidth?: number; bytes?: number; elapsed?: number };
+  ping?: { latency?: number; jitter?: number };
+  server?: { id?: number; name?: string; location?: string };
+  isp?: string;
+  interface?: { externalIp?: string; name?: string };
+  timestamp?: string;
+  result?: { url?: string };
+}
+
+function parseSpeedtestJson(stdout: string): SpeedtestJsonResult {
+  const parsed: unknown = JSON.parse(stdout);
+  if (typeof parsed !== "object" || parsed === null) {
+    throw new Error("Invalid speedtest JSON: expected an object");
+  }
+  return parsed as SpeedtestJsonResult;
 }
 
 interface SpeedtestResult {
@@ -188,8 +200,8 @@ function readConfig(): SpeedtestConfig {
       const data = JSON.parse(fs.readFileSync(SPEEDTEST_JSON, "utf8"));
       return data as SpeedtestConfig;
     }
-  } catch (error: any) {
-    console.error("Failed to read config:", error);
+  } catch (error: unknown) {
+    logger.error("Failed to read config:", error);
   }
   return {};
 }
@@ -200,8 +212,8 @@ function writeConfig(patch: Partial<SpeedtestConfig>): void {
     const current = readConfig();
     const next = { ...current, ...patch };
     fs.writeFileSync(SPEEDTEST_JSON, JSON.stringify(next));
-  } catch (error: any) {
-    console.error("Failed to write config:", error);
+  } catch (error: unknown) {
+    logger.error("Failed to write config:", error);
   }
 }
 
@@ -220,8 +232,8 @@ function removeDefaultServer(): void {
     const cfg = readConfig();
     delete cfg.default_server_id;
     fs.writeFileSync(SPEEDTEST_JSON, JSON.stringify(cfg));
-  } catch (error: any) {
-    console.error("Failed to remove default server:", error);
+  } catch (error: unknown) {
+    logger.error("Failed to remove default server:", error);
   }
 }
 
@@ -246,13 +258,13 @@ async function downloadCli(): Promise<void> {
 
     // 检查是否已存在
     if (fs.existsSync(SPEEDTEST_PATH)) {
-      console.log(`Speedtest CLI already exists at: ${SPEEDTEST_PATH}`);
+      logger.info(`Speedtest CLI already exists at: ${SPEEDTEST_PATH}`);
       return;
     }
 
     const platform = process.platform;
     const arch = process.arch;
-    console.log(`Downloading speedtest CLI for platform: ${platform}, arch: ${arch}`);
+    logger.info(`Downloading speedtest CLI for platform: ${platform}, arch: ${arch}`);
 
     let filename: string;
 
@@ -274,12 +286,12 @@ async function downloadCli(): Promise<void> {
     }
 
     const url = `https://install.speedtest.net/app/cli/${filename}`;
-    console.log(`Downloading from: ${url}`);
+    logger.info(`Downloading from: ${url}`);
 
     const response = await axios.get(url, { responseType: "arraybuffer" });
     const tempFile = path.join(ASSETS_DIR, filename);
 
-    console.log(`Saving to temp file: ${tempFile}`);
+    logger.info(`Saving to temp file: ${tempFile}`);
     fs.writeFileSync(tempFile, response.data);
 
     // 验证文件是否下载成功
@@ -289,7 +301,7 @@ async function downloadCli(): Promise<void> {
 
     // 解压文件
     if (platform === "linux" || platform === "darwin") {
-      console.log(`Extracting tar.gz file: ${tempFile}`);
+      logger.info(`Extracting tar.gz file: ${tempFile}`);
       await execAsync(`tar -xzf "${tempFile}" -C "${ASSETS_DIR}"`);
 
       // 验证可执行文件是否存在
@@ -298,10 +310,10 @@ async function downloadCli(): Promise<void> {
       }
 
       await execAsync(`chmod +x "${SPEEDTEST_PATH}"`);
-      console.log(`Set executable permissions for: ${SPEEDTEST_PATH}`);
+      logger.info(`Set executable permissions for: ${SPEEDTEST_PATH}`);
     } else if (platform === "win32") {
       // Windows 需要解压 zip 文件
-      console.log(`Extracting zip file: ${tempFile}`);
+      logger.info(`Extracting zip file: ${tempFile}`);
       const AdmZip = require("adm-zip");
       const zip = new AdmZip(tempFile);
       zip.extractAllTo(ASSETS_DIR, true);
@@ -315,9 +327,9 @@ async function downloadCli(): Promise<void> {
     // 清理临时文件
     try {
       fs.unlinkSync(tempFile);
-      console.log(`Cleaned up temp file: ${tempFile}`);
-    } catch (cleanupError) {
-      console.warn(`Failed to cleanup temp file: ${tempFile}`, cleanupError);
+      logger.info(`Cleaned up temp file: ${tempFile}`);
+    } catch (cleanupError: unknown) {
+      logger.warn(`Failed to cleanup temp file: ${tempFile}`, cleanupError);
     }
 
     // 清理额外文件
@@ -327,24 +339,24 @@ async function downloadCli(): Promise<void> {
       if (fs.existsSync(filePath)) {
         try {
           fs.unlinkSync(filePath);
-          console.log(`Cleaned up extra file: ${filePath}`);
-        } catch (cleanupError) {
-          console.warn(`Failed to cleanup extra file: ${filePath}`, cleanupError);
+          logger.info(`Cleaned up extra file: ${filePath}`);
+        } catch (cleanupError: unknown) {
+          logger.warn(`Failed to cleanup extra file: ${filePath}`, cleanupError);
         }
       }
     }
 
-    console.log(`Speedtest CLI successfully installed at: ${SPEEDTEST_PATH}`);
-  } catch (error: any) {
-    console.error("Failed to download speedtest CLI:", error);
+    logger.info(`Speedtest CLI successfully installed at: ${SPEEDTEST_PATH}`);
+  } catch (error: unknown) {
+    logger.error("Failed to download speedtest CLI:", error);
 
     // 清理可能存在的损坏文件
     try {
       if (fs.existsSync(SPEEDTEST_PATH)) {
         fs.unlinkSync(SPEEDTEST_PATH);
       }
-    } catch (cleanupError) {
-      console.warn("Failed to cleanup damaged speedtest file:", cleanupError);
+    } catch (cleanupError: unknown) {
+      logger.warn("Failed to cleanup damaged speedtest file:", cleanupError);
     }
 
     throw error;
@@ -409,8 +421,8 @@ async function getIpApi(ip: string): Promise<{
     }
 
     return { asInfo, ccName, ccCode, ccFlag, ccLink };
-  } catch (error: any) {
-    console.error("Failed to get IP info:", error);
+  } catch (error: unknown) {
+    logger.error("Failed to get IP info:", error);
     return { asInfo: "", ccName: "", ccCode: "", ccFlag: "", ccLink: "" };
   }
 }
@@ -439,8 +451,8 @@ async function getInterfaceTraffic(interfaceName: string): Promise<{
       );
       return { rxBytes, txBytes, mtu };
     }
-  } catch (error: any) {
-    console.error("Failed to get interface traffic:", error);
+  } catch (error: unknown) {
+    logger.error("Failed to get interface traffic:", error);
   }
   return { rxBytes: 0, txBytes: 0, mtu: 0 };
 }
@@ -460,10 +472,10 @@ async function diagnoseSpeedtestExecutable(): Promise<{ canRun: boolean; error?:
       try {
         const stats = fs.statSync(SPEEDTEST_PATH);
         if (!(stats.mode & parseInt('111', 8))) {
-          console.log("Fixing executable permissions...");
+          logger.info("Fixing executable permissions...");
           await execAsync(`chmod +x "${SPEEDTEST_PATH}"`);
         }
-      } catch (permError) {
+      } catch (permError: unknown) {
         return { canRun: false, error: "权限检查失败", needsReinstall: true };
       }
     }
@@ -474,8 +486,8 @@ async function diagnoseSpeedtestExecutable(): Promise<{ canRun: boolean; error?:
       if (stdout && stdout.includes("Speedtest")) {
         return { canRun: true, needsReinstall: false };
       }
-    } catch (versionError) {
-      console.log("Version check failed:", versionError);
+    } catch (versionError: unknown) {
+      logger.info("Version check failed:", versionError);
     }
 
     // 尝试基本帮助命令
@@ -484,13 +496,13 @@ async function diagnoseSpeedtestExecutable(): Promise<{ canRun: boolean; error?:
       if (stdout && (stdout.includes("Speedtest") || stdout.includes("usage"))) {
         return { canRun: true, needsReinstall: false };
       }
-    } catch (helpError) {
-      console.log("Help check failed:", helpError);
+    } catch (helpError: unknown) {
+      logger.info("Help check failed:", helpError);
     }
 
     return { canRun: false, error: "可执行文件无法运行，可能是架构不匹配或文件损坏", needsReinstall: true };
-  } catch (error: any) {
-    return { canRun: false, error: error.message || "诊断失败", needsReinstall: true };
+  } catch (error: unknown) {
+    return { canRun: false, error: getErrorMessage(error) || "诊断失败", needsReinstall: true };
   }
 }
 
@@ -498,7 +510,7 @@ async function diagnoseSpeedtestExecutable(): Promise<{ canRun: boolean; error?:
  * 自动修复speedtest安装问题
  */
 async function autoFixSpeedtest(): Promise<void> {
-  console.log("Starting auto-fix for speedtest...");
+  logger.info("Starting auto-fix for speedtest...");
 
   // 清理可能损坏的文件
   const filesToClean = [
@@ -511,9 +523,9 @@ async function autoFixSpeedtest(): Promise<void> {
     if (fs.existsSync(file)) {
       try {
         fs.unlinkSync(file);
-        console.log(`Cleaned up file: ${file}`);
-      } catch (cleanupError) {
-        console.warn(`Failed to cleanup file: ${file}`, cleanupError);
+        logger.info(`Cleaned up file: ${file}`);
+      } catch (cleanupError: unknown) {
+        logger.warn(`Failed to cleanup file: ${file}`, cleanupError);
       }
     }
   }
@@ -526,13 +538,13 @@ async function autoFixSpeedtest(): Promise<void> {
     for (const tempFile of tempFiles) {
       try {
         fs.unlinkSync(path.join(ASSETS_DIR, tempFile));
-        console.log(`Cleaned up temp file: ${tempFile}`);
-      } catch (cleanupError) {
-        console.warn(`Failed to cleanup temp file: ${tempFile}`, cleanupError);
+        logger.info(`Cleaned up temp file: ${tempFile}`);
+      } catch (cleanupError: unknown) {
+        logger.warn(`Failed to cleanup temp file: ${tempFile}`, cleanupError);
       }
     }
-  } catch (readDirError) {
-    console.warn("Failed to read assets directory:", readDirError);
+  } catch (readDirError: unknown) {
+    logger.warn("Failed to read assets directory:", readDirError);
   }
 
   // 重新下载
@@ -544,7 +556,7 @@ async function autoFixSpeedtest(): Promise<void> {
     throw new Error(`自动修复失败: ${diagnosis.error}`);
   }
 
-  console.log("Auto-fix completed successfully");
+  logger.info("Auto-fix completed successfully");
 }
 
 /**
@@ -566,8 +578,9 @@ async function runSystemSpeedtest(serverId?: number, retryCount: number = 0): Pr
           exe = stdout.trim();
           break;
         }
-      } catch (e) {
-        // ignore
+      } catch (e: unknown) {
+        // ignore - binary not found, try next path
+        logger.debug('[speedtest] ping binary not found at this path:', e);
       }
     }
 
@@ -581,7 +594,7 @@ async function runSystemSpeedtest(serverId?: number, retryCount: number = 0): Pr
               exe = stdout.split(/\r?\n/)[0].trim();
               break;
             }
-          } catch { }
+          } catch (_e: unknown) { logger.debug('[speedtest] where command failed:', _e); }
         }
       }
     }
@@ -596,12 +609,12 @@ async function runSystemSpeedtest(serverId?: number, retryCount: number = 0): Pr
     const { stdout, stderr } = await execAsync(command, { timeout: 120000 });
 
     if (stderr && stderr.trim()) {
-      console.log('System speedtest stderr:', stderr);
+      logger.info('System speedtest stderr:', stderr);
     }
 
-    let result: any;
+    let result: SpeedtestJsonResult & { uploadFailed?: boolean };
     try {
-      result = JSON.parse(stdout);
+      result = parseSpeedtestJson(stdout) as SpeedtestJsonResult & { uploadFailed?: boolean };
 
       // 检查JSON中是否包含错误信息
       if (result.error) {
@@ -610,7 +623,7 @@ async function runSystemSpeedtest(serverId?: number, retryCount: number = 0): Pr
         }
         throw new Error(`测试失败: ${result.error}`);
       }
-    } catch (parseError) {
+    } catch (parseError: unknown) {
       if (stdout.includes('"error":"Cannot read')) {
         throw new Error('网络连接错误: Cannot read\n\n这是网络环境问题，不是程序问题。建议：\n1. 检查网络连接稳定性\n2. 尝试其他测试服务器\n3. 稍后重试');
       }
@@ -622,12 +635,13 @@ async function runSystemSpeedtest(serverId?: number, retryCount: number = 0): Pr
       result.uploadFailed = true;
     }
 
-    return result;
-  } catch (error: any) {
-    console.error('runSystemSpeedtest failed:', error);
+    return result as unknown as SpeedtestResult;
+  } catch (error: unknown) {
+    const errMsg = getErrorMessage(error);
+    logger.error('runSystemSpeedtest failed:', error);
     // 如果是可执行文件本身的问题，尝试回退到内置可执行文件一次
-    if (retryCount < MAX_RETRIES && (error.message?.includes('系统未安装') || error.message?.includes('Command failed'))) {
-      console.log('System speedtest failed, falling back to built-in speedtest...');
+    if (retryCount < MAX_RETRIES && (errMsg.includes('系统未安装') || errMsg.includes('Command failed'))) {
+      logger.info('System speedtest failed, falling back to built-in speedtest...');
       return await runSpeedtest(serverId, retryCount + 1, false);
     }
     throw error;
@@ -645,7 +659,7 @@ async function runSpeedtest(serverId?: number, retryCount: number = 0, useSystem
 
     // 检查并诊断内置可执行文件
     if (!fs.existsSync(SPEEDTEST_PATH)) {
-      console.log("Speedtest executable not found, downloading...");
+      logger.info("Speedtest executable not found, downloading...");
       await downloadCli();
     }
 
@@ -653,9 +667,9 @@ async function runSpeedtest(serverId?: number, retryCount: number = 0, useSystem
     if (retryCount === 0) {
       const diagnosis = await diagnoseSpeedtestExecutable();
       if (!diagnosis.canRun) {
-        console.log(`Speedtest executable issue detected: ${diagnosis.error}`);
+        logger.info(`Speedtest executable issue detected: ${diagnosis.error}`);
         if (diagnosis.needsReinstall) {
-          console.log("Attempting auto-fix...");
+          logger.info("Attempting auto-fix...");
           await autoFixSpeedtest();
         }
       }
@@ -669,11 +683,11 @@ async function runSpeedtest(serverId?: number, retryCount: number = 0, useSystem
     });
 
     if (stderr) {
-      console.log("Speedtest stderr:", stderr);
+      logger.info("Speedtest stderr:", stderr);
       if (stderr.includes("NoServersException")) {
         // 如果指定服务器不可用，尝试自动选择
         if (serverId) {
-          console.log(`Server ${serverId} not available, trying auto selection...`);
+          logger.info(`Server ${serverId} not available, trying auto selection...`);
           return await runSpeedtest(undefined, retryCount, useSystem); // 递归调用，不指定服务器ID，保持重试计数
         }
         throw new Error("指定的服务器不可用，请尝试其他服务器或使用自动选择");
@@ -687,9 +701,9 @@ async function runSpeedtest(serverId?: number, retryCount: number = 0, useSystem
     }
 
     // 尝试解析JSON结果，处理可能的部分失败情况
-    let result: any;
+    let result: SpeedtestJsonResult & { uploadFailed?: boolean };
     try {
-      result = JSON.parse(stdout);
+      result = parseSpeedtestJson(stdout) as SpeedtestJsonResult & { uploadFailed?: boolean };
 
       // 检查JSON中是否包含错误信息
       if (result.error) {
@@ -698,8 +712,8 @@ async function runSpeedtest(serverId?: number, retryCount: number = 0, useSystem
         }
         throw new Error(`测试失败: ${result.error}`);
       }
-    } catch (parseError) {
-      console.log("JSON parse failed, checking for partial results...");
+    } catch (parseError: unknown) {
+      logger.info("JSON parse failed, checking for partial results...");
 
       // 如果JSON解析失败，检查是否有部分文本结果
       if (stdout.includes("Download:") && stdout.includes("Upload: FAILED")) {
@@ -716,7 +730,7 @@ async function runSpeedtest(serverId?: number, retryCount: number = 0, useSystem
 
     // 处理上传测试失败的情况
     if (!result.upload || result.upload.bandwidth === undefined) {
-      console.log("Upload test failed, but download succeeded");
+      logger.info("Upload test failed, but download succeeded");
       // 创建一个包含部分结果的对象
       result.upload = {
         bandwidth: 0,
@@ -726,42 +740,44 @@ async function runSpeedtest(serverId?: number, retryCount: number = 0, useSystem
       result.uploadFailed = true; // 标记上传失败
     }
 
-    return result;
-  } catch (error: any) {
-    console.error("Speedtest failed:", error);
+    return result as unknown as SpeedtestResult;
+  } catch (error: unknown) {
+    logger.error("Speedtest failed:", error);
+    const errMsg = getErrorMessage(error);
+    const errCode = getErrorCode(error);
 
     // 检查是否是真正的可执行文件问题（排除网络问题）
-    const isNetworkError = error.message?.includes('Cannot read') ||
-      error.message?.includes('Upload: FAILED') ||
-      error.message?.includes('网络连接错误') ||
-      error.message?.includes('网络环境问题');
+    const isNetworkError = errMsg.includes('Cannot read') ||
+      errMsg.includes('Upload: FAILED') ||
+      errMsg.includes('网络连接错误') ||
+      errMsg.includes('网络环境问题');
 
-    const isExecutableIssue = error.message?.includes('Command failed') &&
-      error.message?.includes(SPEEDTEST_PATH) &&
+    const isExecutableIssue = errMsg.includes('Command failed') &&
+      errMsg.includes(SPEEDTEST_PATH) &&
       !isNetworkError &&
       retryCount < MAX_RETRIES;
 
     if (isExecutableIssue) {
-      console.log(`Detected executable issue, attempting auto-fix... (retry ${retryCount + 1}/${MAX_RETRIES})`);
+      logger.info(`Detected executable issue, attempting auto-fix... (retry ${retryCount + 1}/${MAX_RETRIES})`);
       try {
         await autoFixSpeedtest();
         // 重试一次，增加重试计数
         return await runSpeedtest(serverId, retryCount + 1, useSystem);
-      } catch (fixError: any) {
-        throw new Error(`speedtest可执行文件问题，自动修复失败: ${fixError.message || String(fixError)}\n\n请尝试手动执行 'speedtest update' 命令`);
+      } catch (fixError: unknown) {
+        throw new Error(`speedtest可执行文件问题，自动修复失败: ${getErrorMessage(fixError)}\n\n请尝试手动执行 'speedtest update' 命令`);
       }
     }
 
     // 如果已达到最大重试次数，不再尝试修复
-    if (retryCount >= MAX_RETRIES && error.message?.includes('Command failed')) {
-      throw new Error(`speedtest执行失败，已达到最大重试次数 (${MAX_RETRIES})。\n\n错误信息: ${error.message}\n\n建议:\n1. 检查网络连接\n2. 手动执行 'speedtest update' 重新安装\n3. 检查系统权限和防火墙设置`);
+    if (retryCount >= MAX_RETRIES && errMsg.includes('Command failed')) {
+      throw new Error(`speedtest执行失败，已达到最大重试次数 (${MAX_RETRIES})。\n\n错误信息: ${errMsg}\n\n建议:\n1. 检查网络连接\n2. 手动执行 'speedtest update' 重新安装\n3. 检查系统权限和防火墙设置`);
     }
 
     // 如果是指定服务器失败，尝试自动选择
-    if (serverId && (error.message?.includes('NoServersException') ||
-      error.message?.includes('Server not found') ||
-      error.message?.includes('不可用'))) {
-      console.log(`Server ${serverId} failed, trying auto selection...`);
+    if (serverId && (errMsg.includes('NoServersException') ||
+      errMsg.includes('Server not found') ||
+      errMsg.includes('不可用'))) {
+      logger.info(`Server ${serverId} failed, trying auto selection...`);
       try {
         return await runSpeedtest(undefined, retryCount, useSystem); // 递归调用，不指定服务器ID，保持重试计数
       } catch (fallbackError) {
@@ -771,12 +787,12 @@ async function runSpeedtest(serverId?: number, retryCount: number = 0, useSystem
     }
 
     // 处理超时错误
-    if (error.code === 'ETIMEDOUT' || error.message?.includes('timeout')) {
+    if (errCode === 'ETIMEDOUT' || errMsg.includes('timeout')) {
       throw new Error("测试超时，可能网络较慢或服务器繁忙，建议：\n1. 检查网络连接\n2. 尝试其他测试服务器\n3. 稍后重试");
     }
 
     // 处理命令执行错误
-    if (error.code === 'ENOENT') {
+    if (errCode === 'ENOENT') {
       throw new Error("speedtest 程序未找到，请使用 'speedtest update' 重新下载");
     }
 
@@ -800,8 +816,8 @@ async function getAllServers(): Promise<ServerInfo[]> {
     const result = JSON.parse(stdout);
 
     return result.servers || [];
-  } catch (error: any) {
-    console.error("Failed to get servers:", error);
+  } catch (error: unknown) {
+    logger.error("Failed to get servers:", error);
     return [];
   }
 }
@@ -843,24 +859,26 @@ async function quickPingTest(serverId: number): Promise<{ available: boolean; pi
         if (result.server && result.server.id === serverId) {
           return { available: true };
         }
-      } catch (parseError) {
+      } catch (parseError: unknown) {
         // JSON解析失败，但有输出说明服务器响应了
         return { available: true };
       }
     }
 
     return { available: true };
-  } catch (error: any) {
-    console.error(`Server ${serverId} ping test failed:`, error);
+  } catch (error: unknown) {
+    logger.error(`Server ${serverId} ping test failed:`, error);
+    const errMsg = getErrorMessage(error);
+    const errCode = getErrorCode(error);
 
-    if (error.code === 'ETIMEDOUT') {
+    if (errCode === 'ETIMEDOUT') {
       return { available: false, error: "连接超时" };
     }
-    if (error.message?.includes('NoServersException')) {
+    if (errMsg.includes('NoServersException')) {
       return { available: false, error: "服务器不可用" };
     }
 
-    return { available: false, error: error.message || "未知错误" };
+    return { available: false, error: errMsg || "未知错误" };
   }
 }
 
@@ -879,9 +897,9 @@ async function testServerAvailability(serverId: number): Promise<{ available: bo
 
     // 服务器在列表中就认为可用
     return { available: true };
-  } catch (error: any) {
-    console.error(`Server ${serverId} availability test failed:`, error);
-    return { available: false, error: error.message || "测试失败" };
+  } catch (error: unknown) {
+    logger.error(`Server ${serverId} availability test failed:`, error);
+    return { available: false, error: getErrorMessage(error) || "测试失败" };
   }
 }
 
@@ -898,7 +916,7 @@ async function quickPingServers(servers: ServerInfo[], maxServers: number = 5): 
         ping: result.ping,
         error: result.error
       } as ServerInfo;
-    } catch (error) {
+    } catch (error: unknown) {
       return {
         ...server,
         available: false,
@@ -912,8 +930,8 @@ async function quickPingServers(servers: ServerInfo[], maxServers: number = 5): 
     return results
       .filter(server => server.available === true)
       .sort((a, b) => (a.ping || 999) - (b.ping || 999));
-  } catch (error) {
-    console.error('Quick ping test failed:', error);
+  } catch (error: unknown) {
+    logger.error('Quick ping test failed:', error);
     return [];
   }
 }
@@ -931,8 +949,8 @@ async function selectBestServer(): Promise<number | null> {
     // 直接返回第一个服务器，因为服务器列表通常按距离排序
     // 这避免了复杂的ping测试，提高成功率
     return allServers[0].id;
-  } catch (error) {
-    console.error('Failed to select best server:', error);
+  } catch (error: unknown) {
+    logger.error('Failed to select best server:', error);
     return null;
   }
 }
@@ -953,16 +971,16 @@ async function selectBestServerWithFallback(): Promise<number | null> {
       try {
         // 简单验证：检查服务器是否在列表中即认为可用
         return serverId;
-      } catch (error) {
-        console.log(`Server ${serverId} test failed, trying next...`);
+      } catch (error: unknown) {
+        logger.info(`Server ${serverId} test failed, trying next...`);
         continue;
       }
     }
 
     // 如果前3个都有问题，返回第一个作为fallback
     return allServers[0].id;
-  } catch (error) {
-    console.error('Failed to select best server with fallback:', error);
+  } catch (error: unknown) {
+    logger.error('Failed to select best server with fallback:', error);
     return null;
   }
 }
@@ -972,15 +990,17 @@ async function checkNetworkConnectivity(): Promise<{ connected: boolean; message
     // 测试基本网络连接
     await axios.get('https://www.speedtest.net', { timeout: 10000 });
     return { connected: true, message: "网络连接正常" };
-  } catch (error: any) {
-    if (error.code === 'ENOTFOUND') {
+  } catch (error: unknown) {
+    const errCode = getErrorCode(error);
+    const errMsg = getErrorMessage(error);
+    if (errCode === 'ENOTFOUND') {
       return { connected: false, message: "DNS解析失败，请检查DNS设置" };
-    } else if (error.code === 'ECONNREFUSED') {
+    } else if (errCode === 'ECONNREFUSED') {
       return { connected: false, message: "连接被拒绝，可能存在防火墙阻止" };
-    } else if (error.code === 'ETIMEDOUT') {
+    } else if (errCode === 'ETIMEDOUT') {
       return { connected: false, message: "连接超时，网络可能较慢或不稳定" };
     } else {
-      return { connected: false, message: `网络连接异常: ${error.message}` };
+      return { connected: false, message: `网络连接异常: ${errMsg}` };
     }
   }
 }
@@ -998,13 +1018,13 @@ async function saveSpeedtestImage(url: string): Promise<string | null> {
     try {
       await fillRoundedCorners(imagePath, filledImagePath, bgColor, borderPx);
       return filledImagePath;
-    } catch (err) {
-      console.error("Failed to fill rounded corners:", err);
+    } catch (err: unknown) {
+      logger.error("Failed to fill rounded corners:", err);
     }
 
     return imagePath;
-  } catch (error: any) {
-    console.error("Failed to save speedtest image:", error);
+  } catch (error: unknown) {
+    logger.error("Failed to save speedtest image:", error);
     return null;
   }
 }
@@ -1043,31 +1063,32 @@ async function convertImageToStickerWebp(
           .webp({ quality: 65, effort: 6 })
           .toFile(stickerPath);
       }
-    } catch { }
-
+    } catch (_e: unknown) { logger.debug('[speedtest] sharp output buffer unavailable, skip:', _e); }
     return stickerPath;
-  } catch (e) {
-    console.error("Failed to convert image to sticker:", e);
+  } catch (e: unknown) {
+    logger.error("Failed to convert image to sticker:", e);
     return null;
   }
 }
 
-const speedtest = async (msg: MessageContext) => {
-  const rawArgs = (msg.text || "").slice(1).split(" ").slice(1);
+const speedtest = async (msg: any) => {
+  const rawArgs = (msg.text ?? '').slice(1).split(" ").slice(1);
   // 支持位置参数和旗标（如 --system 或 -s）
-  const flags = rawArgs.filter(a => a.startsWith('--') || a.startsWith('-'));
-  const args = rawArgs.filter(a => !a.startsWith('--') && !a.startsWith('-'));
+  const flags = rawArgs.filter((a: string) => a.startsWith('--') || a.startsWith('-'));
+  const args = rawArgs.filter((a: string) => !a.startsWith('--') && !a.startsWith('-'));
   const command = args[0] || "";
   const useSystem = flags.includes('--system') || flags.includes('-s');
 
   try {
     if (command === "list") {
-      await msg.edit({ text: html("🔍 正在获取服务器列表...") });
+      await msg.edit({ text: "🔍 正在获取服务器列表..." });
 
       const servers = await getAllServers();
       if (servers.length === 0) {
         await msg.edit({
-          text: html("❌ <b>错误</b>\n\n无可用服务器")});
+          text: "❌ <b>错误</b>\n\n无可用服务器",
+
+        });
         return;
       }
 
@@ -1082,65 +1103,89 @@ const speedtest = async (msg: MessageContext) => {
         .join("\n");
 
       await msg.edit({
-        text: html(`<blockquote><b>⚡️SPEEDTEST by OOKLA</b></blockquote><br>${serverList}`)});
+        text: `<blockquote><b>⚡️SPEEDTEST by OOKLA</b></blockquote>\n${serverList}`,
+
+      });
     } else if (command === "set") {
       const serverId = parseInt(args[1]);
       if (!serverId || isNaN(serverId)) {
         await msg.edit({
-          text: html("❌ <b>参数错误</b>\n\n请指定有效的服务器ID\n例: <code>s set 12345</code>")});
+          text: "❌ <b>参数错误</b>\n\n请指定有效的服务器ID\n例: <code>s set 12345</code>",
+
+        });
         return;
       }
 
       saveDefaultServer(serverId);
       await msg.edit({
-        text: html(`<blockquote><b>⚡️SPEEDTEST by OOKLA</b></blockquote><br><code>默认服务器已设置为 ${serverId}</code>`)});
+        text: `<blockquote><b>⚡️SPEEDTEST by OOKLA</b></blockquote>\n<code>默认服务器已设置为 ${serverId}</code>`,
+
+      });
     } else if (command === "clear") {
       removeDefaultServer();
       await msg.edit({
-        text: html("<blockquote><b>⚡️SPEEDTEST by OOKLA</b></blockquote>\n<code>默认服务器已清除</code>")});
+        text: "<blockquote><b>⚡️SPEEDTEST by OOKLA</b></blockquote>\n<code>默认服务器已清除</code>",
+
+      });
     } else if (command === "config") {
       const defaultServer = getDefaultServer() || "Auto";
       const typePref = getPreferredType() || "默认(photo→sticker→file→txt)";
       await msg.edit({
-        text: html(`<blockquote><b>⚡️SPEEDTEST by OOKLA</b></blockquote><br><code>默认服务器: ${htmlEscape(String(defaultServer))}</code><br><code>优先类型: ${htmlEscape(typePref)}</code><br><code>Speedtest® CLI: ${SPEEDTEST_VERSION}</code>`)});
+        text: `<blockquote><b>⚡️SPEEDTEST by OOKLA</b></blockquote>\n<code>默认服务器: ${htmlEscape(String(defaultServer))}</code>\n<code>优先类型: ${htmlEscape(typePref)}</code>\n<code>Speedtest® CLI: ${SPEEDTEST_VERSION}</code>`,
+
+      });
     } else if (command === "type") {
       const t = (args[1] || "").toLowerCase();
       const valid: MessageType[] = ["photo", "sticker", "file", "txt"];
       if (!valid.includes(t as MessageType)) {
         await msg.edit({
-          text: html(`❌ <b>参数错误</b><br><br><code>${commandName} type photo/sticker/file/txt</code> - 设置优先使用的消息类型`)});
+          text: `❌ <b>参数错误</b>\n\n<code>${commandName} type photo/sticker/file/txt</code> - 设置优先使用的消息类型`,
+
+        });
         return;
       }
       savePreferredType(t as MessageType);
       const order = getMessageOrder();
       await msg.edit({
-        text: html(`<blockquote><b>⚡️SPEEDTEST by OOKLA</b></blockquote><br><code>优先类型已设置为: ${t}</code><br><code>当前顺序: ${order.join(
+        text: `<blockquote><b>⚡️SPEEDTEST by OOKLA</b></blockquote>\n<code>优先类型已设置为: ${t}</code>\n<code>当前顺序: ${order.join(
           " → "
-        )}</code>`)});
+        )}</code>`,
+
+      });
     } else if (command === "check") {
       await msg.edit({
-        text: html("🔍 正在检查网络连接...")});
+        text: "🔍 正在检查网络连接...",
+
+      });
 
       try {
         const networkStatus = await checkNetworkConnectivity();
         const statusIcon = networkStatus.connected ? "✅" : "❌";
 
         await msg.edit({
-          text: html(`<blockquote><b>⚡️SPEEDTEST by OOKLA</b></blockquote><br>${statusIcon} <b>网络状态:</b> <code>${htmlEscape(networkStatus.message)}</code><br><br><b>建议:</b><br>• 如果连接异常，请检查网络设置<br>• 尝试更换网络环境或DNS服务器<br>• 确认防火墙允许网络测试`)});
-      } catch (error) {
+          text: `<blockquote><b>⚡️SPEEDTEST by OOKLA</b></blockquote>\n${statusIcon} <b>网络状态:</b> <code>${htmlEscape(networkStatus.message)}</code>\n\n<b>建议:</b>\n• 如果连接异常，请检查网络设置\n• 尝试更换网络环境或DNS服务器\n• 确认防火墙允许网络测试`,
+
+        });
+      } catch (error: unknown) {
         await msg.edit({
-          text: html(`<blockquote><b>⚡️SPEEDTEST by OOKLA</b></blockquote><br>❌ <code>网络检查失败: ${htmlEscape(String(error))}</code>`)});
+          text: `<blockquote><b>⚡️SPEEDTEST by OOKLA</b></blockquote>\n❌ <code>网络检查失败: ${htmlEscape(String(error))}</code>`,
+
+        });
       }
     } else if (command === "test") {
       const serverId = parseInt(args[1]);
       if (!serverId || isNaN(serverId)) {
         await msg.edit({
-          text: html("❌ <b>参数错误</b>\n\n请指定有效的服务器ID\n例: <code>speedtest test 12345</code>")});
+          text: "❌ <b>参数错误</b>\n\n请指定有效的服务器ID\n例: <code>speedtest test 12345</code>",
+
+        });
         return;
       }
 
       await msg.edit({
-        text: html(`🔍 正在测试服务器 ${serverId} 的可用性...`)});
+        text: `🔍 正在测试服务器 ${serverId} 的可用性...`,
+
+      });
 
       try {
         const result = await testServerAvailability(serverId);
@@ -1150,14 +1195,20 @@ const speedtest = async (msg: MessageContext) => {
         const errorText = result.error ? `\n<b>错误:</b> <code>${htmlEscape(result.error)}</code>` : "";
 
         await msg.edit({
-          text: html(`<blockquote><b>⚡️SPEEDTEST by OOKLA</b></blockquote><br>${statusIcon} <b>服务器 ${htmlEscape(String(serverId))}:</b> <code>${htmlEscape(statusText)}</code>${pingText}${errorText}`)});
-      } catch (error) {
+          text: `<blockquote><b>⚡️SPEEDTEST by OOKLA</b></blockquote>\n${statusIcon} <b>服务器 ${htmlEscape(String(serverId))}:</b> <code>${htmlEscape(statusText)}</code>${pingText}${errorText}`,
+
+        });
+      } catch (error: unknown) {
         await msg.edit({
-          text: html(`<blockquote><b>⚡️SPEEDTEST by OOKLA</b></blockquote><br>❌ <code>测试失败: ${htmlEscape(String(error))}</code>`)});
+          text: `<blockquote><b>⚡️SPEEDTEST by OOKLA</b></blockquote>\n❌ <code>测试失败: ${htmlEscape(String(error))}</code>`,
+
+        });
       }
     } else if (command === "best") {
       await msg.edit({
-        text: html("🎯 正在查找推荐服务器...")});
+        text: "🎯 正在查找推荐服务器...",
+
+      });
 
       try {
         const servers = await getAllServers();
@@ -1171,18 +1222,26 @@ const speedtest = async (msg: MessageContext) => {
             .join('\n');
 
           await msg.edit({
-            text: html(`<blockquote><b>⚡️SPEEDTEST by OOKLA</b></blockquote><br>🎯 <b>推荐服务器 (按距离排序):</b><br><br>${serverList}<br><br>💡 使用 <code>${commandName} set [ID]</code> 设为默认服务器<br>💡 使用 <code>${commandName} [ID]</code> 直接测试`)});
+            text: `<blockquote><b>⚡️SPEEDTEST by OOKLA</b></blockquote>\n🎯 <b>推荐服务器 (按距离排序):</b>\n\n${serverList}\n\n💡 使用 <code>${commandName} set [ID]</code> 设为默认服务器\n💡 使用 <code>${commandName} [ID]</code> 直接测试`,
+  
+          });
         } else {
           await msg.edit({
-            text: html("<blockquote><b>⚡️SPEEDTEST by OOKLA</b></blockquote>\n❌ <code>无法获取服务器列表</code>\n\n💡 <b>建议:</b>\n• 检查网络连接\n• 稍后重试")});
+            text: "<blockquote><b>⚡️SPEEDTEST by OOKLA</b></blockquote>\n❌ <code>无法获取服务器列表</code>\n\n💡 <b>建议:</b>\n• 检查网络连接\n• 稍后重试",
+  
+          });
         }
-      } catch (error) {
+      } catch (error: unknown) {
         await msg.edit({
-          text: html(`<blockquote><b>⚡️SPEEDTEST by OOKLA</b></blockquote><br>❌ <code>获取服务器列表失败: ${htmlEscape(String(error))}</code>`)});
+          text: `<blockquote><b>⚡️SPEEDTEST by OOKLA</b></blockquote>\n❌ <code>获取服务器列表失败: ${htmlEscape(String(error))}</code>`,
+
+        });
       }
     } else if (command === "diagnose") {
       await msg.edit({
-        text: html("🔍 正在诊断speedtest可执行文件...")});
+        text: "🔍 正在诊断speedtest可执行文件...",
+
+      });
 
       try {
         const diagnosis = await diagnoseSpeedtestExecutable();
@@ -1192,26 +1251,38 @@ const speedtest = async (msg: MessageContext) => {
         const fixText = diagnosis.needsReinstall ? `\n\n💡 <b>建议:</b> 使用 <code>${commandName} fix</code> 自动修复` : "";
 
         await msg.edit({
-          text: html(`<blockquote><b>⚡️SPEEDTEST by OOKLA</b></blockquote><br>${statusIcon} <b>可执行文件状态:</b> <code>${statusText}</code>${errorText}<br><b>平台:</b> <code>${process.platform}</code><br><b>架构:</b> <code>${process.arch}</code><br><b>路径:</b> <code>${SPEEDTEST_PATH}</code><br><b>存在:</b> <code>${fs.existsSync(SPEEDTEST_PATH) ? '是' : '否'}</code>${fixText}`)});
-      } catch (error) {
+          text: `<blockquote><b>⚡️SPEEDTEST by OOKLA</b></blockquote>\n${statusIcon} <b>可执行文件状态:</b> <code>${statusText}</code>${errorText}\n<b>平台:</b> <code>${process.platform}</code>\n<b>架构:</b> <code>${process.arch}</code>\n<b>路径:</b> <code>${SPEEDTEST_PATH}</code>\n<b>存在:</b> <code>${fs.existsSync(SPEEDTEST_PATH) ? '是' : '否'}</code>${fixText}`,
+
+        });
+      } catch (error: unknown) {
         await msg.edit({
-          text: html(`<blockquote><b>⚡️SPEEDTEST by OOKLA</b></blockquote><br>❌ <code>诊断失败: ${htmlEscape(String(error))}</code>`)});
+          text: `<blockquote><b>⚡️SPEEDTEST by OOKLA</b></blockquote>\n❌ <code>诊断失败: ${htmlEscape(String(error))}</code>`,
+
+        });
       }
     } else if (command === "fix") {
       await msg.edit({
-        text: html("🔧 正在自动修复speedtest安装问题...")});
+        text: "🔧 正在自动修复speedtest安装问题...",
+
+      });
 
       try {
         await autoFixSpeedtest();
         await msg.edit({
-          text: html(`<blockquote><b>⚡️SPEEDTEST by OOKLA</b></blockquote><br>✅ <code>自动修复完成</code><br><b>平台:</b> <code>${process.platform}</code><br><b>路径:</b> <code>${SPEEDTEST_PATH}</code><br><br>💡 现在可以正常使用speedtest功能了`)});
-      } catch (error) {
+          text: `<blockquote><b>⚡️SPEEDTEST by OOKLA</b></blockquote>\n✅ <code>自动修复完成</code>\n<b>平台:</b> <code>${process.platform}</code>\n<b>路径:</b> <code>${SPEEDTEST_PATH}</code>\n\n💡 现在可以正常使用speedtest功能了`,
+
+        });
+      } catch (error: unknown) {
         await msg.edit({
-          text: html(`<blockquote><b>⚡️SPEEDTEST by OOKLA</b></blockquote><br>❌ <code>自动修复失败: ${htmlEscape(String(error))}</code><br><br>💡 <b>建议:</b><br>• 检查网络连接<br>• 确认有足够的磁盘空间<br>• 检查文件权限<br>• 尝试手动执行 <code>${commandName} update</code>`)});
+          text: `<blockquote><b>⚡️SPEEDTEST by OOKLA</b></blockquote>\n❌ <code>自动修复失败: ${htmlEscape(String(error))}</code>\n\n💡 <b>建议:</b>\n• 检查网络连接\n• 确认有足够的磁盘空间\n• 检查文件权限\n• 尝试手动执行 <code>${commandName} update</code>`,
+
+        });
       }
     } else if (command === "update") {
       await msg.edit({
-        text: html("🔄 正在更新 Speedtest CLI...")});
+        text: "🔄 正在更新 Speedtest CLI...",
+
+      });
 
       try {
         // 删除现有文件和可能的损坏文件强制重新下载
@@ -1225,9 +1296,9 @@ const speedtest = async (msg: MessageContext) => {
           if (fs.existsSync(file)) {
             try {
               fs.unlinkSync(file);
-              console.log(`Cleaned up existing file: ${file}`);
-            } catch (cleanupError) {
-              console.warn(`Failed to cleanup file: ${file}`, cleanupError);
+              logger.info(`Cleaned up existing file: ${file}`);
+            } catch (cleanupError: unknown) {
+              logger.warn(`Failed to cleanup file: ${file}`, cleanupError);
             }
           }
         }
@@ -1239,9 +1310,9 @@ const speedtest = async (msg: MessageContext) => {
         for (const tempFile of tempFiles) {
           try {
             fs.unlinkSync(path.join(ASSETS_DIR, tempFile));
-            console.log(`Cleaned up temp file: ${tempFile}`);
-          } catch (cleanupError) {
-            console.warn(`Failed to cleanup temp file: ${tempFile}`, cleanupError);
+            logger.info(`Cleaned up temp file: ${tempFile}`);
+          } catch (cleanupError: unknown) {
+            logger.warn(`Failed to cleanup temp file: ${tempFile}`, cleanupError);
           }
         }
 
@@ -1250,29 +1321,35 @@ const speedtest = async (msg: MessageContext) => {
         // 验证安装是否成功
         if (fs.existsSync(SPEEDTEST_PATH)) {
           await msg.edit({
-            text: html(`<blockquote><b>⚡️SPEEDTEST by OOKLA</b></blockquote><br><code>Speedtest® CLI 已更新到最新版本</code><br><code>平台: ${process.platform}</code><br><code>路径: ${SPEEDTEST_PATH}</code>`)});
+            text: `<blockquote><b>⚡️SPEEDTEST by OOKLA</b></blockquote>\n<code>Speedtest® CLI 已更新到最新版本</code>\n<code>平台: ${process.platform}</code>\n<code>路径: ${SPEEDTEST_PATH}</code>`,
+  
+          });
         } else {
           throw new Error(`安装验证失败，可执行文件不存在: ${SPEEDTEST_PATH}`);
         }
-      } catch (error) {
-        console.error("Update failed:", error);
+      } catch (error: unknown) {
+        logger.error("Update failed:", error);
         await msg.edit({
-          text: html(`<blockquote><b>⚡️SPEEDTEST by OOKLA</b></blockquote><br>❌ <code>更新失败: ${htmlEscape(
+          text: `<blockquote><b>⚡️SPEEDTEST by OOKLA</b></blockquote>\n❌ <code>更新失败: ${htmlEscape(
             String(error)
-          )}</code>\n\n💡 <b>建议:</b>\n• 检查网络连接\n• 确认有足够的磁盘空间\n• 检查文件权限`)});
+          )}</code>\n\n💡 <b>建议:</b>\n• 检查网络连接\n• 确认有足够的磁盘空间\n• 检查文件权限`,
+
+        });
       }
     } else if (command === "" || !isNaN(parseInt(command))) {
-      await msg.edit({ text: html("🔍 正在检查网络连接...") });
+      await msg.edit({ text: "🔍 正在检查网络连接..." });
 
       // 先进行网络诊断
       const networkStatus = await checkNetworkConnectivity();
       if (!networkStatus.connected) {
         await msg.edit({
-          text: html(`❌ <b>网络连接异常，无法进行速度测试</b><br><br><b>检测结果:</b> <code>${networkStatus.message}</code><br><br>💡 <b>建议:</b><br>• 检查网络连接是否正常<br>• 尝试更换网络环境或DNS服务器<br>• 确认防火墙允许网络测试<br>• 使用 <code>${commandName} check</code> 重新检查连接`)});
+          text: `❌ <b>网络连接异常，无法进行速度测试</b>\n\n<b>检测结果:</b> <code>${networkStatus.message}</code>\n\n💡 <b>建议:</b>\n• 检查网络连接是否正常\n• 尝试更换网络环境或DNS服务器\n• 确认防火墙允许网络测试\n• 使用 <code>${commandName} check</code> 重新检查连接`,
+
+        });
         return;
       }
 
-      await msg.edit({ text: html("⚡️ 网络连接正常，正在进行速度测试...") });
+      await msg.edit({ text: "⚡️ 网络连接正常，正在进行速度测试..." });
 
       const serverId =
         command && !isNaN(parseInt(command))
@@ -1289,10 +1366,10 @@ const speedtest = async (msg: MessageContext) => {
         );
 
         // 处理上传失败的情况
-        const uploadRate = (result as any).uploadFailed
+        const uploadRate = (result as { uploadFailed?: boolean }).uploadFailed
           ? "FAILED"
           : await unitConvert(result.upload.bandwidth);
-        const uploadData = (result as any).uploadFailed
+        const uploadData = (result as { uploadFailed?: boolean }).uploadFailed
           ? "FAILED"
           : await unitConvert(result.upload.bytes, true);
 
@@ -1325,7 +1402,7 @@ const speedtest = async (msg: MessageContext) => {
         ];
 
         // 如果上传失败，添加说明
-        if ((result as any).uploadFailed) {
+        if ((result as { uploadFailed?: boolean }).uploadFailed) {
           description.push(`<code>Note</code>  <code>${htmlEscape("上传测试失败，可能是网络环境限制")}</code>`);
         }
 
@@ -1336,7 +1413,7 @@ const speedtest = async (msg: MessageContext) => {
         const trySend = async (type: MessageType): Promise<boolean> => {
           try {
             if (type === "txt") {
-              await msg.edit({ text: html(finalDescription) });
+              await msg.edit({ text: finalDescription });
               return true;
             }
 
@@ -1346,59 +1423,62 @@ const speedtest = async (msg: MessageContext) => {
             if (!imagePath || !fs.existsSync(imagePath)) return false;
 
             if (type === "photo") {
-              const _client = await getGlobalClient();
-              await _client.sendMedia(msg.chat.id, {
-                type: "photo",
+              const client = await getGlobalClient();
+              await (client as unknown as ClientInternals).sendFile(msg.chat.id, {
                 file: imagePath,
-                caption: html(finalDescription),
+                caption: finalDescription,
               });
               try {
                 await msg.delete();
-              } catch { }
+              } catch (_e: unknown) { logger.debug('[speedtest] msg.delete failed (may already be deleted):', _e); }
               try {
                 fs.unlinkSync(imagePath);
-              } catch { }
+              } catch (_e: unknown) { logger.debug('[speedtest] unlinkSync imagePath failed:', _e); }
               return true;
             } else if (type === "file") {
-              const _client = await getGlobalClient();
-              await _client.sendMedia(msg.chat.id, {
-                type: "document",
+              const client = await getGlobalClient();
+              await (client as unknown as ClientInternals).sendFile(msg.chat.id, {
                 file: imagePath,
-                caption: html(finalDescription),
+                caption: finalDescription,
+                forceDocument: true,
               });
               try {
                 await msg.delete();
-              } catch { }
+              } catch (_e: unknown) { logger.debug('[speedtest] msg.delete failed (may already be deleted):', _e); }
               try {
                 fs.unlinkSync(imagePath);
-              } catch { }
+              } catch (_e: unknown) { logger.debug('[speedtest] unlinkSync imagePath failed:', _e); }
               return true;
             } else if (type === "sticker") {
               // 转为贴纸发送
               const stickerPath = await convertImageToStickerWebp(imagePath);
               if (stickerPath && fs.existsSync(stickerPath)) {
                 const client = await getGlobalClient();
-                await client.sendMedia(msg.chat.id, {
-                  type: "document",
+                await (client as unknown as ClientInternals).sendFile(msg.chat.id, {
                   file: stickerPath,
+                  forceDocument: false,
                   attributes: [
-                    { _: "documentAttributeSticker", alt: "speedtest", stickerset: { _: "inputStickerSetEmpty" } },
+                    {
+                      _: "documentAttributeSticker",
+                      alt: "speedtest",
+                      stickerset: { _: "inputStickerSetEmpty" },
+                    },
                   ],
-                } as any);
+                });
                 // 清理临时文件
                 try {
                   fs.unlinkSync(imagePath);
-                } catch { }
+                } catch (_e: unknown) { logger.debug('[speedtest] unlinkSync imagePath failed:', _e); }
                 try {
                   fs.unlinkSync(stickerPath);
-                } catch { }
+                } catch (_e: unknown) { logger.debug('[speedtest] unlinkSync stickerPath failed:', _e); }
                 // 同时展示文字说明
-                await msg.edit({ text: html(finalDescription) });
+                await msg.edit({ text: finalDescription });
                 return true;
               }
             }
-          } catch (e) {
-            console.error(`Send as ${type} failed:`, e);
+          } catch (e: unknown) {
+            logger.error(`Send as ${type} failed:`, e);
           }
           return false;
         };
@@ -1409,8 +1489,8 @@ const speedtest = async (msg: MessageContext) => {
         }
 
         // 兜底为文本
-        await msg.edit({ text: html(finalDescription) });
-      } catch (error) {
+        await msg.edit({ text: finalDescription });
+      } catch (error: unknown) {
         const errorMsg = error instanceof Error ? error.message : String(error);
         const isKnownNetworkError = errorMsg.includes('超时') ||
           errorMsg.includes('连接') ||
@@ -1424,30 +1504,36 @@ const speedtest = async (msg: MessageContext) => {
         }
 
         await msg.edit({
-          text: html(`❌ <b>速度测试失败</b><br><br><code>${htmlEscape(errorMsg)}</code>${helpText}`)});
+          text: `❌ <b>速度测试失败</b>\n\n<code>${htmlEscape(errorMsg)}</code>${helpText}`,
+
+        });
       }
     } else {
       await msg.edit({
-        text: html(`❌ <b>参数错误</b><br><br>${help_txt}`)});
+        text: `❌ <b>参数错误</b>\n\n${help_txt}`,
+
+      });
     }
-  } catch (error: any) {
-    console.error("SpeedNext plugin error:", error);
-    const errorMessage = error.message || String(error);
+  } catch (error: unknown) {
+    logger.error("SpeedNext plugin error:", error);
+    const errorMessage = getErrorMessage(error);
     const displayError =
       errorMessage.length > 100
         ? errorMessage.substring(0, 100) + "..."
         : errorMessage;
     await msg.edit({
-      text: html(`❌ <b>插件错误</b><br><br><b>错误信息:</b> <code>${htmlEscape(
+      text: `❌ <b>插件错误</b>\n\n<b>错误信息:</b> <code>${htmlEscape(
         displayError
-      )}</code>\n\n💡 <b>建议:</b> 请检查网络连接或联系管理员`)});
+      )}</code>\n\n💡 <b>建议:</b> 请检查网络连接或联系管理员`,
+
+    });
   }
 };
 
 class SpeednextPlugin extends Plugin {
 
-  description: string = `⚡️ 网络速度测试工具 | SpeedTest by Ookla<br>${help_txt}`;
-  cmdHandlers: Record<string, (msg: MessageContext) => Promise<void>> = {
+  description: string = `⚡️ 网络速度测试工具 | SpeedTest by Ookla\n${help_txt}`;
+  cmdHandlers: Record<string, (msg: any) => Promise<void>> = {
     speedtest,
     st: speedtest,
   };

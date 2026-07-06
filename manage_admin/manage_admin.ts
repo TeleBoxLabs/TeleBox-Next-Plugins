@@ -6,8 +6,14 @@ import type { MessageContext } from "@mtcute/dispatcher";
 import { html } from "@mtcute/html-parser";
 import { getGlobalClient } from "@utils/globalClient";
 import { safeGetReplyMessage } from "@utils/safeGetMessages";
+import { sleep } from "@utils/asyncHelpers";
+import { logger } from "@utils/logger";
+import { isUser, hasRawType } from "@utils/entityTypeGuards";
+import { User, Chat } from "@mtcute/node";
+import type { tl } from "@mtcute/core";
+import type { MtcuteInputChannel, MtcuteInputPeer, MtcuteLong, MtcuteInputUser } from "@utils/mtcuteTypes";
 
-const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+// sleep imported from @utils/asyncHelpers at top
 
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
@@ -35,47 +41,49 @@ function codeTag(text: string | number): string {
   return `<code>${htmlEscape(String(text))}</code>`;
 }
 async function formatEntity(
-  target: any,
+  target: unknown,
   mention?: boolean,
   throwErrorIfFailed?: boolean
 ) {
   const client = await getGlobalClient();
   if (!client) throw new Error("Telegram 客户端未初始化");
   if (!target) throw new Error("无效的目标");
-  let id: any;
-  let entity: any;
+  let id: number | undefined;
+  let entity: User | Chat | undefined;
   try {
-    entity = target?.className
+    entity = target instanceof User || target instanceof Chat
       ? target
-      : ((await client?.getChat(target)) as any);
+      : await client?.getChat(target as string | number);
     if (!entity) throw new Error("无法获取 entity");
     id = entity.id;
     if (!id) throw new Error("无法获取 entity id");
-  } catch (e: any) {
-    console.error(e);
+  } catch (e: unknown) {
+    logger.error(e);
     if (throwErrorIfFailed)
       throw new Error(
-        `无法获取 ${target} 的 entity: ${e?.message || "未知错误"}`
+        `无法获取 ${target} 的 entity: ${e instanceof Error ? e.message : "未知错误"}`
       );
   }
   const displayParts: string[] = [];
 
-  if (entity?.title) displayParts.push(entity.title);
-  if (entity?.firstName) displayParts.push(entity.firstName);
-  if (entity?.lastName) displayParts.push(entity.lastName);
-  if (entity?.username)
-    displayParts.push(
-      mention ? `@${htmlEscape(entity.username)}` : codeTag(`@${entity.username}`)
-    );
+  if (entity) {
+    if ((entity as Chat).title) displayParts.push((entity as Chat).title!);
+    if ((entity as User).firstName) displayParts.push((entity as User).firstName!);
+    if ((entity as User).lastName) displayParts.push((entity as User).lastName!);
+    if (entity.username)
+      displayParts.push(
+        mention ? `@${htmlEscape(entity.username)}` : codeTag(`@${entity.username}`)
+      );
+  }
 
   if (id) {
     displayParts.push(
-      (entity as any)._ === 'user' || (entity as any).className === 'User'
+      isUser(entity)
         ? `<a href="tg://user?id=${id}">${id}</a>`
         : `<a href="https://t.me/c/${id}">${id}</a>`
     );
-  } else if (!target?.className) {
-    displayParts.push(codeTag(target));
+  } else if (!(target instanceof User) && !(target instanceof Chat)) {
+    displayParts.push(codeTag(target as string | number));
   }
 
   return {
@@ -100,7 +108,8 @@ class ManageAdminPlugin extends Plugin {
       const parts = (msg.text || "").trim().split(/\s+/);
       const sub = (parts[1] || "").toLowerCase();
 
-      const isInGroup = (msg as any).isGroup || (msg as any).isChannel;
+      const chat = msg.chat;
+      const isInGroup = chat instanceof Chat;
       if (!isInGroup) {
         await msg.edit({
           text: html(`请在群组/频道对话中使用 <code>${commandName}</code> 命令`),
@@ -110,68 +119,73 @@ class ManageAdminPlugin extends Plugin {
 
       const client = await getGlobalClient();
       if (!client) return;
-      const channel = client.resolvePeer(msg.chat.id) as any;
-      const chatEntity = await msg.getCompleteChat();
+      const [channel, chatEntity] = await Promise.all([
+        client.resolvePeer(msg.chat.id),
+        msg.getCompleteChat(),
+      ]);
       if (!channel || !chatEntity) {
         await msg.edit({ text: "无法获取当前对话实体" });
         return;
       }
 
-      async function resolveUserFromReplyOrArg(arg?: string) {
+      async function resolveUserFromReplyOrArg(arg?: string): Promise<{ id: number | undefined; entity: unknown }> {
         if (msg.replyToMessage) {
           const r = await safeGetReplyMessage(msg);
-          if (!r) return { id: undefined as any, entity: undefined as any };
+          if (!r) return { id: undefined, entity: undefined };
           // Prefer real sender entity and ensure it's a user
-          let sender: any;
+          let sender: unknown;
           try {
-            sender = await (r as any).getCompleteSender?.();
-          } catch {}
-          if ((sender as any)?._ !== 'user' && (sender as any)?.className !== 'User') {
+            sender = await (r as MessageContext).getCompleteSender?.();
+          } catch (e: unknown) { logger.warn('操作失败', e) }
+          if (sender && !isUser(sender)) {
             // Fallback to senderId
-            const uid = Number((r as any).sender?.id);
+            const uid = Number((r.sender as { id?: number })?.id);
             if (uid && client) {
               try {
                 const input = client.resolvePeer(uid);
                 return { id: uid, entity: input };
-              } catch {}
+              } catch (e: unknown) { logger.warn('操作失败', e) }
             }
-            return { id: undefined as any, entity: undefined as any };
+            return { id: undefined, entity: undefined };
           }
-          const input = client.resolvePeer((sender as any).id);
-          return { id: Number((sender as any).id), entity: input };
+          if (!sender) return { id: undefined, entity: undefined };
+          const senderUser = sender as User;
+          const input = client.resolvePeer(senderUser.id);
+          return { id: Number(senderUser.id), entity: input };
         } else if (arg) {
           try {
-            const full = await client.getChat(arg as any);
-            if ((full as any)?._ !== 'user' && (full as any)?.className !== 'User') {
-              return { id: undefined as any, entity: undefined as any };
+            const full = await client.getChat(arg);
+            if (!isUser(full)) {
+              return { id: undefined, entity: undefined };
             }
-            const input = client.resolvePeer((full as any).id);
-            return { id: Number((full as any).id), entity: input };
-          } catch (e) {
+            const fullUser = full as User;
+            const input = client.resolvePeer(fullUser.id);
+            return { id: Number(fullUser.id), entity: input };
+          } catch (e: unknown) {
             // Fallback: if arg is numeric and current chat is channel, scan participants to resolve access hash
             const numericId = Number(arg);
-            if ((msg as any).isChannel && Number.isFinite(numericId)) {
+            if (msg.chat instanceof Chat && (msg.chat as Chat).isGroup && Number.isFinite(numericId)) {
               try {
                 let offset = 0;
                 const limit = 200;
                 for (let i = 0; i < 5; i++) {
                   // scan up to 1000 participants
-                  const res: any = await client.call({
+                  const res = await client.call({
                     _: 'channels.getParticipants',
-                    channel,
-                    filter: { _: 'channelParticipantsRecent' } as any,
+                    channel: channel as unknown as MtcuteInputChannel,
+                    filter: { _: 'channelParticipantsRecent' },
                     offset,
                     limit,
-                    hash: 0 as any,
-                  } as any);
-                  const participants: any[] = res?.participants || [];
-                  const users: any[] = res?.users || [];
+                    hash: 0 as unknown as MtcuteLong,
+                  });
+                  const participants: Array<{ userId: number }> = (res as { participants?: Array<{ userId: number }> })?.participants || [];
+                  const users: Array<{ id: number }> = (res as { users?: Array<{ id: number }> })?.users || [];
                   const found = participants.find(
-                    (p: any) => Number(p.userId) === numericId
+                    (p) => Number(p.userId) === numericId
                   );
                   if (found) {
                     const user = users.find(
-                      (u: any) => Number(u.id) === numericId
+                      (u) => Number(u.id) === numericId
                     );
                     if (user) {
                       const input = client.resolvePeer(user.id);
@@ -181,23 +195,23 @@ class ManageAdminPlugin extends Plugin {
                   if (!participants.length) break;
                   offset += participants.length;
                 }
-              } catch {}
+              } catch (e: unknown) { logger.warn('操作失败', e) }
             }
-            return { id: undefined as any, entity: undefined as any };
+            return { id: undefined, entity: undefined };
           }
         }
-        return { id: undefined as any, entity: undefined as any };
+        return { id: undefined, entity: undefined };
       }
 
-      async function getCurrentParticipant(targetEntity: any) {
+      async function getCurrentParticipant(targetEntity: unknown) {
         try {
           const info = await client.call({
             _: 'channels.getParticipant',
-            channel,
-            participant: targetEntity,
-          } as any);
-          return (info as any)?.participant;
-        } catch (e) {
+            channel: channel as unknown as MtcuteInputChannel,
+            participant: targetEntity as unknown as MtcuteInputPeer,
+          });
+          return (info as { participant?: unknown })?.participant;
+        } catch (_e: unknown) {
           return undefined;
         }
       }
@@ -208,18 +222,18 @@ class ManageAdminPlugin extends Plugin {
           if (!me) return false;
           const info = await client.call({
             _: 'channels.getParticipant',
-            channel,
-            participant: client.resolvePeer((me as any).id),
-          } as any);
-          const part = (info as any)?.participant;
-          return part?._ === 'channelParticipantCreator';
-        } catch {
+            channel: channel as unknown as MtcuteInputChannel,
+            participant: await client.resolvePeer(me.id),
+          });
+          const part = (info as { participant?: unknown })?.participant;
+          return hasRawType(part, 'channelParticipantCreator');
+        } catch (_e: unknown) {
           return false;
         }
       }
 
-      function extractRights(rights?: any): any {
-        if (!rights) return { _: 'chatAdminRights', banUsers: true } as any;
+      function extractRights(rights?: Record<string, unknown>): Record<string, unknown> {
+        if (!rights) return { _: 'chatAdminRights', banUsers: true };
         // Copy all known flags; undefined flags are treated as false.
         return {
           _: 'chatAdminRights',
@@ -238,7 +252,7 @@ class ManageAdminPlugin extends Plugin {
           postStories: !!rights.postStories,
           editStories: !!rights.editStories,
           deleteStories: !!rights.deleteStories,
-        } as any;
+        };
       }
 
       async function addOrUpdateAdmin(targetArg?: string, titleArg?: string) {
@@ -268,18 +282,18 @@ class ManageAdminPlugin extends Plugin {
         const participant = await getCurrentParticipant(userEntity);
         // 不传头衔 = 清空
         let rankToUse = limitedTitle; // empty string clears
-        let adminRightsToUse: any = { _: 'chatAdminRights', banUsers: true } as any;
+        const adminRightsToUse = { _: 'chatAdminRights', banUsers: true };
 
         try {
-          const isChannelChat = (chatEntity as any)._ === 'channel' || (chatEntity as any).className === 'Channel';
+          const isChannelChat = hasRawType(chatEntity, 'channel');
           if (isChannelChat) {
             await client.call({
               _: 'channels.editAdmin',
-              channel,
-              userId: userEntity,
-              adminRights: adminRightsToUse,
+              channel: channel as unknown as MtcuteInputChannel,
+              userId: userEntity as unknown as MtcuteInputUser,
+              adminRights: adminRightsToUse as tl.RawChatAdminRights,
               rank: rankToUse,
-            } as any);
+            });
             // 等待服务器状态同步
             await sleep(1200);
           } else {
@@ -287,9 +301,9 @@ class ManageAdminPlugin extends Plugin {
             await client.call({
               _: 'messages.editChatAdmin',
               chatId: msg.chat.id,
-              userId: userEntity,
-              isAdmin: true as any,
-            } as any);
+              userId: userEntity as unknown as MtcuteInputUser,
+              isAdmin: true,
+            });
           }
 
           // Verify rank actually updated
@@ -299,12 +313,12 @@ class ManageAdminPlugin extends Plugin {
             selfIsCreator = await getSelfIsCreator();
             const refreshed = await getCurrentParticipant(userEntity);
             if (
-              refreshed?._ === 'channelParticipantAdmin' ||
-              refreshed?._ === 'channelParticipantCreator'
+              hasRawType(refreshed, 'channelParticipantAdmin') ||
+              hasRawType(refreshed, 'channelParticipantCreator')
             ) {
-              appliedRank = (refreshed as any).rank || "";
+              appliedRank = (refreshed as { rank?: string }).rank || "";
             }
-          } catch {}
+          } catch (e: unknown) { logger.warn('操作失败', e) }
 
           const u = await formatEntity(userId || userEntity, true);
           const rankOk = appliedRank === rankToUse;
@@ -321,14 +335,15 @@ class ManageAdminPlugin extends Plugin {
                 : "")
             ),
           });
-        } catch (e: any) {
+        } catch (e: unknown) {
+          const errMsg = e instanceof Error ? e.message : String(e);
           const extra =
-            typeof e?.message === "string" &&
-            e.message.includes("USER_ID_INVALID")
+            typeof errMsg === "string" &&
+            errMsg.includes("USER_ID_INVALID")
               ? "\n可能原因：目标不是当前对话中的用户、匿名管理员、或仅提供了数字ID且无法解析。请改为回复该用户的消息或使用 @用户名。"
               : "";
           await msg.edit({
-            text: html(`设置管理员失败：${codeTag(e?.message || e)}${extra}`),
+            text: html(`设置管理员失败：${codeTag(errMsg)}${extra}`),
           });
         }
       }
@@ -342,55 +357,56 @@ class ManageAdminPlugin extends Plugin {
           return;
         }
         try {
-          if ((msg as any).isChannel) {
+          if (msg.chat instanceof Chat && msg.chat.isGroup) {
             await client.call({
               _: 'channels.editAdmin',
-              channel,
-              userId: userEntity,
-              adminRights: { _: 'chatAdminRights' } as any,
+              channel: channel as unknown as MtcuteInputChannel,
+              userId: userEntity as unknown as MtcuteInputUser,
+              adminRights: { _: 'chatAdminRights' } as unknown as tl.RawChatAdminRights,
               rank: "",
-            } as any);
+            });
           } else {
             await client.call({
               _: 'messages.editChatAdmin',
               chatId: msg.chat.id,
-              userId: userEntity,
-              isAdmin: false as any,
-            } as any);
+              userId: userEntity as unknown as MtcuteInputUser,
+              isAdmin: false,
+            });
           }
           const u = await formatEntity(userId || userEntity, true);
           await msg.edit({
             text: html(`已移除管理员: ${u.display}`),
           });
-        } catch (e: any) {
+        } catch (e: unknown) {
+          const errMsg = e instanceof Error ? e.message : String(e);
           const extra =
-            typeof e?.message === "string" &&
-            e.message.includes("USER_ID_INVALID")
+            typeof errMsg === "string" &&
+            errMsg.includes("USER_ID_INVALID")
               ? "\n可能原因：目标不是当前对话中的用户、匿名管理员、或仅提供了数字ID且无法解析。请改为回复该用户的消息或使用 @用户名。"
               : "";
           await msg.edit({
-            text: html(`移除管理员失败：${codeTag(e?.message || e)}${extra}`),
+            text: html(`移除管理员失败：${codeTag(errMsg)}${extra}`),
           });
         }
       }
 
       async function listAdmins() {
         try {
-          if (!(msg as any).isChannel) {
+          if (!(msg.chat instanceof Chat)) {
             await msg.edit({ text: "仅支持超级群/频道列出管理员" });
             return;
           }
           const result = await client.call({
             _: 'channels.getParticipants',
-            channel,
-            filter: { _: 'channelParticipantsAdmins' } as any,
+            channel: channel as unknown as MtcuteInputChannel,
+            filter: { _: 'channelParticipantsAdmins' },
             offset: 0,
             limit: 200,
-            hash: 0 as any,
-          } as any);
+            hash: 0 as unknown as MtcuteLong,
+          });
 
-          const participants: any[] = (result as any)?.participants || [];
-          const users: any[] = (result as any)?.users || [];
+          const participants: Array<{ userId: number; rank?: string }> = (result as { participants?: Array<{ userId: number; rank?: string }> })?.participants || [];
+          const users: Array<{ id: number; firstName?: string; lastName?: string; username?: string }> = (result as { users?: Array<{ id: number; firstName?: string; lastName?: string; username?: string }> })?.users || [];
           if (!participants.length) {
             await msg.edit({ text: "当前对话没有管理员或无法获取" });
             return;
@@ -398,10 +414,10 @@ class ManageAdminPlugin extends Plugin {
 
           const lines: string[] = [];
           for (const p of participants) {
-            let uid: any = (p as any).userId;
+            let uid: number = p.userId;
             if (typeof uid !== "number") uid = Number(uid);
             const user = users.find((u) => Number(u.id) === Number(uid));
-            const rank = (p as any).rank || "";
+            const rank = p.rank || "";
             // Build display
             let display = "";
             if (user) {
@@ -422,9 +438,10 @@ class ManageAdminPlugin extends Plugin {
           await msg.edit({
             text: html(`当前管理员列表：<br>${lines.join("<br>")}`),
           });
-        } catch (e: any) {
+        } catch (e: unknown) {
+          const errMsg = e instanceof Error ? e.message : String(e);
           await msg.edit({
-            text: html(`获取管理员列表失败：${codeTag(e?.message || e)}`),
+            text: html(`获取管理员列表失败：${codeTag(errMsg)}`),
           });
         }
       }

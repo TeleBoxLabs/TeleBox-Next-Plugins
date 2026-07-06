@@ -3,6 +3,8 @@ import { getPrefixes } from "@utils/pluginManager";
 import type { MessageContext } from "@mtcute/dispatcher";
 import { html } from "@mtcute/html-parser";
 import axios from "axios";
+import { logger } from "@utils/logger";
+import { getErrorMessage } from "@utils/errorHelpers";
 
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
@@ -48,9 +50,9 @@ class DissPlugin extends Plugin {
               return;
             }
           }
-        } catch (error) {
+        } catch (error: unknown) {
           const errorMessage = error instanceof Error ? error.message : String(error);
-          console.warn(`[diss] 第${attempt}次尝试失败:`, errorMessage);
+          logger.warn(`[diss] 第${attempt}次尝试失败:`, errorMessage);
           
           // 如果不是最后一次尝试，等待一下再重试
           if (attempt < 5) {
@@ -64,11 +66,11 @@ class DissPlugin extends Plugin {
         text: "❌ 出错了呜呜呜 ~ 试了好多好多次都无法访问到 API 服务器。"
       });
 
-    } catch (error: any) {
+    } catch (error: unknown) {
       // 处理意外错误
-      console.error('[diss] 插件执行错误:', error);
+      logger.error('[diss] 插件执行错误:', error);
       await msg.edit({ 
-        text: html`❌ 发生意外错误: ${this.htmlEscape(error.message || "未知错误")}`
+        text: html`❌ 发生意外错误: ${this.htmlEscape(getErrorMessage(error) || "未知错误")}`
       });
     }
   }
