@@ -1478,6 +1478,10 @@ class ShiftPlugin extends Plugin {
           let targetDisplay: string | undefined;
 
           if (useLowdb) {
+            if (!source || !target) {
+              await msg.edit({ text: `❌ 无法解析源或目标对话` });
+              return;
+            }
             try {
               const [formattedSource, formattedTarget] = await Promise.all([
                 formatEntity(source),
