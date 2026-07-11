@@ -39,7 +39,7 @@ const TG_STICKER_MAX_FRAMES = 100;
 const TG_STICKER_MAX_BYTES = 512 * 1024;
 const WEBM_CRF_STEPS = [38, 44, 50, 56];
 
-const QUOTE_PLUGIN_VERSION = "1.03";
+const QUOTE_PLUGIN_VERSION = "1.04";
 const QUOTE_BASE_URL = "https://raw.githubusercontent.com/TeleBoxOrg/TeleBox_Plugins/main/quote";
 const QUOTE_ASSETS_BASE_URL = "https://raw.githubusercontent.com/LyoSU/quote-api/master/assets";
 const QUOTE_VENDOR_DIR = path.join(quotePluginDir(), "quote", "vendor");
@@ -554,8 +554,13 @@ function messageText(msg: MessageContext): string {
 }
 
 function convertEntities(msg: MessageContext): any[] {
-  const entities = msg.entities as unknown as Array<{ className?: string; constructor?: { name?: string }; offset?: number; length?: number; language?: string; url?: string; userId?: number; documentId?: string | number; document_id?: string | number }>;
-  return entities.map((e) => {
+  // Merge message entities with caption entities to capture formatting
+  // on media message captions (which some API layers expose separately).
+  const msgEntities = (msg.entities as unknown as Array<{ className?: string; constructor?: { name?: string }; offset?: number; length?: number; language?: string; url?: string; userId?: number; documentId?: string | number; document_id?: string | number }>) ?? [];
+  const raw = msg.raw as Record<string, unknown> | undefined;
+  const capEntities = (raw?.captionEntities ?? raw?.caption_entities ?? []) as typeof msgEntities;
+  const all = msgEntities.length > 0 || capEntities.length > 0 ? [...msgEntities, ...capEntities] : msgEntities;
+  return all.map((e) => {
     const name = e.className || e.constructor?.name || "";
     const offset = e.offset ?? 0;
     const length = e.length ?? 0;
@@ -1296,7 +1301,7 @@ async function toQuoteMessage(msg: MessageContext, args: QuoteArgs): Promise<any
   const fwd = await forwardedSource(msg);
   const effectiveEntity = fwd?.entity ?? entity;
   const effectiveName = fwd?.name || displayName(effectiveEntity);
-  const [avatarBuffer, media, replyMessage, forward] = await Promise.all([
+  const [avatarBuffer, media, replyMessage] = await Promise.all([
     fwd && !fwd.anonymous && fwd.entity
       ? downloadEntityAvatar(await getGlobalClient().catch((e) => { logger.warn("[quote] emojiStatus: getGlobalClient failed", getErrorMessage(e)); return null; }), fwd.entity)
       : downloadSenderAvatar(msg, entity),
@@ -1330,7 +1335,7 @@ async function toQuoteMessage(msg: MessageContext, args: QuoteArgs): Promise<any
     caption: messageText(msg),
     caption_entities: convertEntities(msg),
     replyMessage,
-    forward: undefined,
+    forward: fwd ? { label: fwd.name || "Forwarded message" } : undefined,
     mediaBuffer: media.mediaBuffer,
     mediaCanvas: media.mediaCanvas,
     mediaType: media.mediaType,
