@@ -557,7 +557,7 @@ function convertEntities(msg: MessageContext): any[] {
   // Merge message entities with caption entities to capture formatting
   // on media message captions (which some API layers expose separately).
   const msgEntities = (msg.entities as unknown as Array<{ className?: string; constructor?: { name?: string }; offset?: number; length?: number; language?: string; url?: string; userId?: number; documentId?: string | number; document_id?: string | number }>) ?? [];
-  const raw = msg.raw as Record<string, unknown> | undefined;
+  const raw = msg.raw as unknown as Record<string, unknown> | undefined;
   const capEntities = (raw?.captionEntities ?? raw?.caption_entities ?? []) as typeof msgEntities;
   const all = msgEntities.length > 0 || capEntities.length > 0 ? [...msgEntities, ...capEntities] : msgEntities;
   return all.map((e) => {
@@ -1290,7 +1290,7 @@ async function senderRankInChat(client: any | null, msg: MessageContext, entity:
       QUOTE_RPC_TIMEOUT_MS,
       "senderRank.channels.getParticipant",
     );
-    return result?.participant?.rank?.trim() || undefined;
+    return (result as any)?.participant?.rank?.trim() || undefined;
   } catch {
     return undefined;
   }
