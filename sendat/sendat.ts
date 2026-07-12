@@ -209,7 +209,7 @@ class SendTask {
       desc += ` [已暂停]`;
     }
 
-    desc += `\n消息: ${this.msg.substring(0, 50)}${this.msg.length > 50 ? '...' : ''}`;
+    desc += `\n消息: ${htmlEscape(this.msg.substring(0, 50))}${this.msg.length > 50 ? '...' : ''}`;
     
     return desc;
   }
