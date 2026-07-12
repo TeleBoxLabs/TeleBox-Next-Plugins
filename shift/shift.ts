@@ -359,7 +359,9 @@ function saveShiftRule(sourceId: number, rule: ShiftRule): boolean {
     if (useLowdb && lowdb) {
       // 保存到 lowdb
       lowdb.data.rules[String(sourceId)] = rule;
-      lowdb.write();
+      void lowdb.write().catch((error: unknown) => {
+        logger.error("[SHIFT] 保存规则失败:", error);
+      });
       ruleCache.set(sourceId, { rule, timestamp: Date.now() });
       return true;
     } else if (sqliteDb) {
@@ -396,7 +398,9 @@ function deleteShiftRule(sourceId: number): boolean {
     if (useLowdb && lowdb) {
       // 从 lowdb 删除
       delete lowdb.data.rules[String(sourceId)];
-      lowdb.write();
+      void lowdb.write().catch((error: unknown) => {
+        logger.error("[SHIFT] 删除规则失败:", error);
+      });
       ruleCache.delete(sourceId);
       return true;
     } else if (sqliteDb) {
@@ -2099,7 +2103,9 @@ function updateStats(
 
       // 批量写入优化
       if (stats.total % 10 === 0) {
-        lowdb.write();
+        void lowdb.write().catch((error: unknown) => {
+          logger.error("[SHIFT] 保存统计失败:", error);
+        });
       }
     } else if (sqliteDb) {
       // 更新 SQLite 统计
