@@ -503,7 +503,7 @@ seconds, minutes, hours, date, times`;
 
     } catch (error: unknown) {
       await msg.edit({
-        text: `❌ <b>错误：</b>${htmlEscape(getErrorMessage(error))}`
+        text: html(`❌ <b>错误：</b>${htmlEscape(getErrorMessage(error))}`)
       });
     }
   }

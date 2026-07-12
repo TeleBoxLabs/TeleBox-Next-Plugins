@@ -6,6 +6,7 @@
  */
 
 import { Plugin } from "@utils/pluginBase";
+import { html } from "@mtcute/html-parser";
 import { getGlobalClient } from "@utils/runtimeManager";
 import { getPrefixes } from "@utils/pluginManager";
 import { safeGetReplyMessage } from "@utils/safeGetMessages";
@@ -160,21 +161,21 @@ class HisPlugin extends Plugin {
         if (error.message?.includes("FLOOD_WAIT")) {
           const waitTime = parseInt(error.message.match(/\d+/)?.[0] || "60");
           await msg.edit({
-            text: `⏳ <b>请求过于频繁</b><br><br>需要等待 ${waitTime} 秒后重试`
+            text: html(`⏳ <b>请求过于频繁</b><br><br>需要等待 ${waitTime} 秒后重试`)
           });
           return;
         }
 
         if (error.message?.includes("MESSAGE_TOO_LONG")) {
           await msg.edit({
-            text: "❌ <b>消息过长</b><br><br>请减少查询数量"
+            text: html("❌ <b>消息过长</b><br><br>请减少查询数量")
           });
           return;
         }
 
         // 通用错误处理
         await msg.edit({
-          text: `❌ <b>操作失败:</b> ${htmlEscape(error.message || "未知错误")}`
+          text: html(`❌ <b>操作失败:</b> ${htmlEscape(error.message || "未知错误")}`)
         });
       }
     }
@@ -281,7 +282,7 @@ class HisPlugin extends Plugin {
 
       if (messages.length === 0) {
         await msg.edit({
-          text: `❌ 未找到 <b>${htmlEscape(targetDisplay)}</b> 的消息记录`
+          text: html(`❌ 未找到 <b>${htmlEscape(targetDisplay)}</b> 的消息记录`)
         });
         return;
       }
