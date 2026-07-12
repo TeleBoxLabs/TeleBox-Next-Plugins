@@ -1,5 +1,6 @@
 import { Plugin } from '@utils/pluginBase';
-import { getPrefixes } from '@utils/pluginManager';
+import { getPrefixes } from "@utils/pluginManager";
+import { htmlEscape } from "@utils/htmlEscape";
 import type { MessageContext } from "@mtcute/dispatcher";
 import type { Message, Photo, Document } from "@mtcute/node";
 import { html } from "@mtcute/html-parser";
@@ -302,15 +303,6 @@ class XMSLPlugin extends Plugin {
 		}
 	}
 
-	private htmlEscape(text: string): string {
-		return text
-			.replace(/&/g, '&amp;')
-			.replace(/</g, '&lt;')
-			.replace(/>/g, '&gt;')
-			.replace(/"/g, '&quot;')
-			.replace(/'/g, '&#39;');
-	}
-
 	private removeThinkTags(text: string): string {
 		if (text.includes('<think>') && text.includes('</think>')) {
 			const match = text.match(/<\/think>\s*([\s\S]*?)$/);
@@ -502,7 +494,7 @@ class XMSLPlugin extends Plugin {
 			}
 		} catch (error: unknown) {
 			await msg.edit({
-				text: html`❌ 处理失败: ${this.htmlEscape(getErrorMessage(error))}`,
+				text: html`❌ 处理失败: ${htmlEscape(getErrorMessage(error))}`,
 			});
 		}
 	}
@@ -552,11 +544,11 @@ class XMSLPlugin extends Plugin {
 
 			await this.saveConfig();
 			await msg.edit({
-				text: html`✅ ${this.htmlEscape(key)} 已设置为: <code>${this.htmlEscape(value)}</code>`,
+				text: html`✅ ${htmlEscape(key)} 已设置为: <code>${htmlEscape(value)}</code>`,
 			});
 		} catch (error: unknown) {
 			await msg.edit({
-				text: html`❌ 设置失败: ${this.htmlEscape(getErrorMessage(error))}`,
+				text: html`❌ 设置失败: ${htmlEscape(getErrorMessage(error))}`,
 			});
 		}
 	}
@@ -645,7 +637,7 @@ model: <code>${this.config.model}</code><br>
 			if (axiosErr.response?.status === 400) {
 				const respData = axiosErr.response.data as { error?: { message?: string } } | undefined;
 				const apiError = respData?.error?.message || '请求格式错误';
-				errorMsg = `❌ API 请求错误: ${this.htmlEscape(apiError)}`;
+				errorMsg = `❌ API 请求错误: ${htmlEscape(apiError)}`;
 			} else if (axiosErr.response?.status === 401) {
 				errorMsg = '❌ API 密钥无效';
 			} else if (axiosErr.response?.status === 429) {
@@ -653,7 +645,7 @@ model: <code>${this.config.model}</code><br>
 			} else if (axiosErr.code === 'ECONNREFUSED') {
 				errorMsg = '❌ 无法连接到 API 服务器';
 			} else if (getErrorMessage(error)) {
-				errorMsg = `❌ ${this.htmlEscape(getErrorMessage(error))}`;
+				errorMsg = `❌ ${htmlEscape(getErrorMessage(error))}`;
 			}
 
 			await msg.edit({
