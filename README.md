@@ -1,8 +1,8 @@
-# TeleBox-Next_Plugins
+# TeleBox-Next-Plugins
 
 ## 简介
 
-TeleBox-Next_Plugins 是 [TeleBox-Next](https://github.com/TeleBoxOrg/TeleBox-Next) 项目的官方插件仓库（mtcute 版本），提供丰富的功能扩展。
+TeleBox-Next-Plugins 是 [TeleBox-Next](https://github.com/TeleBoxOrg/TeleBox-Next) 项目的官方插件仓库（mtcute 版本），提供丰富的功能扩展。
 
 ## 安装方式
 ```bash
