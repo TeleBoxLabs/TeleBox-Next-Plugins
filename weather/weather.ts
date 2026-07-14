@@ -331,9 +331,14 @@ class WeatherPlugin extends Plugin {
     try {
       logger.info(`[weather] 正在翻译中文地名: ${cityName}`);
       const translateModule = await import("@vitalets/google-translate-api");
+      // Module shape varies across CJS/ESM interop; go via unknown first.
+      const mod = translateModule as unknown as {
+        translate?: Function;
+        default?: Function | { translate?: Function };
+      };
       const translate =
-        (translateModule as { translate?: Function; default?: Function }).translate ||
-        (translateModule as { default?: Function }).default;
+        mod.translate ||
+        (typeof mod.default === "function" ? mod.default : mod.default?.translate);
 
       if (!translate || typeof translate !== "function") {
         logger.error("[weather] 翻译服务未正确加载");
