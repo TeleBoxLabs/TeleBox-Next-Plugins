@@ -1,6 +1,6 @@
 import { Plugin } from "@utils/pluginBase";
 import type { MessageContext } from "@mtcute/dispatcher";
-import type { ClientWithDownload, ClientWithGetMessages, ClientWithSendFile } from "@utils/clientInternals";
+import type { ClientWithDownload, ClientWithGetMessages } from "@utils/clientInternals";
 import { getPrefixes } from "@utils/pluginManager";
 import type { Low } from "lowdb";
 import { JSONFilePreset } from "lowdb/node";
@@ -1451,12 +1451,26 @@ class MessageUtils {
 
         const topicRootId = getTopicRootId(msg);
         const replyTo = replyToId ?? topicRootId;
-        await (msg.client as unknown as ClientWithSendFile).sendFile(peerId, {
-          file: pathToSend,
-          forceDocument: !options.previewEnabled,
-          caption,
-          ...(replyTo ? { replyTo } : {}),
-        });
+        // mtcute 公开 API 是 sendMedia，没有 sendFile
+        const isVideo =
+          options.directory === "ai_videos" || Boolean(options.prepareForSend);
+        const mediaType = !options.previewEnabled
+          ? "document"
+          : isVideo
+            ? "video"
+            : "photo";
+        await msg.client.sendMedia(
+          peerId,
+          {
+            type: mediaType,
+            file: pathToSend,
+            fileName: path.basename(pathToSend),
+            caption,
+          },
+          {
+            ...(replyTo ? { replyTo } : {}),
+          },
+        );
       } finally {
         const cleanupTargets = options.prepareForSend
           ? [rawPath, finalPath]

@@ -796,12 +796,18 @@ class MusicHubPlugin extends Plugin {
     caption: string,
     session?: SearchSession
   ): Promise<void> {
-    await client.sendFile(msg.chat.id, {
-      file: urlInfo.url,
-      caption,
-      replyTo: this.getReplyTarget(msg, session),
-      forceDocument: false,
-    });
+    // mtcute 公开 API 是 sendMedia，没有 sendFile
+    await client.sendMedia(
+      msg.chat.id,
+      {
+        type: "audio",
+        file: urlInfo.url,
+      },
+      {
+        caption,
+        replyTo: this.getReplyTarget(msg, session),
+      },
+    );
   }
 
   private createTransferProgressReporter(
@@ -970,29 +976,31 @@ class MusicHubPlugin extends Plugin {
         force: true,
       });
 
-      await client.sendFile(msg.chat.id, {
-        file: tempFilePath,
-        caption,
-        replyTo: this.getReplyTarget(msg, session),
-        attributes: [
-          {
-            _: "documentAttributeAudio",
-            duration: 0,
-            title: song.name,
-            performer: formatArtists(song.artist),
-          } as never, // mtcute InputMediaAudio type lacks attributes field; needed for TL layer
-        ],
-        forceDocument: false,
-        progressCallback: (progress: number) => {
-          const fraction = clampFraction(progress) ?? 0;
-          void onProgress?.({
-            stage: "upload",
-            loadedBytes: Math.round(fileSize * fraction),
-            totalBytes: fileSize,
-            fraction,
-          });
+      // mtcute 公开 API 是 sendMedia；progressCallback 签名为 (uploaded, total)
+      await client.sendMedia(
+        msg.chat.id,
+        {
+          type: "audio",
+          file: tempFilePath,
+          title: song.name,
+          performer: formatArtists(song.artist),
         },
-      });
+        {
+          caption,
+          replyTo: this.getReplyTarget(msg, session),
+          progressCallback: (uploaded: number, total: number) => {
+            const totalBytes = total || fileSize;
+            const fraction =
+              clampFraction(totalBytes > 0 ? uploaded / totalBytes : 0) ?? 0;
+            void onProgress?.({
+              stage: "upload",
+              loadedBytes: uploaded,
+              totalBytes,
+              fraction,
+            });
+          },
+        },
+      );
 
       await onProgress?.({
         stage: "upload",
