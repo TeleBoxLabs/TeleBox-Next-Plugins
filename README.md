@@ -25,7 +25,7 @@ TeleBox-Next-Plugins 是 [TeleBox-Next](https://github.com/TeleBoxOrg/TeleBox-Ne
 - `atadmins` - 一键艾特全部管理员  
 - `atall` - 一键艾特全部成员  
 - `audio_to_voice` - 音乐转音频  
-- `autochangename` - 自动定时修改用户名插  
+- `autochangename` - 自动定时修改用户名  
 - `autodel` - 定时删除消息  
 - `autodelcmd` - 自动删除命令消息  
 - `autorepeat` - 智能自动复读机  
