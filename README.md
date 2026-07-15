@@ -76,7 +76,6 @@ TeleBox-Next-Plugins 是 [TeleBox-Next](https://github.com/TeleBoxOrg/TeleBox-Ne
 - `jupai` - 举牌小人  
 - `keep_online` - 保活自动重启(测试版) 请查看说明操作  
 - `keyword` - 关键词自动回复  
-- `kitt` - 高级触发器: 匹配 -> 执行, 高度自定义, 逻辑自由  
 - `kkp` - 获取NSFW视频  
 - `komari` - Komari 服务器监控  
 - `listusernames` - 列出属于自己的公开群组/频道  
