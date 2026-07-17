@@ -225,17 +225,25 @@ type ResolvedTarget = {
 };
 
 class UserResolver {
+  /** sb/unsb 的 true 确认位，不是用户目标 */
+  private static isMetaFlag(arg: string): boolean {
+    const a = arg.trim().toLowerCase();
+    return a === "true" || a === "false" || a === "confirm";
+  }
+
   static async resolveTarget(
     client: TelegramClient,
     message: MtcuteMessageContext,
     args: string[]
   ): Promise<ResolvedTarget> {
-    // 从参数解析
-    if (args.length > 0) {
-      const target = args[0];
-      return await this.resolveFromString(client, message, target);
+    // 去掉 true/false 等确认参数后再找目标；避免 `.sb true`（回复+确认）把 true 当作用户名
+    const targetArgs = args.filter((a) => !this.isMetaFlag(a));
+
+    // 从参数解析（@username / 数字 id）
+    if (targetArgs.length > 0) {
+      return await this.resolveFromString(client, message, targetArgs[0]);
     }
-    
+
     // 从回复消息解析
     // mtcute Message 没有 teleproto 的 .senderId，发送者在 .sender.id（Peer/User）
     const reply = await safeGetReplyMessage(message);
@@ -279,6 +287,28 @@ class UserResolver {
           chatType: this.getChatType(message),
         };
       }
+    }
+
+    // 诊断：仍失败时写清 reply / args 形态，便于对照 pm2 日志
+    try {
+      const rinfo = (message as { replyToMessage?: { id?: number | null } }).replyToMessage;
+      const hasGetReply = typeof (message as { getReplyTo?: unknown }).getReplyTo === "function";
+      logger.warn(
+        `[aban] resolveTarget NO_TARGET args=${JSON.stringify(args)} ` +
+          `replyToId=${rinfo?.id ?? "null"} hasGetReplyTo=${hasGetReply} ` +
+          `safeReply=${reply ? "yes" : "no"} ` +
+          `replySenderId=${
+            reply
+              ? String(
+                  (reply as { sender?: { id?: unknown } }).sender?.id ??
+                    (reply as { senderId?: unknown }).senderId ??
+                    "missing",
+                )
+              : "n/a"
+          } chatType=${this.getChatType(message)} chatId=${chatIdOf(message)}`,
+      );
+    } catch (e: unknown) {
+      logger.warn("[aban] resolveTarget diagnostic failed", e);
     }
 
     return { user: null, uid: null, source: "unknown", resolutionError: "NO_TARGET", chatType: this.getChatType(message) };
@@ -380,6 +410,11 @@ class UserResolver {
   }
 
   private static getChatType(message: MtcuteMessageContext): "channel" | "chat" | "unknown" {
+    // mtcute Message 没有 isChannel/isGroup；类型在 chat.type
+    const chatType = (message as { chat?: { type?: string } }).chat?.type;
+    if (chatType === "channel" || chatType === "supergroup") return "channel";
+    if (chatType === "group") return "chat";
+    // 兼容旧字段 / 代理消息
     if ((message as { isChannel?: boolean }).isChannel) return "channel";
     if ((message as { isGroup?: boolean }).isGroup) return "chat";
     return "unknown";
@@ -472,14 +507,23 @@ class UserResolver {
       return undefined;
     }
 
-    if ((message as { isChannel?: boolean }).isChannel) {
+    const chatType = this.getChatType(message);
+    const isChannelLike =
+      chatType === "channel" ||
+      !!(message as { isChannel?: boolean }).isChannel ||
+      (message as { chat?: { type?: string } }).chat?.type === "supergroup" ||
+      (message as { chat?: { type?: string } }).chat?.type === "channel";
+
+    if (isChannelLike) {
       try {
+        // channels.getParticipants 需要 InputChannel，不能直接塞 marked chat id
+        const channelPeer = await client.resolvePeer(chat);
         let offset = 0;
         const limit = 200;
         for (let i = 0; i < 5; i++) {
           const res = await client.call({
               _: 'channels.getParticipants',
-              channel: chat,
+              channel: channelPeer,
               filter: { _: 'channelParticipantsRecent' } as tl.TypeChannelParticipantsFilter,
               offset,
               limit,
@@ -508,7 +552,7 @@ class UserResolver {
       }
     }
 
-    if ((message as { isGroup?: boolean }).isGroup) {
+    if (chatType === "chat" || (message as { isGroup?: boolean }).isGroup) {
       try {
         const peer = knownEntity || await this.safeGetEntity(client, chat as unknown as string | number);
         const chatId = Number(peer?.chatId ?? peer?.id ?? (chat as { chatId?: number })?.chatId);
@@ -1335,7 +1379,11 @@ class CommandHandlers {
       const { user, uid, participant, resolutionError, chatType } = await UserResolver.resolveTarget(client, message, args);
 
       if (!uid) {
-        await MessageManager.smartEdit(message, "❌ 获取用户失败");
+        logger.warn(`[aban] 获取用户失败 uid=null args=${JSON.stringify(args)} err=${resolutionError}`);
+        await MessageManager.smartEdit(
+          message,
+          "❌ 获取用户失败（请回复目标用户的消息，或附带 @用户名 / 用户ID；true 仅作确认参数）",
+        );
         return;
       }
 
@@ -1437,14 +1485,21 @@ class CommandHandlers {
     try {
       const rawText = String(message.text ?? message.rawText ?? "").trim();
       const args = rawText ? rawText.split(/\s+/).slice(1) : [];
-      const { user, uid, participant, resolutionError } = await UserResolver.resolveTarget(client, message, args);
+      const { user, uid, participant, resolutionError, source } = await UserResolver.resolveTarget(client, message, args);
 
       if (!uid) {
-        await MessageManager.smartEdit(message, "❌ 获取用户失败");
+        logger.warn(`[aban/sb] 获取用户失败 uid=null source=${source} err=${resolutionError} args=${JSON.stringify(args)}`);
+        await MessageManager.smartEdit(
+          message,
+          resolutionError === "INVALID_TARGET"
+            ? "❌ 无法识别目标（不要用 true 当用户名；请回复目标消息，或使用 @用户名 / 用户ID）"
+            : "❌ 获取用户失败（请回复目标用户的消息，或附带 @用户名 / 用户ID）",
+        );
         return;
       }
 
       if (!participant) {
+        logger.warn(`[aban/sb] 实体不可解析 uid=${uid} source=${source} err=${resolutionError}`);
         const errorText = resolutionError === 'TARGET_ENTITY_UNRESOLVABLE'
           ? '❌ 无法解析该目标的 Telegram 实体，请先通过回复消息、@用户名或让该目标在当前会话中可见后再试'
           : '❌ 获取用户失败';
@@ -1590,7 +1645,11 @@ class CommandHandlers {
       const { user, uid, participant, resolutionError } = await UserResolver.resolveTarget(client, message, args);
 
       if (!uid) {
-        await MessageManager.smartEdit(message, "❌ 获取用户失败");
+        logger.warn(`[aban] 获取用户失败 uid=null args=${JSON.stringify(args)} err=${resolutionError}`);
+        await MessageManager.smartEdit(
+          message,
+          "❌ 获取用户失败（请回复目标用户的消息，或附带 @用户名 / 用户ID；true 仅作确认参数）",
+        );
         return;
       }
 
