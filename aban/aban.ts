@@ -949,7 +949,7 @@ class GroupManager {
         dialogMap.set(markedId, {
           id: markedId,
           isChannel: isChannelLike,
-          isGroup: isBasicGroup || type === "supergroup" || type === "gigagroup",
+          isGroup: isBasicGroup || chatType === "supergroup" || chatType === "gigagroup",
           title: peer.title || "Unknown",
           entity: {
             id: rawId,
