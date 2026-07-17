@@ -955,7 +955,7 @@ class PermissionManager {
       return false;
     } catch (e: unknown) {
       const msg = getErrorMessage(e);
-      if (!/CHANNEL_INVALID|CHANNEL_PRIVATE|USER_NOT_PARTICIPANT|PEER_ID_INVALID/.test(msg)) {
+      if (!/CHANNEL_INVALID|CHANNEL_PRIVATE|USER_NOT_PARTICIPANT|PEER_ID_INVALID|CHAT_ADMIN_REQUIRED/.test(msg)) {
         logger.warn('aban: isMeAdmin check failed', e);
       }
       return false;
@@ -991,9 +991,9 @@ class PermissionManager {
         p?._ === 'channelParticipantAdmin'
       );
     } catch (e: unknown) {
-      // CHANNEL_INVALID / USER_NOT_PARTICIPANT → 非管理员，不刷屏
+      // CHANNEL_INVALID / USER_NOT_PARTICIPANT / CHAT_ADMIN_REQUIRED → 非管理员，不刷屏
       const msg = getErrorMessage(e);
-      if (!/CHANNEL_INVALID|CHANNEL_PRIVATE|USER_NOT_PARTICIPANT|PEER_ID_INVALID/.test(msg)) {
+      if (!/CHANNEL_INVALID|CHANNEL_PRIVATE|USER_NOT_PARTICIPANT|PEER_ID_INVALID|CHAT_ADMIN_REQUIRED/.test(msg)) {
         logger.warn('aban: isOwnerOrAdmin check failed', e);
       }
       return false;
@@ -1032,7 +1032,7 @@ class PermissionManager {
       return false;
     } catch (e: unknown) {
       const msg = getErrorMessage(e);
-      if (!/CHANNEL_INVALID|CHANNEL_PRIVATE|USER_NOT_PARTICIPANT|PEER_ID_INVALID|Unknown object/.test(msg)) {
+      if (!/CHANNEL_INVALID|CHANNEL_PRIVATE|USER_NOT_PARTICIPANT|PEER_ID_INVALID|CHAT_ADMIN_REQUIRED|Unknown object/.test(msg)) {
         logger.warn('aban: canDeleteMessages check failed', e);
       }
       return false;
