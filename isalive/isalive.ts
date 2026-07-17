@@ -305,49 +305,68 @@ function generateComment(
   return comments.length > 0 ? comments.join("\n├ ") : "";
 }
 
-// 从群组成员中查找用户
+// 从群组成员中查找用户（mtcute: iterDialogs + getChatMembers，无 getDialogs）
 async function findUserFromGroups(
-  client: any,
+  client: {
+    iterDialogs: (params?: Record<string, unknown>) => AsyncIterable<{
+      peer?: {
+        id?: number | string;
+        type?: string;
+        chatType?: string;
+        isGroup?: boolean;
+      };
+    }>;
+    getChatMembers: (
+      chatId: number | string,
+      params?: { limit?: number }
+    ) => Promise<Array<{ user?: { id?: number | string } }>>;
+  },
   userId: number
-): Promise<any | null> {
-  const dialogMap = new Map<string, any>();
+): Promise<User | null> {
+  const groupIds = new Set<number>();
 
-  const collectDialogs = async (params: Record<string, any>) => {
+  const collectGroupIds = async (params?: { folder?: number }) => {
     try {
-      const dialogs = await client.getDialogs(params);
-      for (const dialog of dialogs || []) {
-        const key = `${(dialog as { id?: number }).id}`;
-        if (!dialogMap.has(key)) {
-          dialogMap.set(key, dialog);
-        }
+      for await (const dialog of client.iterDialogs(params ?? {})) {
+        const peer = dialog?.peer;
+        if (!peer || peer.id == null) continue;
+        if (peer.type === "user" || peer.type === "bot") continue;
+
+        const chatType = peer.chatType || "";
+        const isGroupLike =
+          chatType === "group" ||
+          chatType === "supergroup" ||
+          chatType === "gigagroup" ||
+          chatType === "channel" ||
+          !!peer.isGroup;
+        if (!isGroupLike) continue;
+
+        const id = Number(peer.id);
+        if (Number.isFinite(id)) groupIds.add(id);
       }
     } catch (error: unknown) {
-      logger.error("findUserFromGroups getDialogs error:", error);
+      logger.error("findUserFromGroups iterDialogs error:", error);
     }
   };
 
   try {
-    await collectDialogs({});
-    await collectDialogs({ folderId: 1 });
+    await collectGroupIds({});
+    await collectGroupIds({ folder: 1 });
 
-    for (const dialog of dialogMap.values()) {
-      const entityRaw = (dialog as { entity?: { raw?: { _?: string } } }).entity;
-      const entityType = entityRaw?.raw?._;
-      // 只检查群组和超级群组
-      if (entityType === 'chat' || entityType === 'channel') {
-        try {
-          const participants = await client.getChatMembers(dialog.entity, {
-            limit: 200,
-          });
-          for (const participant of participants) {
-            if (Number((participant as { id?: number }).id) === userId) {
-              return participant;
-            }
+    for (const chatId of groupIds) {
+      try {
+        const participants = await client.getChatMembers(chatId, {
+          limit: 200,
+        });
+        for (const participant of participants) {
+          const uid = Number(participant?.user?.id);
+          if (uid === userId && participant.user) {
+            return participant.user as User;
           }
-        } catch (_e: unknown) {
-          // 跳过无法获取成员的群组
-          continue;
         }
+      } catch (_e: unknown) {
+        // 跳过无法获取成员的群组
+        continue;
       }
     }
   } catch (e: unknown) {

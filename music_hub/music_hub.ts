@@ -664,26 +664,32 @@ class MusicHubPlugin extends Plugin {
     return Boolean(a && b && a.id && b.id && Number(a.id) === Number(b.id));
   }
 
-  private async deleteQuietly(message?: MessageContext): Promise<void> {
+  private async deleteQuietly(message?: MessageContext | Message): Promise<void> {
     if (!message) return;
-    try {
-      await message.delete({ revoke: true });
-      return;
-    } catch (e: unknown) { logger.warn('[music_hub] delete message failed:', e) }
+    // Plain Message 没有 .delete；MessageContext 才有。先探测再调，避免 TypeError 噪音。
+    if (typeof (message as MessageContext).delete === "function") {
+      try {
+        await (message as MessageContext).delete({ revoke: true });
+        return;
+      } catch (e: unknown) {
+        logger.debug("[music_hub] MessageContext.delete failed:", e);
+      }
+    }
 
     try {
-      const client = (await getGlobalClient());
+      const client = await getGlobalClient();
       const id = Number(message.id);
-      const peer = message.chat?.id;
-      if (client && peer && Number.isFinite(id)) {
+      const peer =
+        (message as MessageContext).chat?.id ??
+        (message as Message).chat?.id ??
+        (message as { chatId?: number | string }).chatId;
+      if (client && peer != null && Number.isFinite(id)) {
         await client.deleteMessagesById(peer, [id], { revoke: true });
         return;
       }
-    } catch (e: unknown) { logger.warn('[music_hub] delete message by id failed:', e) }
-
-    try {
-      await message.delete();
-    } catch (e: unknown) { logger.warn('操作失败', e) }
+    } catch (e: unknown) {
+      logger.warn("[music_hub] delete message by id failed:", e);
+    }
   }
 
   private async sendTextMessage(

@@ -12,17 +12,67 @@ import { logger } from "@utils/logger";
 import { getErrorMessage } from "@utils/errorHelpers";
 import { htmlEscape } from "@utils/htmlEscape";
 
-async function getAllDialogs(client: any): Promise<any[]> {
-  const dialogMap = new Map<string, any>();
+/** mtcute 用 iterDialogs，没有 getDialogs。归一化为报告统计用的形状。 */
+async function getAllDialogs(client: {
+  iterDialogs: (params?: Record<string, unknown>) => AsyncIterable<{
+    peer?: {
+      id?: number | string;
+      type?: string;
+      chatType?: string;
+      isBot?: boolean;
+      isGroup?: boolean;
+    };
+  }>;
+}): Promise<Array<{
+  id: number;
+  isUser: boolean;
+  isGroup: boolean;
+  isChannel: boolean;
+  entity?: { bot?: boolean };
+}>> {
+  const dialogMap = new Map<number, {
+    id: number;
+    isUser: boolean;
+    isGroup: boolean;
+    isChannel: boolean;
+    entity?: { bot?: boolean };
+  }>();
 
-  const collectDialogs = async (params: Record<string, any>) => {
+  const collectDialogs = async (params?: { folder?: number }) => {
     try {
-      const dialogs = await client.getDialogs(params);
-      for (const dialog of dialogs || []) {
-        const key = `${dialog.id}`;
-        if (!dialogMap.has(key)) {
-          dialogMap.set(key, dialog);
+      for await (const dialog of client.iterDialogs(params ?? {})) {
+        const peer = dialog?.peer;
+        if (!peer || peer.id == null) continue;
+        const id = Number(peer.id);
+        if (!Number.isFinite(id) || dialogMap.has(id)) continue;
+
+        if (peer.type === "user") {
+          dialogMap.set(id, {
+            id,
+            isUser: true,
+            isGroup: false,
+            isChannel: false,
+            entity: { bot: !!peer.isBot },
+          });
+          continue;
         }
+
+        // Chat.type 恒为 "chat"，细分在 chatType
+        const chatType = peer.chatType || "";
+        const isChannel = chatType === "channel";
+        const isGroup =
+          chatType === "group" ||
+          chatType === "supergroup" ||
+          chatType === "gigagroup" ||
+          (!!peer.isGroup && !isChannel);
+        if (!isGroup && !isChannel) continue;
+
+        dialogMap.set(id, {
+          id,
+          isUser: false,
+          isGroup,
+          isChannel,
+        });
       }
     } catch (error: unknown) {
       logger.error("[AnnualReport] 获取对话列表失败:", error);
@@ -30,7 +80,7 @@ async function getAllDialogs(client: any): Promise<any[]> {
   };
 
   await collectDialogs({});
-  await collectDialogs({ folderId: 1 });
+  await collectDialogs({ folder: 1 });
 
   return Array.from(dialogMap.values());
 }
