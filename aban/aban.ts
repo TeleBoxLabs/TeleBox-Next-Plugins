@@ -669,13 +669,29 @@ async function resolveChannelInput(
   }
   if (group.accessHash) {
     return {
-    _: 'inputChannel' as const,
-    channelId: bigInt(group.id) as unknown as number,
-    accessHash: bigInt(group.accessHash) as unknown as tl.Long,
+      _: "inputChannel" as const,
+      channelId: bigInt(group.id) as unknown as number,
+      accessHash: bigInt(group.accessHash) as unknown as tl.Long,
     };
   }
-  // 兜底：让 teleproto 走自己的 entity cache / dialogs 解析
-  return await (client as unknown as ClientInternals).getInputEntity(group.id) as unknown as number | tl.TypeInputChannel;
+  // 兜底：mtcute resolvePeer（marked id 或 raw 均可；优先 -100 前缀）
+  try {
+    const marked = group.id > 0 ? Number(`-100${group.id}`) : group.id;
+    const peer = await client.resolvePeer(marked);
+    // inputPeerChannel / inputChannel 形状
+    const p = peer as { _: string; channelId?: number | bigint; accessHash?: tl.Long };
+    if (p && (p._ === "inputPeerChannel" || p._ === "inputChannel")) {
+      return {
+        _: "inputChannel",
+        channelId: p.channelId as number,
+        accessHash: p.accessHash as tl.Long,
+      };
+    }
+    return peer as unknown as tl.TypeInputChannel;
+  } catch (e: unknown) {
+    logger.warn(`[aban] resolveChannelInput fallback failed id=${group.id}`, e);
+    throw e;
+  }
 }
 
 /**
@@ -838,20 +854,119 @@ class PermissionManager {
 class GroupManager {
   private static cache = CacheManager.getInstance();
 
-  static async getAllManageableDialogs(client: TelegramClient): Promise<Array<{ id: number; isChannel: boolean; isGroup: boolean; title: string; entity?: { id?: number; accessHash?: string | number } }>> {
-    const dialogMap = new Map<number, { id: number; isChannel: boolean; isGroup: boolean; title: string; entity?: { id?: number; accessHash?: string | number } }>();
+  /**
+   * mtcute 没有 teleproto 的 client.getDialogs()；应使用 iterDialogs。
+   * Dialog 形状：dialog.peer (User|Chat)，无 isChannel/isGroup/entity 顶层字段。
+   */
+  static async getAllManageableDialogs(client: TelegramClient): Promise<Array<{
+    id: number;
+    isChannel: boolean;
+    isGroup: boolean;
+    title: string;
+    entity?: { id?: number; accessHash?: string | number; inputPeer?: unknown };
+  }>> {
+    const dialogMap = new Map<number, {
+      id: number;
+      isChannel: boolean;
+      isGroup: boolean;
+      title: string;
+      entity?: { id?: number; accessHash?: string | number; inputPeer?: unknown };
+    }>();
 
-    const collectDialogs = async (params: Record<string, unknown>) => {
-      const dialogs = await (client as unknown as ClientInternals).getDialogs(params);
-      for (const dialog of dialogs || []) {
-        if (dialog.isChannel || dialog.isGroup) {
-          dialogMap.set(Number(dialog.id), dialog as { id: number; isChannel: boolean; isGroup: boolean; title: string; entity?: { id?: number; accessHash?: string | number } });
+    const collectDialogs = async (params?: { archived?: "keep" | "exclude" | "only" }) => {
+      // Prefer public iterDialogs (async iterator). Fall back only if somehow present.
+      const iter = (client as { iterDialogs?: (p?: unknown) => AsyncIterable<unknown> }).iterDialogs;
+      if (typeof iter !== "function") {
+        throw new TypeError(
+          "client.iterDialogs is not a function (mtcute requires iterDialogs, not getDialogs)",
+        );
+      }
+      for await (const dialog of iter.call(client, params ?? {}) as AsyncIterable<{
+        peer?: {
+          id?: number | string;
+          type?: string;
+          title?: string;
+          accessHash?: string | number | null;
+          inputPeer?: unknown;
+        };
+      }>) {
+        const peer = dialog?.peer as {
+          id?: number | string;
+          type?: string;
+          chatType?: string;
+          isGroup?: boolean;
+          title?: string;
+          accessHash?: string | number | null;
+          inputPeer?: unknown;
+          raw?: { _?: string; id?: number | string; accessHash?: string | number | bigint };
+        } | undefined;
+        if (!peer || peer.id == null) continue;
+        // mtcute: User.type==="user"；Chat.type 恒 "chat"，细分在 peer.chatType
+        if (peer.type === "user" || peer.type === "bot") continue;
+
+        const rawUnderscore = peer.raw?._;
+        let chatType = peer.chatType || "";
+        if (!chatType && rawUnderscore) {
+          if (rawUnderscore === "chat" || rawUnderscore === "chatForbidden") chatType = "group";
+          else if (rawUnderscore === "channel" || rawUnderscore === "channelForbidden") chatType = "channel";
         }
+
+        const isBasicGroup = chatType === "group";
+        const isChannelLike =
+          chatType === "channel" ||
+          chatType === "supergroup" ||
+          chatType === "gigagroup";
+        if (!isBasicGroup && !isChannelLike) continue;
+
+        const markedId = Number(peer.id);
+        if (!Number.isFinite(markedId)) continue;
+
+        // InputChannel.channelId / DeleteChatUser.chatId 需要 raw 正数 id，不是 marked id
+        const rawTl = (peer as { raw?: { id?: number | string; channelId?: number | string; accessHash?: string | number | bigint } }).raw;
+        let rawId: number;
+        if (isChannelLike) {
+          // channel/supergroup: prefer TL channel id; else unmark -100…
+          const fromRaw = rawTl?.id != null ? Number(rawTl.id) : NaN;
+          if (Number.isFinite(fromRaw) && fromRaw > 0) {
+            rawId = fromRaw;
+          } else {
+            const s = String(markedId);
+            rawId = s.startsWith("-100") ? Number(s.slice(4)) : Math.abs(markedId);
+          }
+        } else {
+          // basic group: raw chat id positive
+          const fromRaw = rawTl?.id != null ? Number(rawTl.id) : NaN;
+          rawId = Number.isFinite(fromRaw) && fromRaw > 0 ? fromRaw : Math.abs(markedId);
+        }
+
+        const accessHash =
+          rawTl?.accessHash != null
+            ? (rawTl.accessHash as string | number)
+            : (peer as { accessHash?: string | number | null }).accessHash != null
+              ? ((peer as { accessHash: string | number }).accessHash as string | number)
+              : undefined;
+
+        dialogMap.set(markedId, {
+          id: markedId,
+          isChannel: isChannelLike,
+          isGroup: isBasicGroup || type === "supergroup" || type === "gigagroup",
+          title: peer.title || "Unknown",
+          entity: {
+            id: rawId,
+            accessHash,
+            inputPeer: peer.inputPeer,
+          },
+        });
       }
     };
 
-    await collectDialogs({});
-    await collectDialogs({ folderId: 1 });
+    // 主列表 + 归档（mtcute 用 archived: 'only'，不是 teleproto folderId: 1）
+    await collectDialogs({ archived: "exclude" });
+    try {
+      await collectDialogs({ archived: "only" });
+    } catch (e: unknown) {
+      logger.warn("[GroupManager] 归档会话枚举失败（可忽略）", e);
+    }
 
     return Array.from(dialogMap.values());
   }
@@ -859,56 +974,51 @@ class GroupManager {
   static async getManagedGroups(
     client: TelegramClient
   ): Promise<ManagedGroup[]> {
-    const cached = await this.cache.get("managed_groups_v3");
-    if (cached) return cached as ManagedGroup[];
+    // v4: mtcute iterDialogs 映射；旧 v3 可能缓存了空数组
+    const cached = await this.cache.get("managed_groups_v4");
+    if (cached && Array.isArray(cached) && (cached as unknown[]).length > 0) {
+      return cached as ManagedGroup[];
+    }
 
     const groups: ManagedGroup[] = [];
-    
+
     try {
       const dialogs = await this.getAllManageableDialogs(client);
-      
-      const checkPromises = dialogs.map(async (dialog: { isChannel?: boolean; isGroup?: boolean; entity?: { accessHash?: string | number; id?: string | number; [key: string]: unknown }; id?: number; title?: string }) => {
-        if (dialog.isChannel || dialog.isGroup) {
-          const hasPermission = await PermissionManager.checkAdminPermission(
-            client,
-            dialog.entity as ChatIdArg
-          );
-          
-          if (hasPermission) {
-            const isChannel = !(dialog.isGroup && !dialog.isChannel);
-            // 仅 channel 需要 accessHash，basic group 用裸 chatId
-            const rawHash = isChannel ? dialog.entity?.accessHash : undefined;
-            const accessHash = rawHash != null ? String(rawHash) : undefined;
-            // ⚠️ dialog.id 是 marked id（channel: -100xxxx，basic group: -xxx），
-            // 而 any.channelId / any.DeleteChatUser.chatId 需要 raw 正数 id。
-            // 这里必须用 dialog.entity.id（Channel/Chat 实体上的原始正数 id），否则服务端会
-            // 直接 CHANNEL_INVALID / PEER_ID_INVALID，导致批量 sb 全部失败。
-            const rawId = Number(dialog.entity?.id ?? dialog.id);
-            return {
-              id: rawId,
-              title: dialog.title || "Unknown",
-              kind: isChannel ? 'channel' as const : 'chat' as const,
-              accessHash,
-            };
-          }
-        }
-        return null;
-      });
-      
-      const results = await Promise.all(checkPromises);
-      for (const g of results) {
-        if (g !== null) groups.push(g as ManagedGroup);
+      logger.info(`[GroupManager] 枚举到 ${dialogs.length} 个群/频道会话`);
+
+      // 与 Classic 对齐：不再预检查管理员权限。
+      // 批量 sb/unsb 由各群实际 API 返回权限错误，避免 checkAdminPermission 误判导致「无管理群组」。
+      for (const dialog of dialogs) {
+        if (!(dialog.isChannel || dialog.isGroup)) continue;
+        const isChannel = !!dialog.isChannel;
+        const rawHash = isChannel ? dialog.entity?.accessHash : undefined;
+        const accessHash = rawHash != null ? String(rawHash) : undefined;
+        // entity.id = raw 正数 id（InputChannel.channelId / chatId）
+        const rawId = Number(dialog.entity?.id);
+        if (!Number.isFinite(rawId) || rawId === 0) continue;
+        groups.push({
+          id: rawId,
+          title: dialog.title || "Unknown",
+          kind: isChannel ? ("channel" as const) : ("chat" as const),
+          accessHash,
+        });
       }
-      
+
       try {
-        await this.cache.set("managed_groups_v3", groups as unknown as CacheEntry);
+        await this.cache.set("managed_groups_v4", groups as unknown as CacheEntry);
+        // 清掉旧空缓存 key，避免其它路径读到 v3 空列表
+        try {
+          await this.cache.set("managed_groups_v3", [] as unknown as CacheEntry);
+        } catch {
+          /* ignore */
+        }
       } catch (cacheError: unknown) {
         logger.error(`[GroupManager] 缓存群组失败: ${cacheError}`);
       }
     } catch (error: unknown) {
       logger.error(`[GroupManager] 获取群组失败: ${error}`);
     }
-    
+
     return groups;
   }
 
