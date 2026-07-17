@@ -642,8 +642,22 @@ class MusicHubPlugin extends Plugin {
 
   private rememberSessionMessage(session: SearchSession, message?: Message | MessageContext): void {
     if (!message) return;
-    session.message = message as MessageContext;
+    // Prefer keeping MessageContext (has .edit). Plain Message from sendText has no .edit.
+    if (typeof (message as MessageContext).edit === "function") {
+      session.message = message as MessageContext;
+    } else if (session.message && Number(session.message.id) === Number(message.id)) {
+      // Keep existing MessageContext handle when the edit returns a plain Message
+    } else {
+      session.message = message as MessageContext;
+    }
     if (message.id) session.messageId = Number(message.id);
+    const chatId =
+      (message as MessageContext).chat?.id ??
+      (message as any).chatId ??
+      (session.message as MessageContext | undefined)?.chat?.id;
+    if (chatId !== undefined && chatId !== null) {
+      (session as any).chatId = chatId;
+    }
   }
 
   private isSameMessage(a?: MessageContext, b?: MessageContext): boolean {
@@ -675,24 +689,68 @@ class MusicHubPlugin extends Plugin {
   private async sendTextMessage(
     sourceMsg: MessageContext,
     text: string,
-  ): Promise<Message | undefined> {
-    const client = (await getGlobalClient());
+  ): Promise<Message | MessageContext | undefined> {
+    // Prefer replyText so the result is MessageContext with .edit (sendText returns plain Message)
+    if (typeof sourceMsg.replyText === "function") {
+      try {
+        return await sourceMsg.replyText(html(text), { disableWebPreview: true });
+      } catch (e: unknown) {
+        logger.debug("[music_hub] replyText failed, fallback sendText:", e);
+      }
+    }
+    const client = await getGlobalClient();
     if (!client) return undefined;
-    return await client.sendText(sourceMsg.chat.id, text);
+    return await client.sendText(sourceMsg.chat.id, html(text), {
+      disableWebPreview: true,
+    } as any);
   }
 
   private async editOrReplaceMessage(
     sourceMsg: MessageContext,
-    targetMsg: MessageContext | undefined,
+    targetMsg: MessageContext | Message | undefined,
     text: string,
-  ): Promise<Message | undefined> {
-    if (targetMsg) {
+  ): Promise<Message | MessageContext | undefined> {
+    const client = await getGlobalClient();
+    const messageId = targetMsg?.id != null ? Number(targetMsg.id) : undefined;
+    const chatId =
+      (targetMsg as MessageContext | undefined)?.chat?.id ??
+      (targetMsg as any)?.chatId ??
+      sourceMsg.chat?.id;
+
+    // 1) Prefer MessageContext.edit when available
+    if (targetMsg && typeof (targetMsg as MessageContext).edit === "function") {
       try {
-        const edited = await targetMsg.edit({ text: html(text) });
+        const edited = await (targetMsg as MessageContext).edit({
+          text: html(text),
+          disableWebPreview: true,
+        });
         return edited || targetMsg;
       } catch (error: unknown) {
         if (isMessageNotModifiedError(error)) return targetMsg;
-        await this.deleteQuietly(targetMsg);
+        // fall through to client.editMessage — do NOT delete+resend on transient edit errors
+        logger.debug("[music_hub] MessageContext.edit failed, try editMessage:", error);
+      }
+    }
+
+    // 2) client.editMessage works for plain Message ids (sendText return value)
+    if (client && chatId != null && messageId != null && Number.isFinite(messageId)) {
+      try {
+        const edited = await client.editMessage({
+          chatId,
+          message: messageId,
+          text: html(text),
+          disableWebPreview: true,
+        });
+        // Preserve MessageContext handle if we still have one
+        if (targetMsg && typeof (targetMsg as MessageContext).edit === "function") {
+          return targetMsg;
+        }
+        return edited || targetMsg;
+      } catch (error: unknown) {
+        if (isMessageNotModifiedError(error)) return targetMsg;
+        logger.debug("[music_hub] editMessage failed, will send new:", error);
+        // Only as last resort send a new status message — never delete the old one
+        // (delete+resend floods the chat and loses reply context).
       }
     }
 
@@ -1172,7 +1230,7 @@ class MusicHubPlugin extends Plugin {
   }
 
   private async checkAllSources(msg: MessageContext): Promise<void> {
-    let statusMessage: Message | undefined = await this.editOrReplaceCommandMessage(
+    let statusMessage: Message | MessageContext | undefined = await this.editOrReplaceCommandMessage(
       msg,
       `🔍 <b>开始测活</b> ${codeTag(MUSIC_SOURCES.length)} 个音乐源...`
     );
@@ -1182,7 +1240,7 @@ class MusicHubPlugin extends Plugin {
       statusUpdateQueue = statusUpdateQueue
         .catch((e) => logger.debug('[music_hub] statusUpdateQueue error:', e))
         .then(async () => {
-          const updated = await this.editOrReplaceMessage(msg, statusMessage as MtcuteMessageContext | undefined, text);
+          const updated = await this.editOrReplaceMessage(msg, statusMessage, text);
           if (updated) statusMessage = updated;
         })
         .catch((e) => logger.debug('[music_hub] editOrReplaceMessage error:', e));
