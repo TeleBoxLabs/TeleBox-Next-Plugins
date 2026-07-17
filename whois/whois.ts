@@ -145,7 +145,8 @@ class WhoisPlugin extends Plugin {
     
     if (!client) {
       await msg.edit({
-        text: html("❌ <b>客户端未初始化</b>")
+        text: html("❌ <b>客户端未初始化</b>"),
+        linkPreview: false
       });
       return;
     }
@@ -160,8 +161,9 @@ class WhoisPlugin extends Plugin {
       // 明确请求帮助时才显示
       if (sub === "help" || sub === "h") {
         await msg.edit({ 
-          text: html(help_text)
-        });
+          text: html(help_text),
+        linkPreview: false
+      });
         return;
       }
       
@@ -212,8 +214,9 @@ class WhoisPlugin extends Plugin {
       // 无参数时显示错误提示
       if (!domain) {
         await msg.edit({
-          text: html(help_text)
-        });
+          text: html(help_text),
+        linkPreview: false
+      });
         return;
       }
       
@@ -221,8 +224,9 @@ class WhoisPlugin extends Plugin {
       const domainRegex = /^[a-zA-Z0-9][a-zA-Z0-9-]{0,61}[a-zA-Z0-9]?(?:\.[a-zA-Z]{2,})+$/;
       if (!domainRegex.test(domain)) {
         await msg.edit({
-          text: html(`❌ <b>域名格式无效</b>\n\n<b>输入的域名：</b> <code>${htmlEscape(domain)}</code>\n\n💡 请输入有效的域名，例如：\n• example.com\n• google.com\n• github.io`)
-        });
+          text: html(`❌ <b>域名格式无效</b>\n\n<b>输入的域名：</b> <code>${htmlEscape(domain)}</code>\n\n💡 请输入有效的域名，例如：\n• example.com\n• google.com\n• github.io`),
+        linkPreview: false
+      });
         return;
       }
       
@@ -235,7 +239,8 @@ class WhoisPlugin extends Plugin {
       
       // 渐进式状态反馈
       await msg.edit({
-        text: html(`🔍 <b>正在查询域名信息...</b>\n\n<b>域名：</b> <code>${htmlEscape(domain)}</code>`)
+        text: html(`🔍 <b>正在查询域名信息...</b>\n\n<b>域名：</b> <code>${htmlEscape(domain)}</code>`),
+        linkPreview: false
       });
       
       // namebeta.com 返回 SSE 流式响应，需获取原始文本并解析
@@ -253,8 +258,9 @@ class WhoisPlugin extends Plugin {
         
         if (!whoisData) {
           await msg.edit({
-            text: html(`❌ <b>查询失败</b>\n\n<b>域名：</b> <code>${htmlEscape(domain)}</code>\n\n💡 可能的原因：\n• 域名不存在或未注册\n• 域名格式不正确\n• WHOIS 信息不可用\n\n📖 请检查域名拼写是否正确`)
-          });
+            text: html(`❌ <b>查询失败</b>\n\n<b>域名：</b> <code>${htmlEscape(domain)}</code>\n\n💡 可能的原因：\n• 域名不存在或未注册\n• 域名格式不正确\n• WHOIS 信息不可用\n\n📖 请检查域名拼写是否正确`),
+        linkPreview: false
+      });
           return;
         }
         
@@ -305,8 +311,9 @@ class WhoisPlugin extends Plugin {
         
       } else {
         await msg.edit({
-          text: html(`❌ <b>API 服务器错误</b>\n\n<b>状态码：</b> ${apiResponse.status}\n\n💡 请稍后重试`)
-        });
+          text: html(`❌ <b>API 服务器错误</b>\n\n<b>状态码：</b> ${apiResponse.status}\n\n💡 请稍后重试`),
+        linkPreview: false
+      });
       }
       
     } catch (error: unknown) {
@@ -333,7 +340,8 @@ class WhoisPlugin extends Plugin {
       }
       
       await msg.edit({
-        text: html(errorMessage)
+        text: html(errorMessage),
+        linkPreview: false
       });
     }
   }
@@ -437,28 +445,32 @@ class WhoisPlugin extends Plugin {
     }
     
     await msg.edit({
-      text: html(formattedOutput)
-    });
+      text: html(formattedOutput),
+        linkPreview: false
+      });
   }
   
   private async handleBatchQuery(msg: MessageContext, domains: string[]) {
     if (domains.length === 0) {
       await msg.edit({
-        text: html(`❌ <b>请提供要查询的域名</b>\n\n💡 使用示例：<code>${mainPrefix}whois batch google.com github.com</code>`)
+        text: html(`❌ <b>请提供要查询的域名</b>\n\n💡 使用示例：<code>${mainPrefix}whois batch google.com github.com</code>`),
+        linkPreview: false
       });
       return;
     }
     
     if (domains.length > 10) {
       await msg.edit({
-        text: html(`❌ <b>批量查询限制</b>\n\n每次最多查询 10 个域名，您提供了 ${domains.length} 个`)
+        text: html(`❌ <b>批量查询限制</b>\n\n每次最多查询 10 个域名，您提供了 ${domains.length} 个`),
+        linkPreview: false
       });
       return;
     }
     
     await msg.edit({
-      text: html(`🔍 <b>批量查询中...</b>\n\n<b>域名数量：</b> ${domains.length}`)
-    });
+      text: html(`🔍 <b>批量查询中...</b>\n\n<b>域名数量：</b> ${domains.length}`),
+        linkPreview: false
+      });
     
     const results: string[] = [];
     let successCount = 0;
@@ -469,7 +481,8 @@ class WhoisPlugin extends Plugin {
       
       // 更新进度
       await msg.edit({
-        text: html(`🔍 <b>批量查询中...</b>\n\n<b>进度：</b> ${i + 1}/${domains.length}\n<b>当前域名：</b> <code>${htmlEscape(domain)}</code>`)
+        text: html(`🔍 <b>批量查询中...</b>\n\n<b>进度：</b> ${i + 1}/${domains.length}\n<b>当前域名：</b> <code>${htmlEscape(domain)}</code>`),
+        linkPreview: false
       });
       
       try {
@@ -531,14 +544,16 @@ class WhoisPlugin extends Plugin {
     output += `\n\n💡 使用 <code>${mainPrefix}whois history</code> 查看详细信息`;
     
     await msg.edit({
-      text: html(output)
-    });
+      text: html(output),
+        linkPreview: false
+      });
   }
   
   private async showHistory(msg: MessageContext) {
     if (!this.db) {
       await msg.edit({
-        text: html("❌ <b>数据库未初始化</b>")
+        text: html("❌ <b>数据库未初始化</b>"),
+        linkPreview: false
       });
       return;
     }
@@ -546,7 +561,8 @@ class WhoisPlugin extends Plugin {
     const history = this.db.data.history;
     if (history.length === 0) {
       await msg.edit({
-        text: html(`📭 <b>暂无查询历史</b>\n\n💡 使用 <code>${mainPrefix}whois &lt;域名&gt;</code> 开始查询`)
+        text: html(`📭 <b>暂无查询历史</b>\n\n💡 使用 <code>${mainPrefix}whois &lt;域名&gt;</code> 开始查询`),
+        linkPreview: false
       });
       return;
     }
@@ -581,14 +597,16 @@ class WhoisPlugin extends Plugin {
     output += `💡 使用 <code>${mainPrefix}whois clear</code> 清除历史记录`;
     
     await msg.edit({
-      text: html(output)
-    });
+      text: html(output),
+        linkPreview: false
+      });
   }
   
   private async clearHistory(msg: MessageContext) {
     if (!this.db) {
       await msg.edit({
-        text: html("❌ <b>数据库未初始化</b>")
+        text: html("❌ <b>数据库未初始化</b>"),
+        linkPreview: false
       });
       return;
     }
@@ -598,7 +616,8 @@ class WhoisPlugin extends Plugin {
     
     if (historyCount === 0 && cacheCount === 0) {
       await msg.edit({
-        text: html("📭 <b>没有需要清除的记录</b>")
+        text: html("📭 <b>没有需要清除的记录</b>"),
+        linkPreview: false
       });
       return;
     }
@@ -609,8 +628,9 @@ class WhoisPlugin extends Plugin {
     await this.db.write();
     
     await msg.edit({
-      text: html(`🗑️ <b>清除完成</b>\n\n• 清除历史记录：${historyCount} 条\n• 清除缓存：${cacheCount} 个域名`)
-    });
+      text: html(`🗑️ <b>清除完成</b>\n\n• 清除历史记录：${historyCount} 条\n• 清除缓存：${cacheCount} 个域名`),
+        linkPreview: false
+      });
   }
 
 }
