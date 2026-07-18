@@ -1236,26 +1236,21 @@ function customEmojiThumbs(doc: any): any[] {
 
 async function downloadCustomEmojiAnimatedPreferred(client: any, doc: any): Promise<Buffer | undefined> {
   const t0 = Date.now();
-  const id = String(doc?.id ?? doc?.documentId ?? doc?.document_id ?? "");
-  const mime = doc?.mimeType || doc?.mime_type || "";
-  const thumbs = customEmojiThumbs(doc);
-  logger.warn("quote emoji source scan", id, "docMime", mime, "thumbs", thumbs.map((t: any) => `${t?.className || t?.constructor?.name || typeof t}:${t?.type || ""}:${t?.size || ""}`).join(","), "mode", "skip-thumbs-use-original");
+  // doc is already a mtcute Sticker (FileLocation subclass) from getCustomEmojis
+  const id = String(doc?.raw?.id ?? doc?.id ?? doc?.documentId ?? doc?.document_id ?? "");
+  const mime = doc?.mimeType || doc?.mime_type || doc?.raw?.mimeType || "";
+  logger.warn("quote emoji source scan", id, "docMime", mime, "mode", "mtcute-sticker-filelocation");
   const td = Date.now();
-  // Build proper InputDocumentFileLocation from raw TL document
-  const location: any = { _: 'inputDocumentFileLocation', id: doc.id, accessHash: doc.accessHash, fileReference: doc.fileReference, thumbSize: '' };
-  const downloadParams: any = {};
-  if (doc.dcId != null) downloadParams.dcId = doc.dcId;
-  const original = await downloadFileData(client, location, downloadParams).catch((e) => {
-    logger.debug('[quote] downloadMediaToBuffer failed:', e);
+  try {
+    const data = await client.downloadAsBuffer(doc);
+    const original = data && data.length > 0 ? Buffer.from(data) : undefined;
+    logger.warn("quote emoji source selected", id, "original", original?.length || 0, bufferKind(original), "downloadMs", quoteMs(td), "totalMs", quoteMs(t0));
+    return original;
+  } catch (e) {
+    logger.debug('[quote] downloadAsBuffer failed:', e);
+    logger.warn("quote emoji source selected", id, "original", 0, "none", "downloadMs", quoteMs(td), "totalMs", quoteMs(t0));
     return undefined;
-  });
-  logger.warn("quote emoji source selected", id, "original", original?.length || 0, bufferKind(original), "downloadMs", quoteMs(td), "totalMs", quoteMs(t0));
-  return original;
-}
-
-async function downloadFileData(client: any, location: any, params?: any): Promise<Buffer | undefined> {
-  const data = await client.downloadAsBuffer(location, params);
-  return data && data.length > 0 ? Buffer.from(data) : undefined;
+  }
 }
 function collectAnimatedMediaMessages(messages: any[]): any[] {
   const out: any[] = [];
@@ -1431,10 +1426,9 @@ async function getCustomEmojiDocuments(client: any, ids: string[]): Promise<any[
   const unique = Array.from(new Set(ids.filter(Boolean)));
   if (!client || unique.length === 0) return [];
   try {
-    return await client.call({
-      _: 'messages.getCustomEmojiDocuments',
-      document_id: unique.map((id) => BigInt(id)),
-    });
+    // Use mtcute high-level API; returns (Sticker|null)[] which are FileLocation
+    const stickers = await client.getCustomEmojis(unique.map((id) => BigInt(id)));
+    return (stickers || []).filter(Boolean);
   } catch (err: unknown) {
     logger.warn("quote custom emoji fetch failed", getErrorMessage(err));
     return [];
@@ -1458,16 +1452,16 @@ async function hydrateCustomEmojiBuffers(client: any, messages: any[]): Promise<
   messages.forEach(scanMessage);
   const docs = await getCustomEmojiDocuments(client, ids);
   await runWithConcurrency(docs, EMOJI_FETCH_CONCURRENCY, async (doc: any) => {
-    const id = String(doc.id ?? doc.documentId ?? doc.document_id ?? "");
+    const id = String(doc?.raw?.id ?? doc?.id ?? doc?.documentId ?? doc?.document_id ?? "");
     if (!id) return;
     let rawBuffer = await downloadCustomEmojiAnimatedPreferred(client, doc);
     const wasAnimated = looksLikeAnimatedEmoji(rawBuffer);
     if (isAnimatedRasterBuffer(rawBuffer)) animatedCustomEmojiCache.set(id, rawBuffer);
     const buffer = await normalizeCustomEmojiBuffer(rawBuffer);
     customEmojiCache.set(id, buffer);
-    logger.warn("quote custom emoji loaded", id, buffer ? buffer.length : 0, wasAnimated ? "animated-converted" : "static", "source", isGifBuffer(rawBuffer) ? "gif" : isWebmBuffer(rawBuffer) ? "webm" : "other", "mime", doc.mimeType || doc.mime_type || "", "thumbs", doc.thumbs?.length || 0, "videoThumbs", doc.videoThumbs?.length || doc.video_thumbs?.length || 0);
+    logger.warn("quote custom emoji loaded", id, buffer ? buffer.length : 0, wasAnimated ? "animated-converted" : "static", "source", isGifBuffer(rawBuffer) ? "gif" : isWebmBuffer(rawBuffer) ? "webm" : "other", "mime", doc.mimeType || doc.mime_type || doc?.raw?.mimeType || "", "thumbs", doc.thumbs?.length || 0, "videoThumbs", doc.videoThumbs?.length || doc.video_thumbs?.length || 0);
   });
-  const loadedDocIds = new Set(docs.map((doc: any) => String(doc.id ?? doc.documentId ?? doc.document_id ?? "")).filter(Boolean));
+  const loadedDocIds = new Set(docs.map((doc: any) => String(doc?.raw?.id ?? doc?.id ?? doc?.documentId ?? doc?.document_id ?? "")).filter(Boolean));
   ids.forEach((id) => {
     if (!loadedDocIds.has(id)) logger.warn("quote custom emoji document missing", id);
     else if (!customEmojiCache.get(id)) logger.warn("quote custom emoji buffer missing", id);
