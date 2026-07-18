@@ -52,7 +52,15 @@ async function downloadCustomEmojiBuffer(client: any, emojiId: string): Promise<
       customEmojiCache.set(emojiId, undefined);
       return undefined;
     }
-    const data = await client.downloadAsBuffer(doc);
+    // Raw TL document can't be passed to downloadAsBuffer; build InputDocumentFileLocation
+    const location = {
+      _: 'inputDocumentFileLocation',
+      id: doc.id,
+      accessHash: doc.accessHash,
+      fileReference: doc.fileReference,
+      thumbSize: '',
+    };
+    const data = await client.downloadAsBuffer(location, { dcId: doc.dcId });
     const buffer = Buffer.from(data);
     if (Buffer.isBuffer(buffer) && buffer.length > 0) {
       customEmojiCache.set(emojiId, buffer);

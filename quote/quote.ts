@@ -1241,12 +1241,21 @@ async function downloadCustomEmojiAnimatedPreferred(client: any, doc: any): Prom
   const thumbs = customEmojiThumbs(doc);
   logger.warn("quote emoji source scan", id, "docMime", mime, "thumbs", thumbs.map((t: any) => `${t?.className || t?.constructor?.name || typeof t}:${t?.type || ""}:${t?.size || ""}`).join(","), "mode", "skip-thumbs-use-original");
   const td = Date.now();
-  const original = await downloadMediaToBuffer(client, doc).catch((e) => {
+  // Build proper InputDocumentFileLocation from raw TL document
+  const location: any = { _: 'inputDocumentFileLocation', id: doc.id, accessHash: doc.accessHash, fileReference: doc.fileReference, thumbSize: '' };
+  const downloadParams: any = {};
+  if (doc.dcId != null) downloadParams.dcId = doc.dcId;
+  const original = await downloadFileData(client, location, downloadParams).catch((e) => {
     logger.debug('[quote] downloadMediaToBuffer failed:', e);
     return undefined;
   });
   logger.warn("quote emoji source selected", id, "original", original?.length || 0, bufferKind(original), "downloadMs", quoteMs(td), "totalMs", quoteMs(t0));
   return original;
+}
+
+async function downloadFileData(client: any, location: any, params?: any): Promise<Buffer | undefined> {
+  const data = await client.downloadAsBuffer(location, params);
+  return data && data.length > 0 ? Buffer.from(data) : undefined;
 }
 function collectAnimatedMediaMessages(messages: any[]): any[] {
   const out: any[] = [];
