@@ -643,7 +643,7 @@ function emojiStatusIdFromEntity(entity: unknown): string | undefined {
     return id ? String(id) : undefined;
   }
   const statusObj = status as Record<string, unknown>;
-  const documentId = statusObj.documentId ?? statusObj.document_id ?? statusObj.customEmojiId ?? statusObj.custom_emoji_id ?? statusObj.id;
+  const documentId = statusObj.emoji ?? statusObj.documentId ?? statusObj.document_id ?? statusObj.customEmojiId ?? statusObj.custom_emoji_id ?? statusObj.id;
   if (!documentId) return undefined;
   return String(documentId);
 }
@@ -750,7 +750,7 @@ function messageText(msg: MessageContext): string {
 function convertEntities(msg: MessageContext): any[] {
   // Merge message entities with caption entities to capture formatting
   // on media message captions (which some API layers expose separately).
-  const msgEntities = (msg.entities as unknown as Array<{ className?: string; constructor?: { name?: string }; offset?: number; length?: number; language?: string; url?: string; userId?: number; documentId?: string | number; document_id?: string | number }>) ?? [];
+  const msgEntities = (msg.entities as unknown as Array<{ className?: string; constructor?: { name?: string }; offset?: number; length?: number; language?: string; url?: string; userId?: number; documentId?: string | number; document_id?: string | number; emojiId?: string | number }>) ?? [];
   const raw = msg.raw as unknown as Record<string, unknown> | undefined;
   const capEntities = (raw?.captionEntities ?? raw?.caption_entities ?? []) as typeof msgEntities;
   const all = msgEntities.length > 0 || capEntities.length > 0 ? [...msgEntities, ...capEntities] : msgEntities;
@@ -775,7 +775,7 @@ function convertEntities(msg: MessageContext): any[] {
     if (name.includes("Url")) return { type: "url", offset, length };
     if (name.includes("Email")) return { type: "email", offset, length };
     if (name.includes("Phone")) return { type: "phone_number", offset, length };
-    if (name.includes("CustomEmoji")) return { type: "custom_emoji", offset, length, custom_emoji_id: String(e.documentId ?? e.document_id ?? "") };
+    if (name.includes("CustomEmoji")) return { type: "custom_emoji", offset, length, custom_emoji_id: String(e.emojiId ?? e.documentId ?? e.document_id ?? "") };
     return { type: "text", offset, length };
   }).filter((e) => e.length > 0 && e.type !== "text");
 }
@@ -805,31 +805,27 @@ async function downloadEntityAvatar(client: any, entity: any): Promise<Buffer | 
   const key = stableEntityKey(entity);
   if (key && avatarCache.has(key)) return avatarCache.get(key);
 
-  const tryDownload = async (isBig: boolean): Promise<Buffer | undefined> => {
-    try {
-      const peer = typeof entity === "object" && entity._ ? entity : await client.resolvePeer(entity).catch((e: unknown) => { logger.warn("[quote] resolvePeer failed", getErrorMessage(e)); return null; });
-      if (!peer) return undefined;
-      const fullUser = await client.call({ _: 'users.getFullUser', id: peer }).catch((e: unknown) => { logger.warn("[quote] getFullUser failed", getErrorMessage(e)); return null; });
-      const photo = fullUser?.full_user?.photo;
-      if (!photo || photo._ !== 'userProfilePhoto') return undefined;
-      const location = {
-        _: 'inputPeerPhotoFileLocation' as const,
-        big: isBig,
-        peer: peer,
-        photo_id: photo.photo_id,
-      };
-      const buffer = await client.downloadAsBuffer(location).catch((e: unknown) => { logger.warn("[quote] downloadAsBuffer failed", getErrorMessage(e)); return null; });
-      return Buffer.isBuffer(buffer) && buffer.length > 0 ? buffer : undefined;
-    } catch (err: unknown) {
-      logger.warn(`quote avatar ${isBig ? "big" : "small"} download failed`, getErrorMessage(err));
+  try {
+    const photos = await client.getProfilePhotos(entity, { limit: 1 });
+    const photo = photos?.[0];
+    if (!photo) {
+      if (key) avatarCache.set(key, undefined);
       return undefined;
     }
-  };
-
-  const [small, big] = await Promise.all([tryDownload(false), tryDownload(true)]);
-  const normalized = small ? await normalizeAvatarBuffer(small) : big ? await normalizeAvatarBuffer(big) : undefined;
-  if (key) avatarCache.set(key, normalized);
-  return normalized;
+    const data = await client.downloadAsBuffer(photo);
+    const buffer = Buffer.from(data);
+    if (!(Buffer.isBuffer(buffer) && buffer.length > 0)) {
+      if (key) avatarCache.set(key, undefined);
+      return undefined;
+    }
+    const normalized = await normalizeAvatarBuffer(buffer);
+    if (key) avatarCache.set(key, normalized);
+    return normalized;
+  } catch (err: unknown) {
+    logger.warn("quote avatar download failed", getErrorMessage(err));
+    if (key) avatarCache.set(key, undefined);
+    return undefined;
+  }
 }
 
 async function downloadSenderAvatar(msg: MessageContext, entity?: any): Promise<Buffer | undefined> {
