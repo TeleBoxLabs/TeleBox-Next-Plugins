@@ -338,6 +338,7 @@ type QuoteArgs = {
   backgroundColor: string;
   emojiBrand: string;
   emojiSuffix: string;
+  fabricateText?: string;
 };
 
 type QuoteUser = {
@@ -495,6 +496,11 @@ function parseArgs(text: string): QuoteArgs {
       out.count = Math.max(-MAX_QUOTE_MESSAGES, Math.min(MAX_QUOTE_MESSAGES, n));
       continue;
     }
+
+    // Not a known flag → part of fabricate text (造谣模式)
+    // collect all remaining tokens as the custom message text
+    out.fabricateText = args.slice(i).join(" ");
+    break;
   }
 
   out.emojiSuffix = `${QUOTE_EMOJIS}${EMOJI_SUFFIXES[Math.floor(Math.random() * EMOJI_SUFFIXES.length)]}💜`;
@@ -716,18 +722,41 @@ async function senderEntity(msg: MessageContext): Promise<unknown | undefined> {
   return entity;
 }
 
+function longishToString(value: unknown): string | undefined {
+  if (value == null || value === "") return undefined;
+  try {
+    if (typeof value === "object" && value !== null) {
+      const o = value as any;
+      if (typeof o.toString === "function") {
+        const s = o.toString();
+        // Long.toString() is decimal; reject default Object string
+        if (s && s !== "[object Object]") return s;
+      }
+      if (o.value != null) return String(o.value);
+      // JSON Long {low,high,unsigned}
+      if (typeof o.low === "number" && typeof o.high === "number") {
+        return Long.fromBits(o.low, o.high, !!o.unsigned).toString();
+      }
+    }
+    const s = String(value);
+    return s && s !== "undefined" && s !== "null" ? s : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function emojiStatusIdFromEntity(entity: unknown): string | undefined {
   if (!entity || typeof entity !== "object") return undefined;
   const obj = entity as Record<string, unknown>;
   const status = obj.emojiStatus ?? obj.emoji_status;
   if (!status) return undefined;
-  // mtcute EmojiStatus: getter `.emoji` returns Long/document id
+  // mtcute EmojiStatus: getter `.emoji` returns Long/document id (also works for collectible)
   if (typeof status === "object" && status !== null) {
     const statusObj = status as Record<string, unknown>;
-    // Prefer high-level getter if present (mtcute EmojiStatus.emoji)
     try {
       const viaGetter = (status as { emoji?: unknown }).emoji;
-      if (viaGetter != null && viaGetter !== "") return String(viaGetter);
+      const s = longishToString(viaGetter);
+      if (s) return s;
     } catch { /* ignore */ }
     const documentId =
       statusObj.emoji ??
@@ -735,14 +764,15 @@ function emojiStatusIdFromEntity(entity: unknown): string | undefined {
       statusObj.document_id ??
       statusObj.customEmojiId ??
       statusObj.custom_emoji_id ??
-      statusObj.id ??
+      // collectible pattern is NOT the status emoji — skip patternDocumentId as primary
       (statusObj.raw as Record<string, unknown> | undefined)?.documentId ??
-      (statusObj.raw as Record<string, unknown> | undefined)?.document_id;
-    if (documentId != null && documentId !== "") return String(documentId);
-    return undefined;
+      (statusObj.raw as Record<string, unknown> | undefined)?.document_id ??
+      // last resort: plain id (but not collectibleId)
+      (statusObj.id != null && statusObj.collectibleId == null && statusObj.collectible_id == null ? statusObj.id : undefined);
+    return longishToString(documentId);
   }
-  // Primitive value (bigint, number, string)
-  return status ? String((status as any)?.value ?? status) : undefined;
+  // Primitive value (bigint, number, string) or Long-like
+  return longishToString((status as any)?.value ?? status);
 }
 
 /** Loose document attribute shape used when reading media metadata for quotes. */
@@ -844,35 +874,65 @@ function messageText(msg: MessageContext): string {
   return mediaFallbackText(msg);
 }
 
+function entityKind(e: any): string {
+  // mtcute MessageEntity uses .kind / .params.kind; TL uses ._; gramjs uses className.
+  const kind = e?.kind ?? e?.params?.kind ?? e?.type ?? e?._ ?? e?.className ?? e?.constructor?.name ?? "";
+  return String(kind);
+}
+
+function customEmojiIdFromEntity(e: any): string | undefined {
+  if (!e) return undefined;
+  const candidates = [
+    e.emojiId,
+    e.params?.emojiId,
+    e.custom_emoji_id,
+    e.customEmojiId,
+    e.documentId,
+    e.document_id,
+    e.raw?.documentId,
+    e.raw?.document_id,
+  ];
+  for (const c of candidates) {
+    if (c == null || c === "") continue;
+    const id = typeof c === "object" && c !== null && "toString" in c ? String((c as any).toString?.() ?? c) : String(c);
+    if (id && id !== "undefined" && id !== "null" && id !== "0") return id;
+  }
+  return undefined;
+}
+
 function convertEntities(msg: MessageContext): any[] {
   // Merge message entities with caption entities to capture formatting
   // on media message captions (which some API layers expose separately).
-  const msgEntities = (msg.entities as unknown as Array<{ className?: string; constructor?: { name?: string }; offset?: number; length?: number; language?: string; url?: string; userId?: number; documentId?: string | number; document_id?: string | number; emojiId?: string | number }>) ?? [];
+  const msgEntities = (msg.entities as any[]) ?? [];
   const raw = msg.raw as unknown as Record<string, unknown> | undefined;
-  const capEntities = (raw?.captionEntities ?? raw?.caption_entities ?? []) as typeof msgEntities;
+  const capEntities = (raw?.captionEntities ?? raw?.caption_entities ?? []) as any[];
   const all = msgEntities.length > 0 || capEntities.length > 0 ? [...msgEntities, ...capEntities] : msgEntities;
   return all.map((e) => {
-    const name = e.className || e.constructor?.name || "";
-    const offset = e.offset ?? 0;
-    const length = e.length ?? 0;
-    if (name.includes("Bold")) return { type: "bold", offset, length };
-    if (name.includes("Italic")) return { type: "italic", offset, length };
-    if (name.includes("Underline")) return { type: "underline", offset, length };
-    if (name.includes("Strike")) return { type: "strikethrough", offset, length };
-    if (name.includes("Blockquote")) return { type: "blockquote", offset, length };
-    if (name.includes("Spoiler")) return { type: "spoiler", offset, length };
-    if (name.includes("Code")) return { type: "code", offset, length };
-    if (name.includes("Pre")) return { type: "pre", offset, length, language: e.language };
-    if (name.includes("TextUrl")) return { type: "text_link", offset, length, url: e.url };
-    if (name.includes("MentionName")) return { type: "text_mention", offset, length, user: e.userId };
-    if (name.includes("Mention")) return { type: "mention", offset, length };
-    if (name.includes("Hashtag")) return { type: "hashtag", offset, length };
-    if (name.includes("Cashtag")) return { type: "cashtag", offset, length };
-    if (name.includes("BotCommand")) return { type: "bot_command", offset, length };
-    if (name.includes("Url")) return { type: "url", offset, length };
-    if (name.includes("Email")) return { type: "email", offset, length };
-    if (name.includes("Phone")) return { type: "phone_number", offset, length };
-    if (name.includes("CustomEmoji")) return { type: "custom_emoji", offset, length, custom_emoji_id: String(e.emojiId ?? e.documentId ?? e.document_id ?? "") };
+    const kind = entityKind(e);
+    const offset = e.offset ?? e.raw?.offset ?? 0;
+    const length = e.length ?? e.raw?.length ?? 0;
+    if (kind === "bold" || kind.includes("Bold")) return { type: "bold", offset, length };
+    if (kind === "italic" || kind.includes("Italic")) return { type: "italic", offset, length };
+    if (kind === "underline" || kind.includes("Underline")) return { type: "underline", offset, length };
+    if (kind === "strikethrough" || kind.includes("Strike")) return { type: "strikethrough", offset, length };
+    if (kind === "blockquote" || kind.includes("Blockquote")) return { type: "blockquote", offset, length };
+    if (kind === "spoiler" || kind.includes("Spoiler")) return { type: "spoiler", offset, length };
+    if (kind === "code" || kind.includes("Code")) return { type: "code", offset, length };
+    if (kind === "pre" || kind.includes("Pre")) return { type: "pre", offset, length, language: e.language ?? e.params?.language };
+    if (kind === "text_link" || kind.includes("TextUrl")) return { type: "text_link", offset, length, url: e.url ?? e.params?.url };
+    if (kind === "text_mention" || kind.includes("MentionName")) return { type: "text_mention", offset, length, user: e.userId ?? e.params?.userId };
+    if (kind === "mention" || kind.includes("Mention")) return { type: "mention", offset, length };
+    if (kind === "hashtag" || kind.includes("Hashtag")) return { type: "hashtag", offset, length };
+    if (kind === "cashtag" || kind.includes("Cashtag")) return { type: "cashtag", offset, length };
+    if (kind === "bot_command" || kind.includes("BotCommand")) return { type: "bot_command", offset, length };
+    if (kind === "url" || kind.includes("Url")) return { type: "url", offset, length };
+    if (kind === "email" || kind.includes("Email")) return { type: "email", offset, length };
+    if (kind === "phone_number" || kind.includes("Phone")) return { type: "phone_number", offset, length };
+    // mtcute: kind === "emoji"; TL/gramjs: CustomEmoji / messageEntityCustomEmoji
+    if (kind === "emoji" || kind === "custom_emoji" || kind === "customEmoji" || kind.includes("CustomEmoji")) {
+      const id = customEmojiIdFromEntity(e);
+      return { type: "custom_emoji", offset, length, custom_emoji_id: id || "" };
+    }
     return { type: "text", offset, length };
   }).filter((e) => e.length > 0 && e.type !== "text");
 }
@@ -1355,7 +1415,6 @@ async function downloadCustomEmojiAnimatedPreferred(client: any, doc: any): Prom
     return undefined;
   }
 }
-
 function collectAnimatedMediaMessages(messages: any[]): any[] {
   const out: any[] = [];
   const scan = (message: any) => {
@@ -1527,40 +1586,58 @@ async function normalizeCustomEmojiBuffer(buffer: Buffer | undefined): Promise<B
 }
 
 async function getCustomEmojiDocuments(client: any, ids: string[]): Promise<Array<{ id: string; doc: any }>> {
-  const unique = Array.from(new Set(ids.map(String).filter(Boolean)));
+  const unique = Array.from(new Set(ids.map(String).filter((id) => id && id !== "0" && id !== "undefined")));
   if (!client || unique.length === 0) return [];
   const out: Array<{ id: string; doc: any }> = [];
+  const have = new Set<string>();
 
-  // 1) High-level API first (returns Sticker FileLocations, may be null for edge types)
+  // Prefer raw TL first: getCustomEmojis filters non-sticker docs to null and loses index alignment.
   try {
-    const stickers = await client.getCustomEmojis(unique.map((id) => toTlLong(id)));
-    for (let i = 0; i < unique.length; i++) {
-      if (stickers?.[i]) out.push({ id: unique[i], doc: stickers[i] });
-    }
-    if (out.length === unique.length) return out;
-  } catch (err: unknown) {
-    logger.warn("quote getCustomEmojis failed, falling back to raw TL", getErrorMessage(err));
-  }
-
-  // 2) Raw TL — always returns document objects when IDs are valid
-  try {
-    const missing = unique.filter((id) => !out.some((x) => x.id === id));
-    if (missing.length === 0) return out;
-    const docs = await client.call({
-      _: "messages.getCustomEmojiDocuments",
-      documentId: missing.map((id) => toTlLong(id)),
-    });
+    const docs = await withTimeout(
+      client.call({
+        _: "messages.getCustomEmojiDocuments",
+        documentId: unique.map((id) => toTlLong(id)),
+      }),
+      QUOTE_RPC_TIMEOUT_MS,
+      "getCustomEmojiDocuments.raw",
+    );
     const list = Array.isArray(docs) ? docs : [];
-    for (let i = 0; i < missing.length; i++) {
+    for (let i = 0; i < unique.length; i++) {
       const d = list[i];
-      if (d && d._ === "document") {
-        out.push({ id: missing[i], doc: d });
+      if (d && (d._ === "document" || d.mimeType || d.mime_type || d.accessHash || d.access_hash)) {
+        out.push({ id: unique[i], doc: d });
+        have.add(unique[i]);
       } else {
-        logger.warn("quote custom emoji raw empty", missing[i], d?._, d?.id?.toString?.());
+        logger.warn("quote custom emoji raw empty", unique[i], d?._, d?.id?.toString?.());
       }
     }
   } catch (err: unknown) {
     logger.warn("quote custom emoji raw fetch failed", getErrorMessage(err));
+  }
+
+  // Fallback: high-level getCustomEmojis for any still missing (returns Sticker/FileLocation)
+  const missing = unique.filter((id) => !have.has(id));
+  if (missing.length > 0) {
+    try {
+      const stickers = (await withTimeout(
+        client.getCustomEmojis(missing.map((id) => toTlLong(id))),
+        QUOTE_RPC_TIMEOUT_MS,
+        "getCustomEmojiDocuments.hl",
+      )) as any[] | null | undefined;
+      for (let i = 0; i < missing.length; i++) {
+        const sticker = stickers?.[i];
+        if (sticker) {
+          out.push({ id: missing[i], doc: sticker });
+          have.add(missing[i]);
+        }
+      }
+    } catch (err: unknown) {
+      logger.warn("quote getCustomEmojis failed", getErrorMessage(err));
+    }
+  }
+
+  for (const id of unique) {
+    if (!have.has(id)) logger.warn("quote custom emoji document missing", id);
   }
   return out;
 }
@@ -1597,19 +1674,24 @@ async function hydrateCustomEmojiBuffers(client: any, messages: any[]): Promise<
   const docs = await getCustomEmojiDocuments(client, ids);
   await runWithConcurrency(docs, EMOJI_FETCH_CONCURRENCY, async (entry: { id: string; doc: any }) => {
     const id = entry.id;
-    let rawBuffer = await downloadCustomEmojiAnimatedPreferred(client, entry.doc);
-    const wasAnimated = looksLikeAnimatedEmoji(rawBuffer);
-    if (isAnimatedRasterBuffer(rawBuffer)) animatedCustomEmojiCache.set(id, rawBuffer);
-    const buffer = await normalizeCustomEmojiBuffer(rawBuffer);
-    customEmojiCache.set(id, buffer);
-    logger.warn(
-      "quote custom emoji loaded",
-      id,
-      buffer ? buffer.length : 0,
-      wasAnimated ? "animated-converted" : "static",
-      "source",
-      isGifBuffer(rawBuffer) ? "gif" : isWebmBuffer(rawBuffer) ? "webm" : "other",
-    );
+    try {
+      let rawBuffer = await downloadCustomEmojiAnimatedPreferred(client, entry.doc);
+      const wasAnimated = looksLikeAnimatedEmoji(rawBuffer);
+      if (isAnimatedRasterBuffer(rawBuffer)) animatedCustomEmojiCache.set(id, rawBuffer);
+      const buffer = await normalizeCustomEmojiBuffer(rawBuffer);
+      customEmojiCache.set(id, buffer);
+      logger.warn(
+        "quote custom emoji loaded",
+        id,
+        buffer ? buffer.length : 0,
+        wasAnimated ? "animated-converted" : "static",
+        "source",
+        isGifBuffer(rawBuffer) ? "gif" : isWebmBuffer(rawBuffer) ? "webm" : bufferKind(rawBuffer),
+      );
+    } catch (err: unknown) {
+      logger.warn("quote custom emoji load failed", id, getErrorMessage(err));
+      customEmojiCache.set(id, undefined);
+    }
   });
 
   const applyEntity = (entity: any) => {
@@ -1721,6 +1803,11 @@ async function toQuoteMessage(msg: MessageContext, args: QuoteArgs): Promise<any
   const fwd = await forwardedSource(msg);
   const effectiveEntity = fwd?.entity ?? entity;
   const effectiveName = fwd?.name || displayName(effectiveEntity);
+  // 造谣模式：保留发送者信息，替换消息文本为自定义内容
+  const text = args.fabricateText || messageText(msg);
+  const entities = args.fabricateText ? [] as any[] : convertEntities(msg);
+  const caption = args.fabricateText ? text : messageText(msg);
+  const caption_entities = args.fabricateText ? [] as any[] : convertEntities(msg);
   const [avatarBuffer, media, replyMessage] = await Promise.all([
     fwd && !fwd.anonymous && fwd.entity
       ? downloadEntityAvatar(await getGlobalClient().catch((e) => { logger.warn("[quote] emojiStatus: getGlobalClient failed", getErrorMessage(e)); return null; }), fwd.entity)
@@ -1729,18 +1816,15 @@ async function toQuoteMessage(msg: MessageContext, args: QuoteArgs): Promise<any
     replyPreview(msg, args.reply, args),
     Promise.resolve(undefined),
   ]);
+  // Buffer is filled later by hydrateCustomEmojiBuffers — only attach the id here.
   const emojiId = emojiStatusIdFromEntity(effectiveEntity);
-  let emojiBuffer: Buffer | undefined;
-  if (emojiId) {
-    emojiBuffer = customEmojiCache.get(emojiId);
-    logger.warn("quote sender emoji status", emojiId, emojiBuffer ? emojiBuffer.length : 0);
-  }
+  if (emojiId) logger.warn("quote sender emoji status id", emojiId);
   const user: QuoteUser = {
     id: fwd?.peer ? peerIdNumber(fwd.peer) : senderIdNumber(msg),
     name: args.hidden ? false : effectiveName,
     first_name: args.hidden ? false : effectiveName,
     photo: {},
-    emoji_status: args.hidden || fwd?.anonymous ? undefined : emojiStatusPayload(effectiveEntity, emojiBuffer),
+    emoji_status: args.hidden || fwd?.anonymous ? undefined : emojiStatusPayload(effectiveEntity),
   };
   return {
     chatId: fwd?.peer ? peerIdNumber(fwd.peer) : senderIdNumber(msg),
@@ -1750,10 +1834,10 @@ async function toQuoteMessage(msg: MessageContext, args: QuoteArgs): Promise<any
     avatar: !args.hidden && !!avatarBuffer,
     avatarBuffer: args.hidden ? undefined : avatarBuffer,
     avatarScale: args.scale,
-    text: messageText(msg),
-    entities: convertEntities(msg),
-    caption: messageText(msg),
-    caption_entities: convertEntities(msg),
+    text,
+    entities,
+    caption,
+    caption_entities,
     replyMessage,
     forward: fwd ? { label: fwd.name || "Forwarded message" } : undefined,
     mediaBuffer: media.mediaBuffer,
@@ -1765,7 +1849,7 @@ async function toQuoteMessage(msg: MessageContext, args: QuoteArgs): Promise<any
     voice: media.voice,
     document: media.document,
     audio: media.audio,
-    emoji_status: args.hidden || fwd?.anonymous ? undefined : emojiStatusPayload(effectiveEntity, emojiBuffer),
+    emoji_status: args.hidden || fwd?.anonymous ? undefined : emojiStatusPayload(effectiveEntity),
     date: messageDate(msg),
     via_bot: msg.viaBot?.id,
     senderTag: fwd ? undefined : await senderRankInChat(null, msg, entity),
@@ -1777,6 +1861,10 @@ async function collectMessages(msg: MessageContext, args: QuoteArgs): Promise<an
     logger.debug('[quote] collectMessages safeGetReplyMessage failed:', e);
     return undefined;
   });
+  // 造谣模式：只取回复的那一条消息，不管 count 参数
+  if (args.fabricateText) {
+    return reply ? [reply] : [msg];
+  }
   const count = args.count || 1;
 
   const peer = msg.chat;
@@ -1942,6 +2030,7 @@ export class QuotePlugin {
           const sendOptions: any = {
             type: "sticker",
             file: output,
+            fileName: "quote.webp",
             fileMime: "image/webp",
             alt: args.emojiSuffix || "💜",
             replyTo: replyTargetId,

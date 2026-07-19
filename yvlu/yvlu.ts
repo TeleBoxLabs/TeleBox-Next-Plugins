@@ -46,60 +46,82 @@ const timeout = 60000; // 超时
 const PYTHON_PATH = "python3"; // Python 路径，可修改为 venv 中的路径，如："/path/to/venv/bin/python"
 
 const customEmojiCache = new Map<string, Buffer | undefined>();
+// hoisted for early custom-emoji download helpers
+const YVLU_EMOJI_TIMEOUT_MS = 20000;
 
 async function downloadCustomEmojiBuffer(client: any, emojiId: string): Promise<Buffer | undefined> {
   if (!client || !emojiId) return undefined;
-  if (customEmojiCache.has(emojiId)) return customEmojiCache.get(emojiId);
+  const key = String(emojiId);
+  if (customEmojiCache.has(key)) return customEmojiCache.get(key);
   try {
-    // 1) High-level API
+    // Prefer raw TL first — getCustomEmojis drops non-sticker docs as null
+    let doc: any = null;
     try {
-      const stickers = await client.getCustomEmojis([toTlLong(emojiId)]);
-      const sticker = stickers?.[0];
-      if (sticker) {
-        const data = await client.downloadAsBuffer(sticker);
-        const buffer = Buffer.from(data);
-        if (Buffer.isBuffer(buffer) && buffer.length > 0) {
-          customEmojiCache.set(emojiId, buffer);
-          return buffer;
-        }
-      }
+      const docs = await withTimeout(
+        client.call({
+          _: "messages.getCustomEmojiDocuments",
+          documentId: [toTlLong(key)],
+        }),
+        YVLU_EMOJI_TIMEOUT_MS,
+        "yvlu.getCustomEmojiDocuments",
+      );
+      doc = Array.isArray(docs) ? docs[0] : null;
     } catch (e: unknown) {
-      logger.warn("getCustomEmojis 下载失败，回退 raw TL", e);
+      logger.warn("yvlu raw getCustomEmojiDocuments 失败", e);
     }
-    // 2) Raw TL + Long ids (BigInt 会被 mtcute 当成空 document)
-    const docs = await client.call({
-      _: "messages.getCustomEmojiDocuments",
-      documentId: [toTlLong(emojiId)],
-    });
-    const doc = Array.isArray(docs) ? docs[0] : null;
-    if (!doc || doc._ !== "document") {
-      customEmojiCache.set(emojiId, undefined);
+
+    if (!doc || (doc._ && doc._ !== "document" && !doc.accessHash && !doc.access_hash)) {
+      try {
+        const stickers = await withTimeout(
+          client.getCustomEmojis([toTlLong(key)]),
+          YVLU_EMOJI_TIMEOUT_MS,
+          "yvlu.getCustomEmojis",
+        );
+        const sticker = stickers?.[0];
+        if (sticker) {
+          const data = await client.downloadAsBuffer(sticker);
+          const buffer = Buffer.from(data);
+          if (Buffer.isBuffer(buffer) && buffer.length > 0) {
+            customEmojiCache.set(key, buffer);
+            return buffer;
+          }
+        }
+      } catch (e: unknown) {
+        logger.warn("getCustomEmojis 下载失败", e);
+      }
+      customEmojiCache.set(key, undefined);
       return undefined;
     }
+
     const location = {
       _: "inputDocumentFileLocation",
       id: toTlLong(doc.id),
-      accessHash: toTlLong(doc.accessHash),
-      fileReference: doc.fileReference,
+      accessHash: toTlLong(doc.accessHash ?? doc.access_hash),
+      fileReference: doc.fileReference ?? doc.file_reference,
       thumbSize: "",
     };
     let data: any;
     try {
       const { FileLocation } = await import("@mtcute/core");
-      data = await client.downloadAsBuffer(new FileLocation(location, Number(doc.size) || undefined, doc.dcId));
+      data = await client.downloadAsBuffer(
+        new FileLocation(location, Number(doc.size) || undefined, doc.dcId ?? doc.dc_id),
+      );
     } catch {
-      data = await client.downloadAsBuffer(location as any, { dcId: doc.dcId, fileSize: doc.size } as any);
+      data = await client.downloadAsBuffer(location as any, {
+        dcId: doc.dcId ?? doc.dc_id,
+        fileSize: doc.size,
+      } as any);
     }
     const buffer = Buffer.from(data);
     if (Buffer.isBuffer(buffer) && buffer.length > 0) {
-      customEmojiCache.set(emojiId, buffer);
+      customEmojiCache.set(key, buffer);
       return buffer;
     }
-    customEmojiCache.set(emojiId, undefined);
+    customEmojiCache.set(key, undefined);
     return undefined;
   } catch (e: unknown) {
     logger.warn("下载自定义表情失败", e);
-    customEmojiCache.set(emojiId, undefined);
+    customEmojiCache.set(key, undefined);
     return undefined;
   }
 }
@@ -455,12 +477,20 @@ function convertEntities(entities: any[]): any[] {
 
   return entities.map((entity: any) => {
     const baseEntity = {
-      offset: entity.offset,
-      length: entity.length,
+      offset: entity.offset ?? entity.raw?.offset ?? 0,
+      length: entity.length ?? entity.raw?.length ?? 0,
     };
 
-    // Use type property (mtcute) or _ (TL) or className (gramjs)
-    const entityType = entity.type || entity._ || entity.className;
+    // mtcute MessageEntity: .kind / .params.kind
+    // TL raw: ._ ; gramjs: className / type
+    const entityType =
+      entity.kind ||
+      entity.params?.kind ||
+      entity.type ||
+      entity._ ||
+      entity.className ||
+      entity.constructor?.name ||
+      "";
 
     switch (entityType) {
       case "bold":
@@ -480,16 +510,29 @@ function convertEntities(entities: any[]): any[] {
         return { ...baseEntity, type: "code" };
       case "pre":
       case "messageEntityPre":
-        return { ...baseEntity, type: "pre" };
+        return { ...baseEntity, type: "pre", language: entity.language ?? entity.params?.language };
+      case "emoji": // mtcute custom emoji kind
+      case "custom_emoji":
       case "customEmoji":
       case "messageEntityCustomEmoji": {
-        const documentId = (entity as unknown as { documentId: { value?: number | bigint } | string }).documentId;
+        const idRaw =
+          entity.emojiId ??
+          entity.params?.emojiId ??
+          entity.custom_emoji_id ??
+          entity.customEmojiId ??
+          entity.documentId ??
+          entity.document_id ??
+          entity.raw?.documentId ??
+          entity.raw?.document_id;
         const custom_emoji_id =
-          documentId?.value?.toString() || documentId?.toString() || "";
+          idRaw?.value?.toString?.() ||
+          (typeof idRaw?.toString === "function" ? idRaw.toString() : "") ||
+          (idRaw != null ? String(idRaw) : "") ||
+          "";
         return {
           ...baseEntity,
           type: "custom_emoji",
-          custom_emoji_id,
+          custom_emoji_id: custom_emoji_id === "[object Object]" ? "" : custom_emoji_id,
         };
       }
       case "url":
@@ -501,7 +544,7 @@ function convertEntities(entities: any[]): any[] {
         return {
           ...baseEntity,
           type: "text_link",
-          url: (entity as unknown as { url?: string }).url || "",
+          url: entity.url || entity.params?.url || "",
         };
       case "mention":
       case "messageEntityMention":
@@ -512,7 +555,7 @@ function convertEntities(entities: any[]): any[] {
         return {
           ...baseEntity,
           type: "text_mention",
-          user: { id: (entity as unknown as { userId?: number | string }).userId },
+          user: { id: entity.userId ?? entity.params?.userId },
         };
       case "hashtag":
       case "messageEntityHashtag":
@@ -534,10 +577,19 @@ function convertEntities(entities: any[]): any[] {
       case "spoiler":
       case "messageEntitySpoiler":
         return { ...baseEntity, type: "spoiler" };
+      case "blockquote":
+      case "messageEntityBlockquote":
+        return { ...baseEntity, type: "blockquote" };
       default:
+        // className fallback for gramjs-like objects
+        if (String(entityType).includes("CustomEmoji")) {
+          const idRaw = entity.documentId ?? entity.document_id ?? entity.emojiId;
+          const custom_emoji_id = idRaw?.toString?.() || String(idRaw || "");
+          return { ...baseEntity, type: "custom_emoji", custom_emoji_id };
+        }
         return baseEntity;
     }
-  });
+  }).filter((e: any) => e && e.length > 0 && e.type);
 }
 
 // ======== quote-api 高级字段辅助函数 (mtcute) ========
@@ -923,9 +975,26 @@ class YvluPlugin extends Plugin {
               senderLike.firstName || senderLike.title || "";
             const lastName = senderLike.lastName || "";
             const username = senderLike.username || "";
-            const emojiStatus =
-              ((sender as unknown as { emojiStatus?: { documentId?: any; emoji?: any } })?.emojiStatus?.documentId
-                ?? (sender as unknown as { emojiStatus?: { documentId?: any; emoji?: any } })?.emojiStatus?.emoji)?.toString() || null;
+            const emojiStatusObj = (sender as any)?.emojiStatus ?? (sender as any)?.emoji_status;
+            let emojiStatus: string | null = null;
+            if (emojiStatusObj != null) {
+              try {
+                const via =
+                  emojiStatusObj?.emoji ??
+                  emojiStatusObj?.documentId ??
+                  emojiStatusObj?.document_id ??
+                  emojiStatusObj?.raw?.documentId ??
+                  emojiStatusObj?.raw?.document_id;
+                if (via != null && via !== "") {
+                  const s = typeof via?.toString === "function" ? via.toString() : String(via);
+                  if (s && s !== "[object Object]") emojiStatus = s;
+                } else if (typeof emojiStatusObj !== "object") {
+                  emojiStatus = String(emojiStatusObj);
+                }
+              } catch {
+                emojiStatus = null;
+              }
+            }
 
             // 生成用户唯一标识符：优先使用 userId，如果没有则使用名称的 hashCode
             const currentUserIdentifier =
@@ -1330,6 +1399,7 @@ class YvluPlugin extends Plugin {
                 await client.sendMedia(msg.chat.id, {
                   type: "sticker",
                   file: webmPath,
+                  fileName: "yvlu.webm",
                   fileMime: "video/webm",
                   alt: "📝",
                 }, { replyTo: replied?.id });
@@ -1351,6 +1421,7 @@ class YvluPlugin extends Plugin {
                   await client.sendMedia(msg.chat.id, {
                     type: "sticker",
                     file: outputPath,
+                    fileName: "yvlu.webp",
                     fileMime: "image/webp",
                     alt: "📝",
                   }, { replyTo: replied?.id });
