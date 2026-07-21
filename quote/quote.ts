@@ -1235,9 +1235,12 @@ function looksLikeAnimatedEmoji(buffer: Buffer | undefined): boolean {
   if (!buffer || buffer.length < 16) return false;
   const head = buffer.subarray(0, 64).toString("utf8");
   if (isAnimatedRasterBuffer(buffer)) return true;
-  if (head.includes("WEBM")) return true;
+  // WebM (EBML header + "webm" string): 0x1A 0x45 0xDF 0xA3 + "webm" in first 64 bytes
+  if (buffer[0] === 0x1a && buffer[1] === 0x45 && buffer[2] === 0xdf && buffer[3] === 0xa3 && head.includes("webm")) return true;
+  // Lottie JSON: starts with {"v" or has "layers"
   if (head.trimStart().startsWith("{\"v\"") || head.includes("\"layers\"")) return true;
-  if (buffer[0] === 0x1f && buffer[1] === 0x8b) return true; // .tgs gzip/lottie
+  // .tgs gzip/lottie
+  if (buffer[0] === 0x1f && buffer[1] === 0x8b) return true;
   return false;
 }
 
