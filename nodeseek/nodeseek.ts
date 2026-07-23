@@ -19,7 +19,7 @@
  *   多触发点抽签的折中方案。
  */
 
-import { Plugin } from "@utils/pluginBase";
+import { Plugin, type PanelSettingsAdapter, type PanelSettingField, type PanelFieldType } from "@utils/pluginBase";
 import type { MessageContext } from "@mtcute/dispatcher";
 import type { TelegramClient } from "@mtcute/node";
 import { thtml } from "@mtcute/html-parser";
@@ -354,5 +354,53 @@ class NodeSeekPlugin extends Plugin {
     },
   };
 }
+
+
+  // Panel Settings Adapter
+  panelAdapter: PanelSettingsAdapter = {
+    id: "nodeseek",
+    title: "NodeSeek 通知",
+    description: "NodeSeek 论坛通知配置",
+    category: "插件配置",
+    icon: "📢",
+    getSchema: (): PanelSettingField[] => [
+      {
+            "key": "cookie",
+            "label": "Cookie",
+            "type": "password",
+            "secret": true
+      },
+      {
+            "key": "chatId",
+            "label": "推送 Chat ID",
+            "type": "string"
+      },
+      {
+            "key": "interval",
+            "label": "检查间隔 (分钟)",
+            "type": "number",
+            "min": 1,
+            "max": 1440,
+            "default": 5
+      },
+      {
+            "key": "maxItems",
+            "label": "最大推送条数",
+            "type": "number",
+            "min": 1,
+            "max": 20,
+            "default": 5
+      }
+],
+    getValues: async (): Promise<Record<string, unknown>> => {
+      const db = await JSONFilePreset<any>(path.join(createDirectoryInAssets("nodeseek"), "config.json"), {} as any);
+      return db.data as Record<string, unknown>;
+    },
+    setValues: async (patch: Record<string, unknown>): Promise<void> => {
+      const db = await JSONFilePreset<any>(path.join(createDirectoryInAssets("nodeseek"), "config.json"), {} as any);
+      Object.assign(db.data, patch);
+      await db.write();
+    },
+  };
 
 export default new NodeSeekPlugin();

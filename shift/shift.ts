@@ -1,4 +1,4 @@
-import { Plugin } from "@utils/pluginBase";
+import { Plugin, type PanelSettingsAdapter, type PanelSettingField, type PanelFieldType } from "@utils/pluginBase";
 import path from "path";
 import Database from "better-sqlite3";
 import { createDirectoryInAssets } from "@utils/pathHelpers";
@@ -2361,5 +2361,38 @@ async function handleIncomingMessage(
     logger.error(`[SHIFT] 处理消息时出错: ${error}`);
   }
 }
+
+
+  // Panel Settings Adapter
+  panelAdapter: PanelSettingsAdapter = {
+    id: "shift",
+    title: "排班",
+    description: "排班管理配置",
+    category: "插件配置",
+    icon: "📋",
+    getSchema: (): PanelSettingField[] => [
+      {
+            "key": "timezone",
+            "label": "时区",
+            "type": "string",
+            "default": "Asia/Shanghai"
+      },
+      {
+            "key": "reminderTime",
+            "label": "提醒时间",
+            "type": "string",
+            "default": "09:00"
+      }
+],
+    getValues: async (): Promise<Record<string, unknown>> => {
+      const db = await JSONFilePreset<any>(path.join(createDirectoryInAssets("shift"), "config.json"), {} as any);
+      return db.data as Record<string, unknown>;
+    },
+    setValues: async (patch: Record<string, unknown>): Promise<void> => {
+      const db = await JSONFilePreset<any>(path.join(createDirectoryInAssets("shift"), "config.json"), {} as any);
+      Object.assign(db.data, patch);
+      await db.write();
+    },
+  };
 
 export default new ShiftPlugin();

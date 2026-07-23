@@ -1,5 +1,5 @@
 
-import { Plugin } from "@utils/pluginBase";
+import { Plugin, type PanelSettingsAdapter, type PanelSettingField, type PanelFieldType } from "@utils/pluginBase";
 import type { MessageContext } from "@mtcute/dispatcher";
 import { thtml as html } from "@mtcute/html-parser";
 import { getPrefixes } from "@utils/pluginManager";
@@ -415,5 +415,48 @@ class GitManagerPlugin extends Plugin {
     await sendLongMessage(msg, report);
   }
 }
+
+
+  // Panel Settings Adapter
+  panelAdapter: PanelSettingsAdapter = {
+    id: "git_PR",
+    title: "Git PR 管理",
+    description: "GitHub/GitLab PR 管理配置",
+    category: "插件配置",
+    icon: "🔀",
+    getSchema: (): PanelSettingField[] => [
+      {
+            "key": "token",
+            "label": "Access Token",
+            "type": "password",
+            "secret": true
+      },
+      {
+            "key": "baseUrl",
+            "label": "Git 实例地址",
+            "type": "string",
+            "default": "https://api.github.com"
+      },
+      {
+            "key": "defaultOwner",
+            "label": "默认仓库所有者",
+            "type": "string"
+      },
+      {
+            "key": "defaultRepo",
+            "label": "默认仓库名",
+            "type": "string"
+      }
+],
+    getValues: async (): Promise<Record<string, unknown>> => {
+      const db = await JSONFilePreset<any>(path.join(createDirectoryInAssets("git_PR"), "config.json"), DEFAULT_CONFIG);
+      return db.data as Record<string, unknown>;
+    },
+    setValues: async (patch: Record<string, unknown>): Promise<void> => {
+      const db = await JSONFilePreset<any>(path.join(createDirectoryInAssets("git_PR"), "config.json"), DEFAULT_CONFIG);
+      Object.assign(db.data, patch);
+      await db.write();
+    },
+  };
 
 export default new GitManagerPlugin();

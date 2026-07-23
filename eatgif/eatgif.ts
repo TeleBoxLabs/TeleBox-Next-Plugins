@@ -1,4 +1,4 @@
-import { Plugin } from "@utils/pluginBase";
+import { Plugin, type PanelSettingsAdapter, type PanelSettingField, type PanelFieldType } from "@utils/pluginBase";
 import type { MessageContext } from "@mtcute/dispatcher";
 import { thtml as html } from "@mtcute/html-parser";
 import { getGlobalClient } from "@utils/runtimeManager";
@@ -427,5 +427,64 @@ class EatGifPlugin extends Plugin {
   }
 
 }
+
+
+  // Panel Settings Adapter
+  panelAdapter: PanelSettingsAdapter = {
+    id: "eatgif",
+    title: "吃 GIF",
+    description: "吃 GIF 动图配置",
+    category: "插件配置",
+    icon: "🎬",
+    getSchema: (): PanelSettingField[] => [
+      {
+            "key": "x",
+            "label": "X 坐标偏移",
+            "type": "number",
+            "min": -100,
+            "max": 100,
+            "default": 0
+      },
+      {
+            "key": "y",
+            "label": "Y 坐标偏移",
+            "type": "number",
+            "min": -100,
+            "max": 100,
+            "default": 0
+      },
+      {
+            "key": "mask",
+            "label": "遮罩形状",
+            "type": "string",
+            "default": "circle"
+      },
+      {
+            "key": "rotate",
+            "label": "旋转角度",
+            "type": "number",
+            "min": -360,
+            "max": 360,
+            "default": 0
+      },
+      {
+            "key": "brightness",
+            "label": "亮度",
+            "type": "number",
+            "min": 0,
+            "max": 200,
+            "default": 100
+      }
+],
+    getValues: async (): Promise<Record<string, unknown>> => {
+      const db = await JSONFilePreset<RoleConfig>(path.join(createDirectoryInAssets("eatgif"), "config.json"), {} as any);
+      return db.data as Record<string, unknown>;
+    },
+    setValues: async (patch: Record<string, unknown>): Promise<void> => {
+      const db = await JSONFilePreset<RoleConfig>(path.join(createDirectoryInAssets("eatgif"), "config.json"), {} as any);
+      Object.assign(db.data, patch);
+      await db.write();
+    },
+  };
 
 export default new EatGifPlugin();

@@ -4,7 +4,7 @@ import {
 import { logger } from "@utils/logger";
 import type { MtcuteMessageContext } from "@utils/mtcuteTypes";
 import { getErrorMessage } from "@utils/errorHelpers";
-import { Plugin } from "@utils/pluginBase";
+import { Plugin, type PanelSettingsAdapter, type PanelSettingField, type PanelFieldType } from "@utils/pluginBase";
 import type { MessageContext } from "@mtcute/dispatcher";
 import { thtml as html } from "@mtcute/html-parser";
 import { createDirectoryInAssets } from "@utils/pathHelpers";
@@ -1310,5 +1310,40 @@ class AcronPlugin extends Plugin {
     },
   };
 }
+
+
+  // Panel Settings Adapter
+  panelAdapter: PanelSettingsAdapter = {
+    id: "acron",
+    title: "定时任务",
+    description: "ACRON 定时任务配置",
+    category: "插件配置",
+    icon: "⏰",
+    getSchema: (): PanelSettingField[] => [
+      {
+            "key": "timezone",
+            "label": "时区",
+            "type": "string",
+            "default": "Asia/Shanghai"
+      },
+      {
+            "key": "maxRetries",
+            "label": "最大重试次数",
+            "type": "number",
+            "min": 0,
+            "max": 10,
+            "default": 3
+      }
+],
+    getValues: async (): Promise<Record<string, unknown>> => {
+      const db = await JSONFilePreset<any>(path.join(createDirectoryInAssets("acron"), "config.json"), {} as any);
+      return db.data as Record<string, unknown>;
+    },
+    setValues: async (patch: Record<string, unknown>): Promise<void> => {
+      const db = await JSONFilePreset<any>(path.join(createDirectoryInAssets("acron"), "config.json"), {} as any);
+      Object.assign(db.data, patch);
+      await db.write();
+    },
+  };
 
 export default new AcronPlugin();

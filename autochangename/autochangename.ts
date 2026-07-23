@@ -1,6 +1,6 @@
 /*自动昵称更新插件 v3*/
 
-import { Plugin } from "@utils/pluginBase";
+import { Plugin, type PanelSettingsAdapter, type PanelSettingField, type PanelFieldType } from "@utils/pluginBase";
 import { getGlobalClient } from "@utils/runtimeManager";
 import { getPrefixes } from "@utils/pluginManager";
 import { createDirectoryInAssets } from "@utils/pathHelpers";
@@ -1692,5 +1692,51 @@ export const __test__ = {
   applyTextStyle: nameManager.applyTextStyle.bind(nameManager),
   generateNewName: nameManager.generateNewName.bind(nameManager)
 };
+
+
+  // Panel Settings Adapter
+  panelAdapter: PanelSettingsAdapter = {
+    id: "autochangename",
+    title: "自动改名",
+    description: "自动更改群名称配置",
+    category: "插件配置",
+    icon: "✏️",
+    getSchema: (): PanelSettingField[] => [
+      {
+            "key": "enabled",
+            "label": "启用",
+            "type": "boolean"
+      },
+      {
+            "key": "interval",
+            "label": "间隔 (分钟)",
+            "type": "number",
+            "min": 60,
+            "max": 43200,
+            "default": 1440
+      },
+      {
+            "key": "format",
+            "label": "名称格式",
+            "type": "string",
+            "default": "{time} - {name}"
+      },
+      {
+            "key": "timezone",
+            "label": "时区",
+            "type": "string",
+            "default": "Asia/Shanghai"
+      }
+],
+    getValues: async (): Promise<Record<string, unknown>> => {
+      const db = await JSONFilePreset<any>(path.join(createDirectoryInAssets("autochangename"), "config.json"), {} as any);
+      return db.data as Record<string, unknown>;
+    },
+    setValues: async (patch: Record<string, unknown>): Promise<void> => {
+      const db = await JSONFilePreset<any>(path.join(createDirectoryInAssets("autochangename"), "config.json"), {} as any);
+      Object.assign(db.data, patch);
+      await db.write();
+    },
+  };
 
 export default plugin;

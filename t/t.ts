@@ -1,4 +1,4 @@
-import { Plugin } from "@utils/pluginBase";
+import { Plugin, type PanelSettingsAdapter, type PanelSettingField, type PanelFieldType } from "@utils/pluginBase";
 import { getPrefixes } from "@utils/pluginManager";
 import type { MessageContext } from "@mtcute/dispatcher";
 import { getGlobalClient } from "@utils/runtimeManager";
@@ -422,5 +422,42 @@ class TTSPlugin extends Plugin {
 `;
   cmdHandlers = { t: tts, ts: ttsSet, tk: setApiKey };
 }
+
+
+  // Panel Settings Adapter
+  panelAdapter: PanelSettingsAdapter = {
+    id: "t",
+    title: "TTS 语音",
+    description: "TTS 语音合成配置",
+    category: "插件配置",
+    icon: "🔊",
+    getSchema: (): PanelSettingField[] => [
+      {
+            "key": "apiKey",
+            "label": "API 密钥",
+            "type": "password",
+            "secret": true
+      },
+      {
+            "key": "defaultRole",
+            "label": "默认角色",
+            "type": "string"
+      },
+      {
+            "key": "defaultRoleId",
+            "label": "默认角色 ID",
+            "type": "string"
+      }
+],
+    getValues: async (): Promise<Record<string, unknown>> => {
+      const db = await JSONFilePreset<UserConfig>(path.join(createDirectoryInAssets("t"), "config.json"), {} as any);
+      return db.data as Record<string, unknown>;
+    },
+    setValues: async (patch: Record<string, unknown>): Promise<void> => {
+      const db = await JSONFilePreset<UserConfig>(path.join(createDirectoryInAssets("t"), "config.json"), {} as any);
+      Object.assign(db.data, patch);
+      await db.write();
+    },
+  };
 
 export default new TTSPlugin();

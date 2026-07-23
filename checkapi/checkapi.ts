@@ -1,4 +1,4 @@
-import { Plugin } from "@utils/pluginBase"; import { getPrefixes } from "@utils/pluginManager"; import type { MessageContext } from "@mtcute/dispatcher"; import * as fs from "fs/promises"; import path from "path"; import axios from "axios"; import { createDirectoryInAssets } from "@utils/pathHelpers"; import { getErrorMessage } from "@utils/errorHelpers"; import { thtml as html } from "@mtcute/html-parser"; import { htmlEscape } from "@utils/htmlEscape";
+import { Plugin, type PanelSettingsAdapter, type PanelSettingField, type PanelFieldType } from "@utils/pluginBase"; import { getPrefixes } from "@utils/pluginManager"; import type { MessageContext } from "@mtcute/dispatcher"; import * as fs from "fs/promises"; import path from "path"; import axios from "axios"; import { createDirectoryInAssets } from "@utils/pathHelpers"; import { getErrorMessage } from "@utils/errorHelpers"; import { thtml as html } from "@mtcute/html-parser"; import { htmlEscape } from "@utils/htmlEscape";
 
 const pfx = getPrefixes(); const mp = pfx[0];
 const DD = createDirectoryInAssets("checkapi"); const KF = path.join(DD, "keys.json");
@@ -392,5 +392,42 @@ cmdHandlers:Record<string,(msg:MessageContext)=>Promise<void>>={checkapi:async(m
   results.unshift(`🔍 <b>${htmlEscape(label)}</b>`);
   await msg.edit({text:html`${results.join("\n")}`});
 },};}
+
+
+  // Panel Settings Adapter
+  panelAdapter: PanelSettingsAdapter = {
+    id: "checkapi",
+    title: "API 检查",
+    description: "API 可用性检查配置",
+    category: "插件配置",
+    icon: "✅",
+    getSchema: (): PanelSettingField[] => [
+      {
+            "key": "interval",
+            "label": "检查间隔 (分钟)",
+            "type": "number",
+            "min": 1,
+            "max": 1440,
+            "default": 60
+      },
+      {
+            "key": "timeout",
+            "label": "超时 (秒)",
+            "type": "number",
+            "min": 1,
+            "max": 60,
+            "default": 10
+      }
+],
+    getValues: async (): Promise<Record<string, unknown>> => {
+      const db = await JSONFilePreset<any>(path.join(createDirectoryInAssets("checkapi"), "config.json"), {} as any);
+      return db.data as Record<string, unknown>;
+    },
+    setValues: async (patch: Record<string, unknown>): Promise<void> => {
+      const db = await JSONFilePreset<any>(path.join(createDirectoryInAssets("checkapi"), "config.json"), {} as any);
+      Object.assign(db.data, patch);
+      await db.write();
+    },
+  };
 
 export default new CheckApiPlugin();

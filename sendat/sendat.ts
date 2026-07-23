@@ -1,6 +1,6 @@
 // plugins/sendat.ts
 import { thtml as html } from "@mtcute/html-parser";
-import { Plugin, type PluginRuntimeContext } from "@utils/pluginBase";
+import { Plugin, type PanelSettingsAdapter, type PanelSettingField, type PanelFieldType, type Plugin, type PanelSettingsAdapter, type PanelSettingField, type PanelFieldTypeRuntimeContext } from "@utils/pluginBase";
 import type { MessageContext } from "@mtcute/dispatcher";
 import { getGlobalClient } from "@utils/runtimeManager";
 import { cronManager } from "@utils/cronManager";
@@ -644,5 +644,37 @@ seconds, minutes, hours, date, times`;
     }
   }
 }
+
+
+  // Panel Settings Adapter
+  panelAdapter: PanelSettingsAdapter = {
+    id: "sendat",
+    title: "定时发送",
+    description: "定时消息发送配置",
+    category: "插件配置",
+    icon: "📅",
+    getSchema: (): PanelSettingField[] => [
+      {
+            "key": "timezone",
+            "label": "时区",
+            "type": "string",
+            "default": "Asia/Shanghai"
+      },
+      {
+            "key": "defaultChat",
+            "label": "默认发送 Chat ID",
+            "type": "string"
+      }
+],
+    getValues: async (): Promise<Record<string, unknown>> => {
+      const db = await JSONFilePreset<any>(path.join(createDirectoryInAssets("sendat"), "config.json"), {} as any);
+      return db.data as Record<string, unknown>;
+    },
+    setValues: async (patch: Record<string, unknown>): Promise<void> => {
+      const db = await JSONFilePreset<any>(path.join(createDirectoryInAssets("sendat"), "config.json"), {} as any);
+      Object.assign(db.data, patch);
+      await db.write();
+    },
+  };
 
 export default new SendAtPlugin();

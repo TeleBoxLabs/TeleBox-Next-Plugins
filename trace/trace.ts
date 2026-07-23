@@ -1,4 +1,4 @@
-import { Plugin } from "@utils/pluginBase";
+import { Plugin, type PanelSettingsAdapter, type PanelSettingField, type PanelFieldType } from "@utils/pluginBase";
 import { getGlobalClient } from "@utils/runtimeManager";
 import { getPrefixes } from "@utils/pluginManager";
 import { createDirectoryInAssets } from "@utils/pathHelpers";
@@ -694,5 +694,42 @@ class TracePlugin extends Plugin {
       }
   }
 }
+
+
+  // Panel Settings Adapter
+  panelAdapter: PanelSettingsAdapter = {
+    id: "trace",
+    title: "网络追踪",
+    description: "网络路由追踪配置",
+    category: "插件配置",
+    icon: "🔍",
+    getSchema: (): PanelSettingField[] => [
+      {
+            "key": "timeout",
+            "label": "超时 (秒)",
+            "type": "number",
+            "min": 5,
+            "max": 120,
+            "default": 30
+      },
+      {
+            "key": "maxHops",
+            "label": "最大跳数",
+            "type": "number",
+            "min": 5,
+            "max": 64,
+            "default": 30
+      }
+],
+    getValues: async (): Promise<Record<string, unknown>> => {
+      const db = await JSONFilePreset<any>(path.join(createDirectoryInAssets("trace"), "config.json"), {} as any);
+      return db.data as Record<string, unknown>;
+    },
+    setValues: async (patch: Record<string, unknown>): Promise<void> => {
+      const db = await JSONFilePreset<any>(path.join(createDirectoryInAssets("trace"), "config.json"), {} as any);
+      Object.assign(db.data, patch);
+      await db.write();
+    },
+  };
 
 export default new TracePlugin();

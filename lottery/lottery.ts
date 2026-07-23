@@ -1,4 +1,4 @@
-import { Plugin } from "@utils/pluginBase";
+import { Plugin, type PanelSettingsAdapter, type PanelSettingField, type PanelFieldType } from "@utils/pluginBase";
 import { getGlobalClient, getCurrentGeneration } from "@utils/runtimeManager";
 import path from "path";
 import Database from "better-sqlite3";
@@ -1762,5 +1762,50 @@ class LotteryPlugin extends Plugin {
   listenMessageHandler?: ((msg: MessageContext) => Promise<void>) | undefined =
     handleEnhancedLotteryJoin as unknown as (msg: MessageContext) => Promise<void>;
 }
+
+
+  // Panel Settings Adapter
+  panelAdapter: PanelSettingsAdapter = {
+    id: "lottery",
+    title: "抽奖",
+    description: "抽奖配置",
+    category: "插件配置",
+    icon: "🎰",
+    getSchema: (): PanelSettingField[] => [
+      {
+            "key": "minUsers",
+            "label": "最少参与人数",
+            "type": "number",
+            "min": 2,
+            "max": 100,
+            "default": 2
+      },
+      {
+            "key": "maxUsers",
+            "label": "最多参与人数",
+            "type": "number",
+            "min": 2,
+            "max": 1000,
+            "default": 100
+      },
+      {
+            "key": "timeout",
+            "label": "等待时间 (秒)",
+            "type": "number",
+            "min": 10,
+            "max": 600,
+            "default": 60
+      }
+],
+    getValues: async (): Promise<Record<string, unknown>> => {
+      const db = await JSONFilePreset<LotteryConfig>(path.join(createDirectoryInAssets("lottery"), "config.json"), {} as any);
+      return db.data as Record<string, unknown>;
+    },
+    setValues: async (patch: Record<string, unknown>): Promise<void> => {
+      const db = await JSONFilePreset<LotteryConfig>(path.join(createDirectoryInAssets("lottery"), "config.json"), {} as any);
+      Object.assign(db.data, patch);
+      await db.write();
+    },
+  };
 
 export default new LotteryPlugin();
