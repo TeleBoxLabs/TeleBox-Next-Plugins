@@ -1,4 +1,4 @@
-import { Plugin, type PanelSettingsAdapter, type PanelSettingField, type PanelFieldType } from "@utils/pluginBase"; import { getPrefixes } from "@utils/pluginManager"; import type { MessageContext } from "@mtcute/dispatcher"; import * as fs from "fs/promises"; import path from "path"; import axios from "axios"; import { createDirectoryInAssets } from "@utils/pathHelpers"; import { getErrorMessage } from "@utils/errorHelpers"; import { thtml as html } from "@mtcute/html-parser"; import { htmlEscape } from "@utils/htmlEscape";
+import { Plugin, type PanelSettingsAdapter, type PanelSettingField, type PanelFieldType } from "@utils/pluginBase"; import { getPrefixes } from "@utils/pluginManager"; import type { MessageContext } from "@mtcute/dispatcher"; import * as fs from "fs/promises"; import path from "path"; import axios from "axios"; import { createDirectoryInAssets } from "@utils/pathHelpers"; import { getErrorMessage } from "@utils/errorHelpers"; import { thtml as html } from "@mtcute/html-parser"; import { htmlEscape } from "@utils/htmlEscape"; import { JSONFilePreset } from "lowdb/node";
 
 const pfx = getPrefixes(); const mp = pfx[0];
 const DD = createDirectoryInAssets("checkapi"); const KF = path.join(DD, "keys.json");
@@ -391,10 +391,8 @@ cmdHandlers:Record<string,(msg:MessageContext)=>Promise<void>>={checkapi:async(m
   const results=await fcv2(info.provider,key,info.baseUrl);
   results.unshift(`🔍 <b>${htmlEscape(label)}</b>`);
   await msg.edit({text:html`${results.join("\n")}`});
-},};}
-
-
-  // Panel Settings Adapter
+},
+  };
   panelAdapter: PanelSettingsAdapter = {
     id: "checkapi",
     title: "API 检查",
