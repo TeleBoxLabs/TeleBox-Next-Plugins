@@ -523,7 +523,8 @@ class EatPlugin extends Plugin {
             "type": "number",
             "min": -100,
             "max": 100,
-            "default": 0
+            "default": 0,
+            "description": "水平方向偏移量"
       },
       {
             "key": "y",
@@ -531,13 +532,15 @@ class EatPlugin extends Plugin {
             "type": "number",
             "min": -100,
             "max": 100,
-            "default": 0
+            "default": 0,
+            "description": "垂直方向偏移量"
       },
       {
             "key": "mask",
             "label": "遮罩形状",
             "type": "string",
-            "default": "circle"
+            "default": "circle",
+            "description": "可选 circle(圆形), square(方形), heart(心形)"
       },
       {
             "key": "brightness",
@@ -545,7 +548,8 @@ class EatPlugin extends Plugin {
             "type": "number",
             "min": 0,
             "max": 200,
-            "default": 100
+            "default": 100,
+            "description": "亮度百分比，100=原始"
       },
       {
             "key": "rotate",
@@ -553,7 +557,8 @@ class EatPlugin extends Plugin {
             "type": "number",
             "min": -360,
             "max": 360,
-            "default": 0
+            "default": 0,
+            "description": "旋转角度，正数=顺时针"
       }
 ],
     getValues: async (): Promise<Record<string, unknown>> => {
