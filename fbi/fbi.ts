@@ -620,7 +620,8 @@ class FbiPlugin extends Plugin {
             "type": "number",
             "min": 100,
             "max": 10000,
-            "default": 1000
+            "default": 1000,
+            "description": "跨群缓存的消息条数，超出自动清理旧消息"
       }
 ],
     getValues: async (): Promise<Record<string, unknown>> => {
