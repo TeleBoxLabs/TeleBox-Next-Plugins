@@ -13,7 +13,7 @@ import { safeGetReplyMessage } from "@utils/safeGetMessages";
 import { logger } from "@utils/logger";
 import { htmlEscape } from "@utils/htmlEscape";
 import type { MessageContext } from "@mtcute/dispatcher";
-import type { TelegramClient } from "@mtcute/core/highlevel/client";
+import { TelegramClient } from "@mtcute/node";
 
 // 获取命令前缀
 const prefixes = getPrefixes();

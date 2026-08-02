@@ -1,5 +1,7 @@
 import {
-  Plugin
+  Plugin,
+  type PanelSettingsAdapter,
+  type PanelSettingField
 } from "@utils/pluginBase";
 import { logger } from "@utils/logger";
 import type { MessageContext } from "@mtcute/dispatcher";
@@ -13,6 +15,7 @@ import * as crypto from "crypto";
 import sharp from "sharp";
 import { safeGetReplyMessage } from "@utils/safeGetMessages";
 import { getErrorMessage } from "@utils/errorHelpers";
+import { JSONFilePreset } from "lowdb/node";
 import {
   createDirectoryInAssets,
   createDirectoryInTemp,
@@ -34,7 +37,7 @@ async function fillRoundedCorners(
     (() => {
       const dir = path.dirname(inputPath);
       const ext =
-        meta.format === "jpeg" || meta.format === "jpg" ? ".jpg" : ".png";
+        meta.format === "jpeg" || (meta.format as string) === "jpg" ? ".jpg" : ".png";
       const base = path.basename(inputPath, path.extname(inputPath));
       return path.join(dir, `${base}.filled${ext}`);
     })();
@@ -68,7 +71,7 @@ async function fillRoundedCorners(
 
   let composed = background.composite([{ input: innerBuf, left, top }]);
 
-  if (meta.format === "jpeg" || meta.format === "jpg") {
+  if (meta.format === "jpeg" || (meta.format as string) === "jpg") {
     composed = composed.jpeg({ quality: 95 });
   } else if (meta.format === "png" || !meta.format) {
     composed = composed.png({ compressionLevel: 9 });
@@ -1052,7 +1055,7 @@ class SpeedlinkPlugin extends Plugin {
 ],
     getValues: async (): Promise<Record<string, unknown>> => {
       const db = await JSONFilePreset<ServerConfig>(path.join(ASSETS_DIR, "secret.key"), {} as any);
-      return db.data as Record<string, unknown>;
+      return db.data as unknown as Record<string, unknown>;
     },
     setValues: async (patch: Record<string, unknown>): Promise<void> => {
       const db = await JSONFilePreset<ServerConfig>(path.join(ASSETS_DIR, "secret.key"), {} as any);

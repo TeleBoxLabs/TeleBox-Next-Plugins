@@ -1,7 +1,7 @@
 import { Plugin, type PanelSettingsAdapter, type PanelSettingField, type PanelFieldType } from "@utils/pluginBase";
 import { getGlobalClient } from "@utils/runtimeManager";
 import { getPrefixes } from "@utils/pluginManager";
-import { createDirectoryInTemp } from "@utils/pathHelpers";
+import { createDirectoryInAssets, createDirectoryInTemp } from "@utils/pathHelpers";
 import type { MessageContext } from "@mtcute/dispatcher";
 import type { MtcuteFileDownloadLocation } from "@utils/mtcuteTypes";
 import type { Chat } from "@mtcute/node";
@@ -16,6 +16,7 @@ import crypto from "crypto";
 import { safeGetReplyMessage } from "@utils/safeGetMessages";
 import { getErrorMessage } from "@utils/errorHelpers";
 import { logger } from "@utils/logger";
+import { JSONFilePreset } from "lowdb/node";
 import { sleep } from "@utils/asyncHelpers";
 
 const execFileAsync = promisify(execFile);

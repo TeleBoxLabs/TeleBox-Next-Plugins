@@ -15,6 +15,7 @@ interface NeZhaYamlConfig {
 }
 import { logger } from "@utils/logger";
 import { getErrorMessage } from "@utils/errorHelpers";
+import { JSONFilePreset } from "lowdb/node";
 
 interface NeZhaConfig {
   url: string;

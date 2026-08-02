@@ -3,7 +3,7 @@ import { getGlobalClient } from "@utils/runtimeManager";
 import { getPrefixes } from "@utils/pluginManager";
 import type { Sticker, InputMediaDocument, InputMediaPhoto } from "@mtcute/core";
 import type { MessageContext } from "@mtcute/dispatcher";
-import type { TelegramClient } from "@mtcute/core/highlevel/client.js";
+import type { TelegramClient } from "@mtcute/node";
 import { thtml as html } from "@mtcute/html-parser";
 import * as fs from "fs";
 import * as path from "path";

@@ -9,6 +9,7 @@ import type { TelegramClient, User } from "@mtcute/node";
 import { thtml as html } from "@mtcute/html-parser";
 import { getPrefixes } from "@utils/pluginManager";
 import { logger } from "@utils/logger";
+import { JSONFilePreset } from "lowdb/node";
 
 // Track pending setTimeout handles for safe cleanup on reload
 const pendingTimers = new Set<ReturnType<typeof setTimeout>>();
@@ -1800,11 +1801,11 @@ class LotteryPlugin extends Plugin {
       }
 ],
     getValues: async (): Promise<Record<string, unknown>> => {
-      const db = await JSONFilePreset<LotteryConfig>(path.join(createDirectoryInAssets("lottery"), "config.json"), {} as any);
-      return db.data as Record<string, unknown>;
+      const db = await JSONFilePreset<LotteryConfigRow>(path.join(createDirectoryInAssets("lottery"), "config.json"), {} as any);
+      return db.data as unknown as Record<string, unknown>;
     },
     setValues: async (patch: Record<string, unknown>): Promise<void> => {
-      const db = await JSONFilePreset<LotteryConfig>(path.join(createDirectoryInAssets("lottery"), "config.json"), {} as any);
+      const db = await JSONFilePreset<LotteryConfigRow>(path.join(createDirectoryInAssets("lottery"), "config.json"), {} as any);
       Object.assign(db.data, patch);
       await db.write();
     },

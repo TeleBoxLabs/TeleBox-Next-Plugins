@@ -2360,10 +2360,11 @@ async function handleIncomingMessage(
   } catch (error: unknown) {
     logger.error(`[SHIFT] 处理消息时出错: ${error}`);
   }
+}
 
 
   // Panel Settings Adapter
-  panelAdapter: PanelSettingsAdapter = {
+  const panelAdapter: PanelSettingsAdapter = {
     id: "shift",
     title: "排班",
     description: "排班管理配置",
@@ -2405,7 +2406,9 @@ async function handleIncomingMessage(
       Object.assign(db.data, patch);
       await db.write();
     },
-  };
 }
 
-export default new ShiftPlugin();
+const shiftPlugin = new ShiftPlugin();
+shiftPlugin.panelAdapter = panelAdapter;
+
+export default shiftPlugin;

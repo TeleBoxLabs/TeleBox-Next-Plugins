@@ -5,6 +5,7 @@ import { createCanvas, registerFont } from "canvas";
 import fs from "fs";
 import path from "path";
 import { logger } from "@utils/logger";
+import { JSONFilePreset } from "lowdb/node";
 import type { MessageContext } from "@mtcute/dispatcher";
 import type { TelegramClient, InputPeerLike, Chat } from "@mtcute/node";
 import type { Message } from "@mtcute/core";

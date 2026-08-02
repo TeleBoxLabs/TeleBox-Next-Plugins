@@ -4,7 +4,7 @@ import type { MessageContext } from "@mtcute/dispatcher";
 import * as fs from "fs";
 import * as path from "path";
 import { promisify } from "util";
-import archiver from "archiver";
+import * as archiver from "archiver";
 import { execFile } from "child_process";
 import { getPrefixes } from "@utils/pluginManager";
 import { safeGetReplyMessage } from "@utils/safeGetMessages";
@@ -662,7 +662,7 @@ export_gif(animation, gif_path, 512, 512, 30)
       
       // 创建输出流
       const output = fs.createWriteStream(zipPath);
-      const archive = archiver('zip', {
+      const archive = new archiver.ZipArchive({
       zlib: { level: 9 } // 最高压缩级别
     });
       

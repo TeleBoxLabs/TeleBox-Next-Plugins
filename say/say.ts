@@ -1488,11 +1488,11 @@ class SayPlugin extends Plugin {
       }
 ],
     getValues: async (): Promise<Record<string, unknown>> => {
-      const db = await JSONFilePreset<MimoConfig>(path.join(createDirectoryInAssets("say"), "config.json"), DEFAULT_CONFIG);
+      const db = await JSONFilePreset<SayConfig>(path.join(createDirectoryInAssets("say"), "config.json"), DEFAULT_CONFIG);
       return db.data as Record<string, unknown>;
     },
     setValues: async (patch: Record<string, unknown>): Promise<void> => {
-      const db = await JSONFilePreset<MimoConfig>(path.join(createDirectoryInAssets("say"), "config.json"), DEFAULT_CONFIG);
+      const db = await JSONFilePreset<SayConfig>(path.join(createDirectoryInAssets("say"), "config.json"), DEFAULT_CONFIG);
       Object.assign(db.data, patch);
       await db.write();
     },

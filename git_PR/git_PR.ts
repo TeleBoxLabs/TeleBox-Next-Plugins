@@ -5,7 +5,7 @@ import { thtml as html } from "@mtcute/html-parser";
 import { getPrefixes } from "@utils/pluginManager";
 import { JSONFilePreset } from "lowdb/node";
 import * as path from "path";
-import { resolvePluginAssetFile } from "@utils/pathHelpers";
+import { createDirectoryInAssets, resolvePluginAssetFile } from "@utils/pathHelpers";
 import axios from "axios";
 import { logger } from "@utils/logger";
 import { getErrorMessage } from "@utils/errorHelpers";

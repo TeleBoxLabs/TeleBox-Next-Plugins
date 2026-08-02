@@ -183,6 +183,20 @@ interface PanguConfig {
   };
 }
 
+// 默认配置常量
+const DEFAULT_PANGU_CONFIG: PanguConfig = {
+  version: "1.0.0",
+  chats: {},
+  whitelist: [],
+  blacklist: [],
+  globalMode: false,
+  stats: {
+    formattedMessages: 0,
+    lastFormatted: null,
+    enabledChats: 0
+  }
+};
+
 // 插件主体
 class PanguPlugin extends Plugin {
   cleanup(): void {
@@ -638,11 +652,11 @@ class PanguPlugin extends Plugin {
       },
     ],
     getValues: async (): Promise<Record<string, unknown>> => {
-      const db = await JSONFilePreset<PanguConfig>(path.join(createDirectoryInAssets("pangu"), "config.json"), defaultConfig);
-      return db.data as Record<string, unknown>;
+      const db = await JSONFilePreset<PanguConfig>(path.join(createDirectoryInAssets("pangu"), "config.json"), DEFAULT_PANGU_CONFIG);
+      return db.data as unknown as Record<string, unknown>;
     },
     setValues: async (patch: Record<string, unknown>): Promise<void> => {
-      const db = await JSONFilePreset<PanguConfig>(path.join(createDirectoryInAssets("pangu"), "config.json"), defaultConfig);
+      const db = await JSONFilePreset<PanguConfig>(path.join(createDirectoryInAssets("pangu"), "config.json"), DEFAULT_PANGU_CONFIG);
       Object.assign(db.data, patch);
       await db.write();
     },

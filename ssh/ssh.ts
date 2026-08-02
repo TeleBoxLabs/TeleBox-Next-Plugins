@@ -11,12 +11,12 @@ import * as os from "os";
 import * as net from "net";
 import { execFile } from "child_process";
 import { promisify } from "util";
-import archiver from "archiver";
+import * as archiver from "archiver";
 import dayjs from "dayjs";
 import crypto from "crypto";
 
-import type { TelegramClient } from '@mtcute/core/client.js';
-import type { InputPeerLike } from '@mtcute/core/highlevel/types/index.js';
+import type { TelegramClient } from '@mtcute/node';
+import type { InputPeerLike } from '@mtcute/core';
 // @ts-ignore - ssh2 has no type declarations
 import { Client as SSH2Client } from 'ssh2';
 import { logger } from "@utils/logger";
@@ -1483,7 +1483,7 @@ ${keysContent}`;
   private async createArchive(sourceDir: string, outputPath: string, files: string[]): Promise<void> {
     return new Promise((resolve, reject) => {
       const output = fs.createWriteStream(outputPath);
-      const archive = archiver('zip', {
+      const archive = new archiver.ZipArchive({
         zlib: { level: 9 } // 最高压缩级别
       });
 
@@ -1492,7 +1492,7 @@ ${keysContent}`;
         resolve();
       });
 
-      archive.on('error', (err) => {
+      archive.on('error', (err: Error) => {
         reject(err);
       });
 

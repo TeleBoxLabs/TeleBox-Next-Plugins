@@ -8,6 +8,7 @@ import type { MessageContext } from "@mtcute/dispatcher";
 import { thtml as html } from "@mtcute/html-parser";
 import { getGlobalClient } from "@utils/runtimeManager";
 import { tl, Long } from "@mtcute/node";
+import type { TelegramClient } from "@mtcute/node";
 import { Message } from "@mtcute/core";
 import { logger } from "@utils/logger";
 import { sleep } from "@utils/asyncHelpers";
@@ -449,7 +450,7 @@ class ParseHubPlugin extends Plugin {
 
       const links = extractLinks(msg.text || "");
       const replyLinks = msg.replyToMessage
-        ? extractLinks(msg.replyToMessage.text || "")
+        ? extractLinks((msg.replyToMessage as any).text || "")
         : [];
       const allLinks = [...new Set([...links, ...replyLinks])];
 

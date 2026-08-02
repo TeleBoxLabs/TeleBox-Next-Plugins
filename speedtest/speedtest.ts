@@ -19,6 +19,7 @@ import { getPrefixes } from "@utils/pluginManager";
 import { logger } from "@utils/logger";
 import { getErrorMessage, getErrorCode } from "@utils/errorHelpers";
 import { htmlEscape } from "@utils/htmlEscape";
+import { JSONFilePreset } from "lowdb/node";
 
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
@@ -140,7 +141,7 @@ async function fillRoundedCorners(
     (() => {
       const dir = path.dirname(inputPath);
       const ext =
-        meta.format === "jpeg" || meta.format === "jpg" ? ".jpg" : ".png";
+        meta.format === "jpeg" || (meta.format as string) === "jpg" ? ".jpg" : ".png";
       const base = path.basename(inputPath, path.extname(inputPath));
       return path.join(dir, `${base}.filled${ext}`);
     })();
@@ -179,7 +180,7 @@ async function fillRoundedCorners(
   let composed = background.composite([{ input: innerBuf, left, top }]);
 
   // Encode based on original format; default to PNG if unknown
-  if (meta.format === "jpeg" || meta.format === "jpg") {
+  if (meta.format === "jpeg" || (meta.format as string) === "jpg") {
     composed = composed.jpeg({ quality: 95 });
   } else if (meta.format === "png" || !meta.format) {
     composed = composed.png({ compressionLevel: 9 });

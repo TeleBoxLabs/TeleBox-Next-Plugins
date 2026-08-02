@@ -1,7 +1,7 @@
 import { getPrefixes } from "@utils/pluginManager";
 import { Plugin } from "@utils/pluginBase";
 import type { MessageContext } from "@mtcute/dispatcher";
-import type { ChatMember, User } from "@mtcute/core/highlevel/types/index.js";
+import type { ChatMember, User } from "@mtcute/core";
 import { thtml as html } from "@mtcute/html-parser";
 import { getGlobalClient } from "@utils/runtimeManager";
 import { logger } from "@utils/logger";
