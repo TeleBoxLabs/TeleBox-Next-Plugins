@@ -605,7 +605,8 @@ class ImageMonitorPlugin extends Plugin {
       {
             "key": "enabled",
             "label": "启用监控",
-            "type": "boolean"
+            "type": "boolean",
+            "description": "开启图片监控过滤"
       },
       {
             "key": "defaultAction",
@@ -620,7 +621,8 @@ class ImageMonitorPlugin extends Plugin {
                         "value": "ban",
                         "label": "封禁"
                   }
-            ]
+            ],
+            "description": "违规图片的默认处理方式"
       }
 ],
     getValues: async (): Promise<Record<string, unknown>> => {
