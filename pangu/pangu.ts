@@ -611,26 +611,32 @@ class PanguPlugin extends Plugin {
   panelAdapter: PanelSettingsAdapter = {
     id: "pangu",
     title: "盘古格式",
-    description: "消息格式化配置",
+    description: "消息格式化配置：全局开关、白名单/黑名单群组 ID",
     category: "插件配置",
     icon: "🔄",
     getSchema: (): PanelSettingField[] => [
       {
-            "key": "globalMode",
-            "label": "全局模式",
-            "type": "boolean"
+        key: "globalMode",
+        label: "全局模式",
+        type: "boolean",
+        default: false,
+        description: "开启后对所有群组生效，白名单/黑名单失效"
       },
       {
-            "key": "whitelist",
-            "label": "白名单 (群组ID)",
-            "type": "json"
+        key: "whitelist",
+        label: "白名单群组 ID",
+        type: "textarea",
+        placeholder: "每行一个群组 ID，如：\n-1001234567890\n-1009876543210",
+        description: "仅对这些群组生效，每行一个 ID，留空则不限制"
       },
       {
-            "key": "blacklist",
-            "label": "黑名单 (群组ID)",
-            "type": "json"
-      }
-],
+        key: "blacklist",
+        label: "黑名单群组 ID",
+        type: "textarea",
+        placeholder: "每行一个群组 ID，如：\n-1001234567890\n-1009876543210",
+        description: "这些群组不生效，每行一个 ID，优先级高于白名单"
+      },
+    ],
     getValues: async (): Promise<Record<string, unknown>> => {
       const db = await JSONFilePreset<PanguConfig>(path.join(createDirectoryInAssets("pangu"), "config.json"), defaultConfig);
       return db.data as Record<string, unknown>;

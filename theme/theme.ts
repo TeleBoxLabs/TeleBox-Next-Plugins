@@ -3216,6 +3216,16 @@ class ThemePlugin extends Plugin {
 
   /** In-flight addtheme slug → promise (dedupe concurrent link fetches) */
   private readonly inflightLinks = new Map<string, Promise<void>>();
+  /** slug → base64 image */
+  private readonly wallpaperSlugCache = new Map<string, string>();
+  /** contentHash → slug (reverse lookup without O(n) buffer equals) */
+  private readonly wallpaperHashToSlug = new Map<string, string>();
+
+  cleanup(): void {
+    this.inflightLinks.clear();
+    this.wallpaperSlugCache.clear();
+    this.wallpaperHashToSlug.clear();
+  }
 
   async handleCmd(msg: MessageContext): Promise<void> {
     const parts = (msg.text ?? "").trim().split(/\s+/).slice(1);
@@ -3288,6 +3298,12 @@ class ThemePlugin extends Plugin {
 
   listenMessageHandler = async (msg: MessageContext): Promise<void> => {
     try {
+      // Guard: only process our own messages (outgoing or Saved Messages)
+      // msg.edit() requires MESSAGE_AUTHOR_REQUIRED — we can't edit others' messages
+      const meId = (await import("@utils/runtimeAccess")).tryGetCurrentRuntime()?.meId;
+      const isSavedMessage = meId != null && String(msg.chat.id) === meId;
+      if (!msg.isOutgoing && !isSavedMessage) return;
+
       const text = msg.text?.trim();
 
       // t.me/addtheme link in any message
@@ -3357,10 +3373,6 @@ class ThemePlugin extends Plugin {
   // mtcute downloadAsBuffer needs inputDocumentFileLocation (NOT inputDocument)
   // and Long ids must be passed as-is — Number() destroys 64-bit precision.
   // Fallback: upload.getFile (handles some dc cases better for small theme files).
-  /** slug → base64 image */
-  private readonly wallpaperSlugCache = new Map<string, string>();
-  /** contentHash → slug (reverse lookup without O(n) buffer equals) */
-  private readonly wallpaperHashToSlug = new Map<string, string>();
 
   private cacheWallpaper(slug: string, img: Buffer): void {
     const b64 = img.toString("base64");
