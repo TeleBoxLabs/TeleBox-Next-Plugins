@@ -1,5 +1,5 @@
 // Cosplay Plugin - 从 cosplaytele.com 获取随机cosplay图片
-import { Plugin } from "@utils/pluginBase";
+import { Plugin, type PanelSettingsAdapter, type PanelSettingField } from "@utils/pluginBase";
 import type { MessageContext } from "@mtcute/dispatcher";
 import { getGlobalClient } from "@utils/runtimeManager";
 import { thtml as html } from "@mtcute/html-parser";
