@@ -18,7 +18,7 @@ const mainPrefix = prefixes[0];
 
 // 远程配置URL
 const baseRepoURL =
-  "https://github.com/TeleBoxOrg/TeleBox-Plugins/raw/refs/heads/main/fadian/";
+  "https://github.com/TeleBoxOrg/TeleBox-Next-Plugins/raw/refs/heads/main/fadian/";
 const ASSET_PATH = createDirectoryInAssets("fadian");
 
 // 配置文件映射

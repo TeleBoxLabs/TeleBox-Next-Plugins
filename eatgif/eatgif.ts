@@ -58,7 +58,7 @@ interface EatGifListConfig {
 
 // 测试时可以更换主体url
 const baseRepoURL =
-  "https://github.com/TeleBoxOrg/TeleBox-Plugins/raw/refs/heads/main/eatgif/";
+  "https://github.com/TeleBoxOrg/TeleBox-Next-Plugins/raw/refs/heads/main/eatgif/";
 const baseConfigURL = baseRepoURL + "config.json";
 
 let config: EatGifListConfig;
