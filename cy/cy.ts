@@ -1,7 +1,9 @@
 import { Plugin, type PanelSettingsAdapter, type PanelSettingField, type PanelFieldType } from "@utils/pluginBase";
 import { getPrefixes } from "@utils/pluginManager";
 import { getGlobalClient } from "@utils/runtimeManager";
-import { createCanvas, registerFont } from "canvas";
+let _canvas: any;
+const createCanvas = (...args: any[]) => { if (!_canvas) _canvas = require("canvas"); return _canvas.createCanvas(...args); };
+const registerFont = (...args: any[]) => { if (!_canvas) _canvas = require("canvas"); return _canvas.registerFont(...args); };
 import fs from "fs";
 import path from "path";
 import { logger } from "@utils/logger";

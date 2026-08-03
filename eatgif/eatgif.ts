@@ -2,7 +2,8 @@ import { Plugin, type PanelSettingsAdapter, type PanelSettingField, type PanelFi
 import type { MessageContext } from "@mtcute/dispatcher";
 import { thtml as html } from "@mtcute/html-parser";
 import { getGlobalClient } from "@utils/runtimeManager";
-import sharp from "sharp";
+let _sharp: any;
+const sharp = (...args: any[]) => { if (!_sharp) _sharp = require("sharp"); return _sharp(...args); };
 import axios from "axios";
 import {
   createDirectoryInAssets,

@@ -15,7 +15,8 @@ import axios, {
   type AxiosRequestConfig,
   type AxiosResponse,
 } from "axios";
-import sharp from "sharp";
+let _sharp: any;
+const sharp = (...args: any[]) => { if (!_sharp) _sharp = require("sharp"); return _sharp(...args); };
 import http from "http";
 import https from "https";
 import { promisify } from "util";

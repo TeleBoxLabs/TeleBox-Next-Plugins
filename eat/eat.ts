@@ -1,5 +1,6 @@
 import { Plugin, type PanelSettingsAdapter, type PanelSettingField, type PanelFieldType } from "@utils/pluginBase";
-import sharp from "sharp";
+let _sharp: any;
+const sharp = (...args: any[]) => { if (!_sharp) _sharp = require("sharp"); return _sharp(...args); };
 import axios from "axios";
 import type { MessageContext } from "@mtcute/dispatcher";
 import type { Message, TelegramClient } from "@mtcute/node";
