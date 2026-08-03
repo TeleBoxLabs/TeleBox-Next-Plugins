@@ -274,7 +274,7 @@ function layoutWords(ctx: CanvasContext, words: WordItem[]): WordItem[] {
     const metrics = ctx.measureText(item.word);
     item.width = metrics.width;
     item.height = item.size;
-    if (item.width > WIDTH - MARGIN * 2) continue;
+    if (item.width! > WIDTH - MARGIN * 2) continue;
 
     for (let attempt = 0; attempt < 4; attempt++) {
       item.size = Math.max(10, original.size - attempt * 4);
@@ -286,9 +286,9 @@ function layoutWords(ctx: CanvasContext, words: WordItem[]): WordItem[] {
       for (let t = 0; t < 3600; t++) {
       const angle = t * 0.38;
       const radius = 5.2 * Math.sqrt(t);
-      item.x = centerX + Math.cos(angle) * radius - item.width / 2;
-      item.y = centerY + Math.sin(angle) * radius + item.height / 2;
-      if (item.x < MARGIN || item.y < MARGIN + item.height || item.x + item.width > WIDTH - MARGIN || item.y > HEIGHT - 78) continue;
+      item.x = centerX + Math.cos(angle) * radius - item.width! / 2;
+      item.y = centerY + Math.sin(angle) * radius + item.height! / 2;
+      if (item.x! < MARGIN || item.y! < MARGIN + item.height! || item.x! + item.width! > WIDTH - MARGIN || item.y! > HEIGHT - 78) continue;
       if (overlaps(item, placed)) continue;
       placed.push({ ...item });
       placedItem = true;

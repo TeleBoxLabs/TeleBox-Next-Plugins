@@ -1,6 +1,7 @@
 import { Plugin, type PanelSettingsAdapter, type PanelSettingField, type PanelFieldType } from "@utils/pluginBase";
 let _sharp: any;
 const sharp = (...args: any[]) => { if (!_sharp) _sharp = require("sharp"); return _sharp(...args); };
+type SharpOverlayOptions = { input: Buffer | string; top?: number; left?: number; blend?: string; tile?: boolean; density?: number; };
 import axios from "axios";
 import type { MessageContext } from "@mtcute/dispatcher";
 import type { Message, TelegramClient } from "@mtcute/node";
@@ -145,7 +146,7 @@ async function getAssetBuffer(url: string): Promise<Buffer> {
 async function iconMaskedFor(params: {
   role: RoleConfig;
   avatar: Buffer;
-}): Promise<sharp.OverlayOptions> {
+}): Promise<SharpOverlayOptions> {
   const { role, avatar } = params;
 
   const maskBuffer = await getAssetBuffer(role.mask);
@@ -361,7 +362,7 @@ async function compositeWithEntryConfig(parmas: {
 
   const baseBuffer = await getAssetBuffer(entry.url);
 
-  let composite: sharp.OverlayOptions[] = [];
+  let composite: SharpOverlayOptions[] = [];
   if (entry.you) {
     const iconMasked = await iconMaskedFor({
       role: entry.you,
