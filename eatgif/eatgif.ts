@@ -4,6 +4,7 @@ import { thtml as html } from "@mtcute/html-parser";
 import { getGlobalClient } from "@utils/runtimeManager";
 let _sharp: any;
 const sharp = (...args: any[]) => { if (!_sharp) _sharp = require("sharp"); return _sharp(...args); };
+type SharpOverlayOptions = { input: Buffer | string; top?: number; left?: number; blend?: string; tile?: boolean; density?: number; };
 import axios from "axios";
 import {
   createDirectoryInAssets,
@@ -302,7 +303,7 @@ class EatGifPlugin extends Plugin {
 
     const mainCanvas = await assetBufferFor(entry.url);
 
-    let composite: sharp.OverlayOptions[] = [];
+    let composite: SharpOverlayOptions[] = [];
     if (entry.you) {
       const iconMasked = await this.iconMaskedFor(entry.you, youAvatarBuffer);
       composite.push(iconMasked);
@@ -326,7 +327,7 @@ class EatGifPlugin extends Plugin {
   private async iconMaskedFor(
     role: RoleConfig,
     avatar: Buffer
-  ): Promise<sharp.OverlayOptions> {
+  ): Promise<SharpOverlayOptions> {
     const maskBuffer = await assetBufferFor(role.mask);
     const { width: maskWidth, height: maskHeight } = await sharp(
       maskBuffer
