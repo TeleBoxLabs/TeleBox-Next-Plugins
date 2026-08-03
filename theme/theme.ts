@@ -3300,7 +3300,7 @@ class ThemePlugin extends Plugin {
     try {
       // Guard: only process our own messages (outgoing or Saved Messages)
       // msg.edit() requires MESSAGE_AUTHOR_REQUIRED — we can't edit others' messages
-      const meId = (await import("@utils/runtimeAccess")).tryGetCurrentRuntime()?.meId;
+      const meId = require("@utils/runtimeAccess").tryGetCurrentRuntime()?.meId;
       const isSavedMessage = meId != null && String(msg.chat.id) === meId;
       if (!msg.isOutgoing && !isSavedMessage) return;
 
