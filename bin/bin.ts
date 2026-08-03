@@ -19,7 +19,7 @@ const help_text = `💳 <b>BIN 查询</b>
 <b>数据源：</b> Bincheck 优先，Binlist 备用`;
 
 // 显示优化
-function formatScheme(s: any): string {
+function formatScheme(s: unknown): string {
   const map: Record<string, string> = {
     visa: "Visa",
     mastercard: "Mastercard",
@@ -52,7 +52,7 @@ function normalizeBankName(name: string): string {
   return up;
 }
 
-function formatType(t: any): string {
+function formatType(t: unknown): string {
   const map: Record<string, string> = {
     credit: "信用",
     debit: "借记",
@@ -63,7 +63,7 @@ function formatType(t: any): string {
   return k ? (map[k] || k) : "未知";
 }
 
-function toTitleCase(s: any): string {
+function toTitleCase(s: unknown): string {
   if (!s || typeof s !== "string") return "N/A";
   return s
     .split(/\s+/)
@@ -87,7 +87,7 @@ function currencyCn(code?: string): string {
   return code ? (map[code] || code) : "未知";
 }
 
-function schemeBrandDisplay(s: any): string {
+function schemeBrandDisplay(s: unknown): string {
   const k = typeof s === "string" ? s.toLowerCase() : "";
   if (!k) return "N/A";
   if (k === "mastercard") return "Master Card";
