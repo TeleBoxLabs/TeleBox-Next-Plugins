@@ -238,6 +238,9 @@ async function ensureQuoteAssets(): Promise<void> {
     const targetDir = path.join(QUOTE_ASSETS_DIR, "emoji");
     try {
       fs.mkdirSync(path.dirname(vendorEmojiDir), { recursive: true });
+      // existsSync returns false for broken symlinks, but symlinkSync throws
+      // EEXIST if the stale link is still on disk — remove it first.
+      try { fs.unlinkSync(vendorEmojiDir); } catch { /* path truly absent */ }
       fs.symlinkSync(targetDir, vendorEmojiDir, "dir");
       logger.warn("quote loader created emoji symlink", { from: vendorEmojiDir, to: targetDir });
     } catch (e: unknown) {
