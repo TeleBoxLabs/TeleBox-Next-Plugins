@@ -61,10 +61,8 @@ class ListUsernamesPlugin extends Plugin {
         });
 
         if (!result.chats || result.chats.length === 0) {
-          await msg.edit({ 
-            text: html`📭 <b>没有找到公开群组/频道</b>\n\n
-\n\n
-您目前没有拥有任何公开群组或频道` 
+          await msg.edit({
+            text: html`📭 <b>没有找到公开群组/频道</b>\n\n您目前没有拥有任何公开群组或频道`
           });
           return;
         }
@@ -78,7 +76,7 @@ class ListUsernamesPlugin extends Plugin {
           const username = chat.username ? `@${chat.username}` : "无用户名";
           const chatType = chat.broadcast ? "📢 频道" : "👥 群组";
           const chatId = chat.id ? chat.id.toString() : "未知ID";
-          
+
           output += `<b>${index + 1}.</b> ${title} (${htmlEscape(chatType)})\n`;
           output += `   👤 用户名: ${codeTag(username)}\n`;
           output += `   🆔 ID: ${codeTag(chatId)}\n\n`;
@@ -87,7 +85,7 @@ class ListUsernamesPlugin extends Plugin {
         // 添加统计信息
         const channelCount = result.chats.filter((chat: PublicChannelEntity) => chat.broadcast).length;
         const groupCount = result.chats.length - channelCount;
-        
+
         output += `📊 <b>统计信息：</b>\n`;
         output += `• 频道数量: ${channelCount}\n`;
         output += `• 群组数量: ${groupCount}\n`;
@@ -98,7 +96,7 @@ class ListUsernamesPlugin extends Plugin {
           // 如果消息过长，分割发送第一部分
           const part1 = output.substring(0, 4000) + "\n\n... (消息过长，已截断)";
           await msg.edit({ text: html(part1) });
-          
+
           // 发送剩余部分作为新消息
           const part2 = output.substring(4000);
           if (part2.length > 0) {
