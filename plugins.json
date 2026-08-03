@@ -379,6 +379,10 @@
     "url": "https://github.com/TeleBoxOrg/TeleBox-Next-Plugins/blob/main/say/say.ts?raw=true",
     "desc": "自动语音合成 (MiMo / 火山豆包 / Fish)，每会话独立开关"
   },
+  "save": {
+    "url": "https://github.com/TeleBoxOrg/TeleBox-Next-Plugins/blob/main/save/save.ts?raw=true",
+    "desc": "突破限制保存/转发消息"
+  },
   "search": {
     "url": "https://github.com/TeleBoxOrg/TeleBox-Next-Plugins/blob/main/search/search.ts?raw=true",
     "desc": "频道消息搜索"

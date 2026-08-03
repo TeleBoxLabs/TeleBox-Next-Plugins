@@ -3188,9 +3188,9 @@ function buildHelpText(): ReturnType<typeof html> {
   return html`
 <b>🎨 主题转换</b>
 
-直接发送主题文件，自动输出所有格式。
-回复文件 + 指令：
+回复主题文件或链接 + 指令：
 
+<code>${mainPrefix}theme</code>  回复主题文件/链接 → 自动转换全部格式
 <code>${mainPrefix}theme android</code> → .attheme
 <code>${mainPrefix}theme desktop</code> → .tdesktop-theme
 <code>${mainPrefix}theme tgx</code> → .tgx-theme
@@ -3290,84 +3290,91 @@ class ThemePlugin extends Plugin {
       return;
     }
 
+    // ── no sub: process replied theme file or link ─────────────────────
+    if (!sub) {
+      // Check if reply message has a theme file
+      if (msg.replyToMessage?.id) {
+        const reply = await safeGetReplyMessage(msg);
+        if (reply) {
+          // t.me/addtheme link in reply text
+          const replyText = (reply as any).text?.trim();
+          if (replyText) {
+            const addthemeMatch = replyText.match(/(?:https?:\/\/)?t\.me\/addtheme\/([a-zA-Z0-9_\-\.]+)/);
+            if (addthemeMatch) {
+              await this.handleAddThemeLink(msg, addthemeMatch[1]);
+              return;
+            }
+          }
+          // theme file attached in reply
+          const replyMedia = (reply as any).media;
+          if (replyMedia && replyMedia.type === "document") {
+            const d = replyMedia as import("@mtcute/core").Document;
+            const name = (d.fileName || "").toLowerCase();
+            const size = d.fileSize || 0;
+            if (size > 0 && size <= MAX_FILE_SIZE &&
+                (name.endsWith(".attheme") || name.endsWith(".tdesktop-theme") || name.endsWith(".tgios-theme") || name.endsWith(".tgx-theme") || name.endsWith(".json") || name.endsWith(".tdesktop-palette") || name.includes("theme") || name.includes("tgx") || name.includes("settings"))) {
+              await this.processThemeFile(msg, d, client);
+              return;
+            }
+          }
+        }
+      }
+      // t.me/addtheme link in command text itself (e.g. ".theme t.me/addtheme/xxx")
+      const cmdText = (msg.text ?? "").trim();
+      const inlineLink = cmdText.match(/(?:https?:\/\/)?t\.me\/addtheme\/([a-zA-Z0-9_\-\.]+)/);
+      if (inlineLink) {
+        await this.handleAddThemeLink(msg, inlineLink[1]);
+        return;
+      }
+      await msg.edit({ text: buildHelpText() });
+      return;
+    }
+
     // fallback: show help
     await msg.edit({ text: buildHelpText() });
   }
 
-  // ── listen: file attachments + t.me/addtheme links ───────────────────
-
-  listenMessageHandler = async (msg: MessageContext): Promise<void> => {
-    try {
-      // Guard: only process our own messages (outgoing or Saved Messages)
-      // msg.edit() requires MESSAGE_AUTHOR_REQUIRED — we can't edit others' messages
-      const meId = require("@utils/runtimeAccess").tryGetCurrentRuntime()?.meId;
-      const isSavedMessage = meId != null && String(msg.chat.id) === meId;
-      if (!msg.isOutgoing && !isSavedMessage) return;
-
-      const text = msg.text?.trim();
-
-      // t.me/addtheme link in any message
-      if (text) {
-        const addthemeMatch = text.match(/(?:https?:\/\/)?t\.me\/addtheme\/([a-zA-Z0-9_\-\.]+)/);
-        if (addthemeMatch) {
-          await this.handleAddThemeLink(msg, addthemeMatch[1]);
-          return;
-        }
-      }
-
-      // theme file attached
-      if (!msg.media || msg.media.type !== "document") return;
-      const doc = msg.media as import("@mtcute/core").Document;
-      const name = (doc.fileName || "").toLowerCase();
-      const size = doc.fileSize || 0;
-      if (size > MAX_FILE_SIZE || size === 0) return;
-      if (!name.endsWith(".attheme") && !name.endsWith(".tdesktop-theme") && !name.endsWith(".tgios-theme") && !name.endsWith(".tgx-theme") && !name.endsWith(".json") && !name.endsWith(".tdesktop-palette") && !name.includes("theme") && !name.includes("tgx") && !name.includes("settings")) return;
-
-      await msg.edit({ text: html`⏳ 解析中…` });
-      const client = await getGlobalClient();
-      const buf = await downloadMedia(msg, client);
-      if (!buf || buf.length === 0) return;
-      // cloud-settings JSON first, then binary formats
-      const cloudDoc = parseCloudSettingsJson(buf);
-      if (cloudDoc) {
-        const baseName = (doc.fileName || "cloud-theme").replace(/\.[^.]+$/, "") || "theme";
-        await msg.edit({ text: html`⏳ 云端 JSON → 四端…` });
-        // Materialize as synthetic attheme buffer is unnecessary — feed colors via render path
-        // by building a minimal attheme for the pipeline
-        const lines = genAndroid(cloudDoc.colors);
-        const att = attachAtthemeWallpaper(lines.join("\n") + "\n", cloudDoc.wallpaper || null);
-        // stash slug meta into a sidecar by re-parsing after we inject via fmtMap + bestDoc merge
-        // Prefer: put JSON-derived doc through sendThemeResults using a synthetic map
-        const slugHint = cloudDoc.wallpaperSlug || null;
-        await this.sendThemeResults(
-          msg,
-          baseName,
-          baseName.replace(/[^a-zA-Z0-9_\-\.]/g, "_").slice(0, 48) || genSlug(),
-          { attheme: { format: "attheme", buf: att }, ...(slugHint ? { __cloudSlug: slugHint, __cloudDoc: cloudDoc } as any : { __cloudDoc: cloudDoc } as any) },
-          true,
-          null,
-        );
-        return;
-      }
-      const format = detectFmt(buf);
-      if (!format) {
-        await msg.edit({ text: html`❌ 不认识的文件格式` });
-        return;
-      }
-      // Route through the same lossless multi-format pipeline as link
-      const baseName = (doc.fileName || "theme").replace(/\.[^.]+$/, "") || "theme";
+  /** Process a theme file document from a reply — extracted from listenMessageHandler */
+  private async processThemeFile(msg: MessageContext, doc: import("@mtcute/core").Document, client: Awaited<ReturnType<typeof getGlobalClient>>): Promise<void> {
+    await msg.edit({ text: html`⏳ 解析中…` });
+    const buf = await downloadMedia({ media: doc }, client);
+    if (!buf || buf.length === 0) { await msg.edit({ text: html`❌ 下载失败` }); return; }
+    const cloudDoc = parseCloudSettingsJson(buf);
+    if (cloudDoc) {
+      const baseName = (doc.fileName || "cloud-theme").replace(/\.[^.]+$/, "") || "theme";
+      await msg.edit({ text: html`⏳ 云端 JSON → 四端…` });
+      const lines = genAndroid(cloudDoc.colors);
+      const att = attachAtthemeWallpaper(lines.join("\n") + "\n", cloudDoc.wallpaper || null);
+      const slugHint = cloudDoc.wallpaperSlug || null;
       await this.sendThemeResults(
         msg,
         baseName,
         baseName.replace(/[^a-zA-Z0-9_\-\.]/g, "_").slice(0, 48) || genSlug(),
-        { [format]: { format, buf } },
-        false,
+        { attheme: { format: "attheme", buf: att }, ...(slugHint ? { __cloudSlug: slugHint, __cloudDoc: cloudDoc } as any : { __cloudDoc: cloudDoc } as any) },
+        true,
         null,
       );
-    } catch (e) {
-      logger.error("[theme] listen:", e);
+      return;
     }
-  };
+    const format = detectFmt(buf);
+    if (!format) {
+      await msg.edit({ text: html`❌ 不认识的文件格式` });
+      return;
+    }
+    const baseName = (doc.fileName || "theme").replace(/\.[^.]+$/, "") || "theme";
+    await this.sendThemeResults(
+      msg,
+      baseName,
+      baseName.replace(/[^a-zA-Z0-9_\-\.]/g, "_").slice(0, 48) || genSlug(),
+      { [format]: { format, buf } },
+      false,
+      null,
+    );
+  }
+
+  // ── listen: file attachments + t.me/addtheme links ───────────────────
+  // DISABLED: Auto-processing only happens via explicit `theme` command
+  // listenMessageHandler = async (msg: MessageContext): Promise<void> => { ... };
 
   // ── Download a raw TL document correctly ────────────────────────────
   // mtcute downloadAsBuffer needs inputDocumentFileLocation (NOT inputDocument)
