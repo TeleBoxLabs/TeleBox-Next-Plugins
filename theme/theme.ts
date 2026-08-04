@@ -4274,6 +4274,9 @@ class ThemePlugin extends Plugin {
     const stats: Array<{ target: ThemeFormat; colors: number; bytes: number; wp: boolean; note: string }> = [];
     let wpSidecarSent = false;
 
+    // Collect all media items for a single sendMediaGroup (album)
+    const mediaItems: Array<{ type: string; file: Buffer; fileName: string; fileMime: string; caption?: any }> = [];
+
     try {
       await msg.edit({
         text: html`⏳ ${title} · 生成四端…`,
@@ -4369,15 +4372,12 @@ class ThemePlugin extends Plugin {
       }
 
       const sizeKb = Math.max(1, Math.round(out.length / 1024));
-      await client.sendMedia(msg.chat.id, {
+      mediaItems.push({
         type: "document",
         file: out,
         fileName: `${slug || "theme"}${FORMAT_EXT[target]}`,
         fileMime: API_MIME[target],
-      } as any, {
-        caption: html`✅ ${FORMAT_LABELS[target]} · ${v.colors || bestCount} 色 · ${sizeKb}KB${wpNote}`,
-        replyTo: msg.id,
-      });
+      } as any);
       sent.push(FORMAT_LABELS[target]);
       stats.push({ target, colors: v.colors || bestCount, bytes: out.length, wp: v.wp, note: fromLabel });
     }
@@ -4391,15 +4391,13 @@ class ThemePlugin extends Plugin {
         : wallpaperSource === "settings" ? "云端"
         : wallpaperSource || "?";
       const dim = formatImageDim(readImageDimensions(wallpaper));
-      await client.sendMedia(msg.chat.id, {
+      mediaItems.push({
         type: "document",
         file: wallpaper,
         fileName: `${slug || "theme"}-chat-background.${ext}`,
         fileMime: ext === "png" ? "image/png" : "image/jpeg",
-      } as any, {
         caption: html`🖼️ 聊天背景 · ${srcLabel}${dim ? ` · ${dim}` : ""}${wallpaperSlug ? ` · slug` : ""}`,
-        replyTo: msg.id,
-      });
+      } as any);
       wpSidecarSent = true;
     }
 
@@ -4408,15 +4406,13 @@ class ThemePlugin extends Plugin {
     if (!wallpaper && desktopKeptOwn && desktopWallpaper) {
       const ext = detectImageExt(desktopWallpaper) === "png" ? "png" : "jpg";
       const dim = formatImageDim(readImageDimensions(desktopWallpaper));
-      await client.sendMedia(msg.chat.id, {
+      mediaItems.push({
         type: "document",
         file: desktopWallpaper,
         fileName: `${slug || "theme"}-desktop-background.${ext}`,
         fileMime: ext === "png" ? "image/png" : "image/jpeg",
-      } as any, {
         caption: html`🖥️ Desktop 壁纸${dim ? ` · ${dim}` : ""}`,
-        replyTo: msg.id,
-      });
+      } as any);
     }
 
     const mobileSrcLabel = wallpaperSource === "attheme" ? "Android"
@@ -4431,8 +4427,6 @@ class ThemePlugin extends Plugin {
       const short = FORMAT_LABELS[s.target].split(" ")[0];
       return `${short}:${s.colors}色${s.wp ? "+壁纸" : ""}`;
     }).join(" · ");
-    const mobileDim = formatImageDim(readImageDimensions(wallpaper));
-    const desktopDim = desktopKeptOwn ? formatImageDim(readImageDimensions(desktopWallpaper)) : "";
 
     // Cloud themeSettings export for Unigram / Web (no proprietary file format)
     try {
@@ -4443,27 +4437,61 @@ class ThemePlugin extends Plugin {
         wallpaperBlur,
         wallpaperMotion,
       });
-      await client.sendMedia(msg.chat.id, {
+      mediaItems.push({
         type: "document",
         file: Buffer.from(settingsJson, "utf-8"),
         fileName: `${slug || "theme"}-cloud-settings.json`,
         fileMime: "application/json",
-      } as any, {
         caption: html`☁️ settings · Unigram/Web`,
-        replyTo: msg.id,
-      });
+      } as any);
       sent.push("Cloud settings");
     } catch (e) {
       logger.warn("[theme] settings export failed:", getErrorMessage(e));
     }
 
+    // Build the main caption for the first item (title + summary)
+    const totalKb = Math.max(1, Math.round(mediaItems.reduce((a, m) => a + m.file.length, 0) / 1024));
+    const mainCaption = html`🎨 <b>${title}</b>
+📊 ${bestCount} 色 · ${stats.length} 端 · ${totalKb}KB${wallpaper ? " · 🖼️" : ""}${wallpaperSlug ? " · slug" : ""}
+⏱ ${ms}ms`;
+
+    // Assign captions: first item gets the full caption, others keep their own or get a short label
+    let itemIdx = 0;
+    for (const item of mediaItems) {
+      if (itemIdx === 0) {
+        item.caption = mainCaption;
+      } else if (!item.caption) {
+        // Theme files without an existing caption get a short label
+        const stat = stats[itemIdx];
+        if (stat) {
+          item.caption = html`${FORMAT_LABELS[stat.target]} · ${stat.colors}色`;
+        }
+      }
+      itemIdx++;
+    }
+
+    // Send all items as a single media group (album)
+    if (mediaItems.length > 0) {
+      try {
+        await client.sendMediaGroup(msg.chat.id, mediaItems as any, { replyTo: msg.id });
+      } catch (e) {
+        logger.warn("[theme] sendMediaGroup failed, falling back to individual sends:", getErrorMessage(e));
+        for (const item of mediaItems) {
+          try {
+            await client.sendMedia(msg.chat.id, item as any, {
+              caption: item.caption,
+              replyTo: msg.id,
+            });
+          } catch (e2) {
+            logger.warn("[theme] individual send fallback failed:", getErrorMessage(e2));
+          }
+        }
+      }
+    }
+
     await msg.edit({
-      text: html`
-🎨 <b>${title}</b>
-${sent.join(" · ")}
-📊 ${bestCount} 色${wallpaper ? " · 🖼️" : ""}${wallpaperSlug ? " · slug" : ""}
-⏱ ${ms}ms
-      `,
+      text: html`🎨 <b>${title}</b> · ✅ ${stats.length} 端${sent.includes("Cloud settings") ? " + ☁️" : ""}
+${statLine}${wallpaper ? " · 🖼️" : ""}${wallpaperSlug ? " · slug" : ""} · ⏱ ${ms}ms`,
     });
   }
 
