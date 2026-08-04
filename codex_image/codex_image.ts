@@ -2,7 +2,7 @@ import axios from "axios";
 import path from "path";
 import type { Low } from "lowdb";
 import { JSONFilePreset } from "lowdb/node";
-import { Plugin, type PanelSettingsAdapter, type PanelSettingField, type PanelFieldType } from "@utils/pluginBase";
+import { Plugin, type PanelSettingsAdapter, type PanelSettingField } from "@utils/pluginBase";
 import type { MtcuteFileDownloadLocation } from "@utils/mtcuteTypes";
 import { getPrefixes } from "@utils/pluginManager";
 import { createDirectoryInAssets } from "@utils/pathHelpers";

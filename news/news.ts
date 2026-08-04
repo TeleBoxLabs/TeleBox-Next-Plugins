@@ -1,6 +1,7 @@
 import { getPrefixes } from "@utils/pluginManager";
 import { Plugin } from "@utils/pluginBase";
 import type { MessageContext } from "@mtcute/dispatcher";
+import type { TelegramClient } from "@mtcute/node";
 import { thtml as html } from "@mtcute/html-parser";
 import { getGlobalClient } from "@utils/runtimeManager";
 import axios from "axios";
@@ -133,7 +134,7 @@ class NewsPlugin extends Plugin {
   };
 
   // 私有方法：获取并显示新闻
-  private async fetchAndDisplayNews(msg: MessageContext, client: any): Promise<void> {
+  private async fetchAndDisplayNews(msg: MessageContext, client: TelegramClient): Promise<void> {
     try {
       // 渐进式状态更新
       await msg.edit({ text: html("📰 获取中...") });
