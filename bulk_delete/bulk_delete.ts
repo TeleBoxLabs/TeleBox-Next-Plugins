@@ -99,7 +99,7 @@ const bd = async (msg: MessageContext) => {
 
       // 获取最近的消息
       const recentMessages = await client.getHistory(chatId, { limit: 100 });
-      const filteredMessages = recentMessages.filter((m: any) => {
+      const filteredMessages = recentMessages.filter((m: { id: number; sender?: { id?: number | bigint } }) => {
         return String(m.sender?.id) === String(me.id) && m.id !== msg.id;
       });
 
@@ -161,11 +161,11 @@ const bd = async (msg: MessageContext) => {
     const chatType = (chat as { raw?: { _?: string } } | null)?.raw?._;
     if (chatType === "channel" || chatType === "chat") {
       try {
-        const participant: any = await client.call({
+        const participant = await client.call({
           _: 'channels.getParticipant',
           channel: await client.resolvePeer(chatId),
           participant: me.id,
-        } as never);
+        } as never) as { participant?: { _?: string; adminRights?: { deleteMessages?: boolean } } };
 
         if (participant && participant.participant) {
           const p = participant.participant;
@@ -260,10 +260,17 @@ export default new BulkDeletePlugin();
 // Timer tracking for safe cleanup
 const pendingTimers = new Set<ReturnType<typeof setTimeout>>();
 
-function scheduleTimer(fn: () => void, ms: number): ReturnType<typeof setTimeout> {
+function scheduleTimer(fn: () => void | Promise<void>, ms: number): ReturnType<typeof setTimeout> {
   const t = setTimeout(() => {
     pendingTimers.delete(t);
-    fn();
+    try {
+      const ret = fn();
+      if (ret && typeof (ret as Promise<void>).catch === 'function') {
+        (ret as Promise<void>).catch((e: unknown) => logger.warn('[bulk_delete] 定时器回调异常:', e));
+      }
+    } catch (e: unknown) {
+      logger.warn('[bulk_delete] 定时器同步异常:', e);
+    }
   }, ms);
   pendingTimers.add(t);
   return t;
