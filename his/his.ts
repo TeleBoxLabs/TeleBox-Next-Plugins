@@ -86,7 +86,7 @@ class HisPlugin extends Plugin {
 
         // 处理帮助命令
         if (args[0] === "help" || args[0] === "h") {
-          await msg.edit({ text: help_text });
+          await msg.edit({ text: html(help_text) });
           return;
         }
 
@@ -315,7 +315,7 @@ class HisPlugin extends Plugin {
 
         // 发送第一片
         await msg.edit({
-          text: chunks[0],
+          text: html(chunks[0]),
           disableWebPreview: true
         });
 
@@ -327,7 +327,7 @@ class HisPlugin extends Plugin {
         }
       } else {
         await msg.edit({
-          text: results,
+          text: html(results),
           disableWebPreview: true
         });
       }
@@ -337,7 +337,7 @@ class HisPlugin extends Plugin {
     } catch (error: any) {
       logger.error("[HIS_ERROR]:", error);
       await msg.edit({
-        text: `❌ 查询失败: ${htmlEscape(error.message || "未知错误")}`
+        text: html(`❌ 查询失败: ${htmlEscape(error.message || "未知错误")}`)
       });
     }
   }
