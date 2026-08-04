@@ -4,6 +4,7 @@ import { getPrefixes } from "@utils/pluginManager";
 import { createDirectoryInAssets } from "@utils/pathHelpers";
 import type { MessageContext } from "@mtcute/dispatcher";
 import type { TelegramClient } from "@mtcute/node";
+import type { Message } from "@mtcute/core";
 import { thtml as html } from "@mtcute/html-parser";
 import * as fs from "fs";
 import * as path from "path";
@@ -348,12 +349,12 @@ class CheckInPlugin extends Plugin {
   }
 
   private async waitForNewMessage(
-    client: any,
+    client: TelegramClient,
     peer: string,
     minDate: number,
     timeoutMs: number,
-    filter?: (m: MessageContext) => boolean
-  ): Promise<MessageContext | null> {
+    filter?: (m: Message) => boolean
+  ): Promise<Message | null> {
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
       try {
@@ -370,7 +371,7 @@ class CheckInPlugin extends Plugin {
     return null;
   }
 
-  private async clickCallbackButton(_client: TelegramClient, peer: string, msg: MessageContext, target: SignTarget): Promise<void> {
+  private async clickCallbackButton(_client: TelegramClient, peer: string, msg: Message, target: SignTarget): Promise<void> {
     const btn = this.findCallbackButton(msg, target);
     if (!btn) throw new Error(`未找到回调按钮: ${target.callbackData || target.buttonText || target.id}`);
     const globalClient = await getGlobalClient();
@@ -385,7 +386,7 @@ class CheckInPlugin extends Plugin {
     });
   }
 
-  private findCallbackButton(msg: MessageContext, target: SignTarget): { data?: string | Buffer; text?: string } | null {
+  private findCallbackButton(msg: Message, target: SignTarget): { data?: string | Buffer; text?: string } | null {
     const rows = (msg.markup as { rows?: Array<{ buttons?: unknown[] }> } | null)?.rows || [];
     for (const row of rows) {
       for (const b of row.buttons as Array<{ data?: string; text?: string }>) {
@@ -467,7 +468,7 @@ class CheckInPlugin extends Plugin {
     return String(data);
   }
 
-  private isAfterMessage(msg: MessageContext, id: number): boolean {
+  private isAfterMessage(msg: Message, id: number): boolean {
     return !id || Number(msg.id || 0) > id;
   }
 
