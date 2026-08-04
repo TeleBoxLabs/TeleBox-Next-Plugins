@@ -449,8 +449,12 @@ class ParseHubPlugin extends Plugin {
       if (!client) return;
 
       const links = extractLinks(msg.text || "");
-      const replyLinks = msg.replyToMessage
-        ? extractLinks((msg.replyToMessage as any).text || "")
+      // 从回复消息中提取链接（replyToMessage 是 RepliedMessageInfo，需要 fetch 完整 Message）
+      const replyMsg = msg.replyToMessage?.id
+        ? await safeGetReplyMessage(msg)
+        : undefined;
+      const replyLinks = replyMsg?.text
+        ? extractLinks(replyMsg.text)
         : [];
       const allLinks = [...new Set([...links, ...replyLinks])];
 
