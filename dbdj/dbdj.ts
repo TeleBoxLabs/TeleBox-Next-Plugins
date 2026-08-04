@@ -7,6 +7,7 @@ import { logger } from "@utils/logger";
 import { getErrorMessage } from "@utils/errorHelpers";
 import { thtml as html } from "@mtcute/node";
 import type { ClientInternals } from "@utils/clientInternals";
+import type { MessageContext } from "@mtcute/dispatcher";
 
 const prefixes = getPrefixes();
 const mainPrefix = prefixes[0];
@@ -83,14 +84,14 @@ class DbdjPlugin extends Plugin {
   description: string = `点兵点将\n<code>${mainPrefix}dbdj 消息数 人数 文案</code> - 从最近的消息中随机抽取指定人数的用户`;
   cmdHandlers: Record<
     string,
-    (msg: any, trigger?: any) => Promise<void>
+    (msg: MessageContext, trigger?: unknown) => Promise<void>
   > = {
-    dbdj: async (msg: any, trigger?: any) => {
+    dbdj: async (msg, trigger?: unknown) => {
       const startAt = Date.now();
       const replyAndDeleteMsg = async (message: string) => {
-        const replyTarget = trigger || msg;
+        const replyTarget = (trigger as MessageContext) || msg;
         await replyTarget.replyText(html(message), {
-          linkPreview: false,
+          disableWebPreview: true,
         });
         try {
           await msg.delete();
