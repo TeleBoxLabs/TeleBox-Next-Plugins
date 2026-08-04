@@ -20,6 +20,7 @@ import { sleep } from "@utils/asyncHelpers";
 import { Long } from "@mtcute/core";
 import type { tl } from "@mtcute/core";
 import { htmlEscape } from "@utils/htmlEscape";
+import { getPrefixes } from "@utils/pluginManager";
 
 // 常量配置
 const CONFIG = {
@@ -49,9 +50,8 @@ const CONFIG = {
 
 // 工具函数
 
-// 获取命令前缀
-const prefixes = ["."];
-const mainPrefix = prefixes[0];
+// 获取命令前缀（从 pluginManager 动态读取，确保与全局设置一致）
+const mainPrefix = getPrefixes()[0];
 
 const TEXT_PLACEHOLDER = "占位符";
 
