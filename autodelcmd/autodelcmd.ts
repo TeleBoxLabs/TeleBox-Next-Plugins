@@ -11,6 +11,7 @@ import path from "path";
 import { safeGetMessages } from "@utils/safeGetMessages";
 import { logger } from "@utils/logger";
 import { htmlEscape } from "@utils/htmlEscape";
+import { getErrorMessage, getErrorCode } from "@utils/errorHelpers";
 
 const CONFIG_FILE_PATH = path.join(
   createDirectoryInAssets("autodelcmd"),
@@ -291,8 +292,7 @@ class AutoDeleteService {
     try {
       await fs.unlink(EXIT_MSG_FILE_PATH);
     } catch (error: unknown) {
-      // 文件不存在时忽略错误
-      if (error.code !== 'ENOENT') {
+      if (getErrorCode(error) !== 'ENOENT') {
         logger.error("[autodelcmd] 清除退出消息文件失败:", error);
       }
     }
@@ -327,7 +327,7 @@ class AutoDeleteService {
               logger.info(`[autodelcmd] 正在执行未完成的删除任务，消息 ID ${exitMsg.mid}`);
               await message[0].delete({ revoke: true });
             } catch (error: unknown) {
-              logger.error(`[autodelcmd] 删除消息 ID ${exitMsg.mid} 失败:`, error.message);
+              logger.error(`[autodelcmd] 删除消息 ID ${exitMsg.mid} 失败:`, getErrorMessage(error));
             }
           }, 10 * 1000);
         } else {
@@ -368,7 +368,7 @@ class AutoDeleteService {
         // 删除成功后，从退出消息记录中移除此条记录
         await this.removeExitMessage(msg);
       } catch (error: unknown) {
-        logger.error(`[autodelcmd] 删除消息 ID ${msg.id} 失败:`, error.message);
+        logger.error(`[autodelcmd] 删除消息 ID ${msg.id} 失败:`, getErrorMessage(error));
         
         // 删除失败也要从记录中移除，避免重复尝试
         await this.removeExitMessage(msg);
