@@ -6,7 +6,7 @@ import {
 import { logger } from "@utils/logger";
 import type { MessageContext } from "@mtcute/dispatcher";
 import { thtml as html } from "@mtcute/html-parser";
-import { execSync, execFile, ChildProcess, spawn } from "child_process";
+import { execFile, execFileSync, ChildProcess, spawn } from "child_process";
 import { promisify } from "util";
 import * as path from "path";
 import * as fs from "fs";
@@ -186,7 +186,7 @@ let dependenciesInstalled = false;
 let isInstalling = false;
 try {
   require.resolve("better-sqlite3");
-  execSync("command -v sshpass");
+  execFileSync("command", ["-v", "sshpass"], { stdio: 'ignore' });
   dependenciesInstalled = true;
 } catch (_e: unknown) {
   dependenciesInstalled = false;
@@ -204,7 +204,7 @@ async function installDependencies(msg: MessageContext): Promise<void> {
       logger.info("[SUCCESS] Installed 'better-sqlite3'.");
     }
     try {
-      execSync("command -v sshpass");
+      execFileSync("command", ["-v", "sshpass"], { stdio: 'ignore' });
     } catch (e: unknown) {
       logger.info("[INSTALLING] 'sshpass' not found. Installing via system package manager...", e);
       if (fs.existsSync("/usr/bin/apt-get")) {

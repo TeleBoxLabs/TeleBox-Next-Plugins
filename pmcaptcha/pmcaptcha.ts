@@ -3,7 +3,7 @@ import { Long } from "@mtcute/core";
 import type { MessageContext } from "@mtcute/dispatcher";
 import path from "path";
 import fs from "fs";
-import { execSync } from "child_process";
+import { npm_install } from "@utils/npm_install";
 import { JSONFilePreset } from "lowdb/node";
 import { createDirectoryInAssets } from "@utils/pathHelpers";
 import { Plugin, type PanelSettingsAdapter, type PanelSettingField, type PanelFieldType, type PluginRuntimeContext } from "@utils/pluginBase";
@@ -511,7 +511,7 @@ async function tryGetCanvas(): Promise<any> {
   log(LogLevel.INFO, "canvas not found — auto installing (npm install canvas)…");
 
   try {
-    execSync("npm install canvas", { stdio: "pipe" });
+    npm_install("canvas");
     log(LogLevel.INFO, "canvas installed successfully");
   } catch (e: unknown) {
     log(LogLevel.ERROR, "canvas install failed", e);

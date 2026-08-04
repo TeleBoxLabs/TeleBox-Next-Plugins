@@ -7,7 +7,7 @@ import type { TelegramClient } from "@mtcute/node";
 import { thtml as html } from "@mtcute/html-parser";
 import * as fs from "fs";
 import * as path from "path";
-import { execSync, execFileSync } from "child_process";
+import { execFileSync } from "child_process";
 import * as os from "os";
 import { safeGetReplyMessage } from "@utils/safeGetMessages";
 import { logger } from "@utils/logger";
@@ -22,7 +22,7 @@ const mainPrefix = prefixes[0];
 const ensureImageMagick = async (showProgress: boolean = false, msg?: MessageContext): Promise<boolean> => {
   try {
     // 检查是否已安装
-    execSync('which convert', { stdio: 'ignore' });
+    execFileSync('which', ['convert'], { stdio: 'ignore' });
     return true;
   } catch (error: unknown) {
     logger.info('[sticker_to_pic] ImageMagick未安装，正在自动安装...');
@@ -39,11 +39,13 @@ const ensureImageMagick = async (showProgress: boolean = false, msg?: MessageCon
         try {
           // 尝试使用sudo（如果可用）
           try {
-            execSync('sudo -n true', { stdio: 'ignore' });
-            execSync('sudo apt-get update && sudo apt-get install -y imagemagick', { stdio: 'pipe' });
+            execFileSync('sudo', ['-n', 'true'], { stdio: 'ignore' });
+            execFileSync('sudo', ['apt-get', 'update'], { stdio: 'pipe' });
+            execFileSync('sudo', ['apt-get', 'install', '-y', 'imagemagick'], { stdio: 'pipe' });
           } catch (_e: unknown) {
             // 无sudo权限，尝试直接安装
-            execSync('apt-get update && apt-get install -y imagemagick', { stdio: 'pipe' });
+            execFileSync('apt-get', ['update'], { stdio: 'pipe' });
+            execFileSync('apt-get', ['install', '-y', 'imagemagick'], { stdio: 'pipe' });
           }
           logger.info('[sticker_to_pic] ImageMagick自动安装成功 (apt)');
           return true;
@@ -51,10 +53,10 @@ const ensureImageMagick = async (showProgress: boolean = false, msg?: MessageCon
           // 尝试yum (CentOS/RHEL)
           try {
             try {
-              execSync('sudo -n true', { stdio: 'ignore' });
-              execSync('sudo yum install -y ImageMagick', { stdio: 'pipe' });
+              execFileSync('sudo', ['-n', 'true'], { stdio: 'ignore' });
+              execFileSync('sudo', ['yum', 'install', '-y', 'ImageMagick'], { stdio: 'pipe' });
             } catch (_e: unknown) {
-              execSync('yum install -y ImageMagick', { stdio: 'pipe' });
+              execFileSync('yum', ['install', '-y', 'ImageMagick'], { stdio: 'pipe' });
             }
             logger.info('[sticker_to_pic] ImageMagick自动安装成功 (yum)');
             return true;
@@ -62,10 +64,10 @@ const ensureImageMagick = async (showProgress: boolean = false, msg?: MessageCon
             // 尝试dnf (Fedora)
             try {
               try {
-                execSync('sudo -n true', { stdio: 'ignore' });
-                execSync('sudo dnf install -y ImageMagick', { stdio: 'pipe' });
+                execFileSync('sudo', ['-n', 'true'], { stdio: 'ignore' });
+                execFileSync('sudo', ['dnf', 'install', '-y', 'ImageMagick'], { stdio: 'pipe' });
               } catch (_e: unknown) {
-                execSync('dnf install -y ImageMagick', { stdio: 'pipe' });
+                execFileSync('dnf', ['install', '-y', 'ImageMagick'], { stdio: 'pipe' });
               }
               logger.info('[sticker_to_pic] ImageMagick自动安装成功 (dnf)');
               return true;
@@ -79,34 +81,26 @@ const ensureImageMagick = async (showProgress: boolean = false, msg?: MessageCon
         // macOS系统
         try {
           // 检查是否有Homebrew
-          execSync('which brew', { stdio: 'ignore' });
-          execSync('brew install imagemagick', { stdio: 'pipe' });
+          execFileSync('which', ['brew'], { stdio: 'ignore' });
+          execFileSync('brew', ['install', 'imagemagick'], { stdio: 'pipe' });
           logger.info('[sticker_to_pic] ImageMagick自动安装成功 (brew)');
           return true;
         } catch (_e: unknown) {
-          // 尝试安装Homebrew后再安装ImageMagick
-          try {
-            logger.info('[sticker_to_pic] 正在安装Homebrew...');
-            execSync('/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"', { stdio: 'pipe' });
-            execSync('brew install imagemagick', { stdio: 'pipe' });
-            logger.info('[sticker_to_pic] ImageMagick自动安装成功 (brew)');
-            return true;
-          } catch (e: unknown) {
-            logger.error('[sticker_to_pic] macOS自动安装失败:', e);
-            return false;
-          }
+          // Homebrew 未安装时不再自动下载远程脚本安装——安全要求禁止 execSync(curl|bash) 模式
+          logger.error('[sticker_to_pic] macOS需要手动安装 Homebrew 后再安装 ImageMagick');
+          return false;
         }
       } else if (platform === 'win32') {
         // Windows系统 - 尝试使用chocolatey或scoop
         try {
-          execSync('where choco', { stdio: 'ignore' });
-          execSync('choco install imagemagick -y', { stdio: 'pipe' });
+          execFileSync('where', ['choco'], { stdio: 'ignore' });
+          execFileSync('choco', ['install', 'imagemagick', '-y'], { stdio: 'pipe' });
           logger.info('[sticker_to_pic] ImageMagick自动安装成功 (chocolatey)');
           return true;
         } catch (e: unknown) {
           try {
-            execSync('where scoop', { stdio: 'ignore' });
-            execSync('scoop install imagemagick', { stdio: 'pipe' });
+            execFileSync('where', ['scoop'], { stdio: 'ignore' });
+            execFileSync('scoop', ['install', 'imagemagick'], { stdio: 'pipe' });
             logger.info('[sticker_to_pic] ImageMagick自动安装成功 (scoop)');
             return true;
           } catch (e: unknown) {
@@ -201,10 +195,10 @@ class StickerToPicPlugin extends Plugin {
         
         // 首先检查是否已安装
         try {
-          execSync('which convert', { stdio: 'ignore' });
+          execFileSync('which', ['convert'], { stdio: 'ignore' });
           // 已安装，获取版本信息
           try {
-            const version = execSync('convert -version', { encoding: 'utf8' });
+            const version = execFileSync('convert', ['-version'], { encoding: 'utf8' });
             const versionLine = version.split('\n')[0];
             await msg.edit({
               text: html(`✅ <b>ImageMagick状态正常</b>\n\n<b>版本信息:</b>\n<code>${htmlEscape(versionLine)}</code>\n\n🎯 <b>功能状态:</b> 可正常使用贴纸转换功能`)
@@ -221,7 +215,7 @@ class StickerToPicPlugin extends Plugin {
           const isInstalled = await ensureImageMagick(true, msg);
           if (isInstalled) {
             try {
-              const version = execSync('convert -version', { encoding: 'utf8' });
+              const version = execFileSync('convert', ['-version'], { encoding: 'utf8' });
               const versionLine = version.split('\n')[0];
               await msg.edit({
                 text: html(`🎉 <b>ImageMagick自动安装成功！</b>\n\n<b>版本信息:</b>\n<code>${htmlEscape(versionLine)}</code>\n\n✅ <b>状态:</b> 现在可以正常使用贴纸转换功能`)
