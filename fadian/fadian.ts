@@ -375,11 +375,11 @@ class FadianPlugin extends Plugin {
       }
 ],
     getValues: async (): Promise<Record<string, unknown>> => {
-      const db = await JSONFilePreset<any>(path.join(createDirectoryInAssets("fadian"), "config.json"), {} as any);
+      const db = await JSONFilePreset<Record<string, unknown>>(path.join(createDirectoryInAssets("fadian"), "config.json"), {});
       return db.data as Record<string, unknown>;
     },
     setValues: async (patch: Record<string, unknown>): Promise<void> => {
-      const db = await JSONFilePreset<any>(path.join(createDirectoryInAssets("fadian"), "config.json"), {} as any);
+      const db = await JSONFilePreset<Record<string, unknown>>(path.join(createDirectoryInAssets("fadian"), "config.json"), {});
       Object.assign(db.data, patch);
       await db.write();
     },

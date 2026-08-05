@@ -178,7 +178,7 @@ async function setSystemTimeBestEffort(serverTimeMs: number): Promise<{
   command?: string;
   stdout?: string;
   stderr?: string;
-  error?: any;
+  error?: unknown;
   hint?: string;
 }> {
   const platform = process.platform;
