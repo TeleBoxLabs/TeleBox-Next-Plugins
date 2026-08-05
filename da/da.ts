@@ -215,7 +215,7 @@ ${recentErrors ? `<b>⚠️ 最近错误:</b>\n${recentErrors}` : ""}`;
         await client.editMessage({
           chatId: 'me',
           message: task.savedMessageId,
-          text: message,
+          text: html(message),
         });
         return task.savedMessageId;
       } catch (editError: unknown) {
