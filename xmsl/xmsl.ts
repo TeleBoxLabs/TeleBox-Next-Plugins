@@ -2,7 +2,7 @@ import { Plugin } from '@utils/pluginBase';
 import { getPrefixes } from '@utils/pluginManager';
 import type { MessageContext } from "@mtcute/dispatcher";
 import { html } from "@mtcute/html-parser";
-import axios from 'axios';
+import axios, { type AxiosError } from 'axios';
 import { createDirectoryInAssets, createDirectoryInTemp } from '@utils/pathHelpers';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -11,6 +11,7 @@ import { getGlobalClient } from '@utils/runtimeManager';
 import { execFile } from 'child_process';
 import { safeGetReplyMessage } from '@utils/safeGetMessages';
 import { promisify } from 'util';
+import { getErrorMessage, getErrorCode } from '@utils/errorHelpers';
 
 const execFileAsync = promisify(execFile);
 const XMSL_TEMP_DIR = createDirectoryInTemp('xmsl');
@@ -199,7 +200,7 @@ class XMSLPlugin extends Plugin {
 		apiKey: '',
 		model: 'gpt-4',
 	};
-	private db: any = null;
+	private db: Awaited<ReturnType<typeof JSONFilePreset<XMSLConfig>>> | null = null;
 	private baseDir: string = '';
 
 	// 更新帮助文档，加入 .xm 别名说明
@@ -288,7 +289,7 @@ class XMSLPlugin extends Plugin {
 	/**
 	 * 从消息中提取媒体信息
 	 */
-	private async extractMediaInfo(message: any): Promise<MediaInfo | null> {
+	private async extractMediaInfo(message: { media?: unknown }): Promise<MediaInfo | null> {
 		if (!message.media) return null;
 
 		const client = await getGlobalClient();
@@ -296,8 +297,8 @@ class XMSLPlugin extends Plugin {
 
 		try {
 			// 处理图片
-			if ((message.media as any)?._ === 'messageMediaPhoto') {
-				const buffer = await (client as any).downloadMedia(message.media, {});
+			if ((message.media as { _?: string })?._ === 'messageMediaPhoto') {
+				const buffer = await (client as unknown as { downloadMedia: (media: unknown, opts: unknown) => Promise<Buffer | undefined> }).downloadMedia(message.media, {});
 				if (buffer && Buffer.isBuffer(buffer)) {
 					const detectedMime = detectImageMime(buffer);
 					if (detectedMime) {
@@ -311,20 +312,20 @@ class XMSLPlugin extends Plugin {
 			}
 
 			// 处理文档类型（贴纸、图片文件等）
-			if ((message.media as any)?._ === 'messageMediaDocument') {
-				const doc = (message.media as any).document;
-				if ((doc as any)?._ !== 'document') return null;
+			if ((message.media as { _?: string })?._ === 'messageMediaDocument') {
+				const doc = (message.media as { document?: { _?: string; mimeType?: string; attributes?: { _?: string }[] } }).document;
+				if (doc?._ !== 'document') return null;
 
 				const mimeType = doc.mimeType || '';
 
 				// 检测是否为贴纸
 				const isSticker = doc.attributes?.some(
-					(a: any) => (a as any)._ === 'documentAttributeSticker'
+					(a) => a?._ === 'documentAttributeSticker'
 				);
 
 				// TGS 动态贴纸 - 尝试渲染第一帧
 				if (mimeType === TGS_MIME) {
-					const buffer = await (client as any).downloadMedia(message.media, {});
+					const buffer = await (client as unknown as { downloadMedia: (media: unknown, opts: unknown) => Promise<Buffer | undefined> }).downloadMedia(message.media, {});
 					if (buffer && Buffer.isBuffer(buffer)) {
 						const pngBuffer = await extractTgsFirstFrame(buffer);
 						if (pngBuffer) {
@@ -341,7 +342,7 @@ class XMSLPlugin extends Plugin {
 
 				// 视频贴纸 (WebM) - 提取第一帧
 				if (mimeType === WEBM_MIME) {
-					const buffer = await (client as any).downloadMedia(message.media, {});
+					const buffer = await (client as unknown as { downloadMedia: (media: unknown, opts: unknown) => Promise<Buffer | undefined> }).downloadMedia(message.media, {});
 					if (buffer && Buffer.isBuffer(buffer)) {
 						const pngBuffer = await extractWebmFirstFrame(buffer);
 						if (pngBuffer) {
@@ -359,7 +360,7 @@ class XMSLPlugin extends Plugin {
 				// 静态图片和贴纸
 				if (SUPPORTED_IMAGE_MIMES.includes(mimeType)) {
 					// 已知支持的图片格式，直接下载
-					const buffer = await (client as any).downloadMedia(message.media, {});
+					const buffer = await (client as unknown as { downloadMedia: (media: unknown, opts: unknown) => Promise<Buffer | undefined> }).downloadMedia(message.media, {});
 					if (buffer && Buffer.isBuffer(buffer)) {
 						const detectedMime = detectImageMime(buffer);
 						if (detectedMime) {
@@ -372,9 +373,9 @@ class XMSLPlugin extends Plugin {
 					}
 				} else if (isSticker) {
 					// 其他贴纸类型（未知格式），尝试下载缩略图
-					const buffer = await (client as any).downloadMedia(message.media, {
-						thumb: 1
-					});
+						const buffer = await (client as unknown as { downloadMedia: (media: unknown, opts: unknown) => Promise<Buffer | undefined> }).downloadMedia(message.media, {
+							thumb: 1
+						});
 					if (buffer && Buffer.isBuffer(buffer)) {
 						const detectedMime = detectImageMime(buffer);
 						if (detectedMime) {
@@ -421,10 +422,10 @@ class XMSLPlugin extends Plugin {
 						}
 
 						// 检查是否是转换失败的贴纸格式
-						if ((replyMsg.media as any)?._ === 'messageMediaDocument') {
-							const doc = (replyMsg.media as any).document;
-							if ((doc as any)?._ === 'document') {
-								if (doc.mimeType === TGS_MIME) {
+							if ((replyMsg.media as { _?: string })?._ === 'messageMediaDocument') {
+								const doc = (replyMsg.media as { document?: { _?: string; mimeType?: string } }).document;
+								if (doc?._ === 'document') {
+									if (doc.mimeType === TGS_MIME) {
 									await msg.edit({
 										text: html`❌ TGS 贴纸转换失败<br><br>
 需要安装: <code>pip3 install rlottie-python</code> 和 <code>ffmpeg</code>`,
@@ -467,9 +468,9 @@ class XMSLPlugin extends Plugin {
 					await this.askAI(msg, args.join(' '));
 					break;
 			}
-		} catch (error: any) {
+		} catch (error: unknown) {
 			await msg.edit({
-				text: html`❌ 处理失败: ${error.message}`,
+				text: html`❌ 处理失败: ${getErrorMessage(error)}`,
 			});
 		}
 	}
@@ -521,9 +522,9 @@ class XMSLPlugin extends Plugin {
 			await msg.edit({
 				text: html`✅ ${key} 已设置为: <code>${value}</code>`,
 			});
-		} catch (error: any) {
+		} catch (error: unknown) {
 			await msg.edit({
-				text: html`❌ 设置失败: ${error.message}`,
+				text: html`❌ 设置失败: ${getErrorMessage(error)}`,
 			});
 		}
 	}
@@ -600,25 +601,27 @@ model: <code>${this.config.model}</code><br>
 			await msg.edit({
 				text: html(answer),
 			});
-		} catch (error: any) {
+		} catch (error: unknown) {
 			console.error('[xmsl] API Error:', error);
 			// 打印 API 返回的详细错误信息
-			if (error.response?.data) {
-				console.error('[xmsl] API Response:', JSON.stringify(error.response.data, null, 2));
+			const axiosErr = error as AxiosError;
+			if (axiosErr.response?.data) {
+				console.error('[xmsl] API Response:', JSON.stringify(axiosErr.response.data, null, 2));
 			}
 			let errorMsg = '❌ API 调用失败';
 
-			if (error.response?.status === 400) {
-				const apiError = error.response?.data?.error?.message || '请求格式错误';
+			if (axiosErr.response?.status === 400) {
+				const apiError = (axiosErr.response?.data as { error?: { message?: string } })?.error?.message || '请求格式错误';
 				errorMsg = `❌ API 请求错误: ${this.htmlEscape(apiError)}`;
-			} else if (error.response?.status === 401) {
+			} else if (axiosErr.response?.status === 401) {
 				errorMsg = '❌ API 密钥无效';
-			} else if (error.response?.status === 429) {
+			} else if (axiosErr.response?.status === 429) {
 				errorMsg = '❌ 请求过于频繁，请稍后重试';
-			} else if (error.code === 'ECONNREFUSED') {
+			} else if (getErrorCode(error) === 'ECONNREFUSED') {
 				errorMsg = '❌ 无法连接到 API 服务器';
-			} else if (error.message) {
-				errorMsg = `❌ ${this.htmlEscape(error.message)}`;
+			} else {
+				const msg = getErrorMessage(error);
+				if (msg) errorMsg = `❌ ${this.htmlEscape(msg)}`;
 			}
 
 			await msg.edit({
@@ -637,14 +640,14 @@ model: <code>${this.config.model}</code><br>
 			timeout: 60000,
 		});
 
-		const messages: any[] = [];
+		const messages: Array<{ role: string; content: string | Array<{ type: string; text?: string; image_url?: { url: string } }> }> = [];
 		if (SYSTEM_PROMPT) {
 			messages.push({ role: 'system', content: SYSTEM_PROMPT });
 		}
 
 		// 构建用户消息内容
 		if (imageInfo) {
-			const content: any[] = [];
+			const content: Array<{ type: string; text?: string; image_url?: { url: string } }> = [];
 			if (question) {
 				content.push({ type: 'text', text: question });
 			} else {
@@ -677,7 +680,7 @@ model: <code>${this.config.model}</code><br>
 		)}:generateContent`;
 
 		// 构建内容部分
-		const parts: any[] = [];
+		const parts: Array<{ text?: string; inlineData?: { mimeType: string; data: string } }> = [];
 		if (question) {
 			parts.push({ text: question });
 		} else if (imageInfo) {
@@ -693,7 +696,7 @@ model: <code>${this.config.model}</code><br>
 			});
 		}
 
-		const requestBody: any = {
+		const requestBody: { contents: Array<{ parts: typeof parts }>; generationConfig: { temperature: number }; systemInstruction?: { parts: Array<{ text: string }> } } = {
 			contents: [{ parts }],
 			generationConfig: {
 				temperature: 0.7,
@@ -719,7 +722,7 @@ model: <code>${this.config.model}</code><br>
 		const responseParts = response.data?.candidates?.[0]?.content?.parts || [];
 		return (
 			responseParts
-				.map((p: any) => p.text || '')
+				.map((p: { text?: string }) => p.text || '')
 				.join('')
 				.trim() || '无法获取回复'
 		);

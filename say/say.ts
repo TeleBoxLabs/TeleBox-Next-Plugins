@@ -86,17 +86,19 @@ function maskKey(key: string): string {
 }
 
 /** 从 axios 错误中提取可读详情（含响应体 message/error/msg 字段） */
-function describeAxiosError(e: any): string {
+function describeAxiosError(e: unknown): string {
     if (!e) return "未知错误";
-    const resp = e.response;
-    if (!resp) return e.message || String(e);
+    const err = e as { message?: string; response?: { status?: number; data?: unknown } };
+    const resp = err.response;
+    if (!resp) return err.message || String(e);
     const body = resp.data;
     let detail = "";
     if (typeof body === "string") {
         detail = body.slice(0, 200);
     } else if (body && typeof body === "object") {
-        detail = body.message || body.error || body.msg
-            || (typeof body.data === "string" ? body.data : "")
+        const b = body as { message?: string; error?: string; msg?: string; data?: string | unknown };
+        detail = b.message || b.error || b.msg
+            || (typeof b.data === "string" ? b.data : "")
             || JSON.stringify(body).slice(0, 200);
     }
     return `HTTP ${resp.status}${detail ? `: ${detail}` : ""}`;
@@ -898,9 +900,9 @@ async function synthesizeAndSend(
         }
 
         return { ok: true, sentMessage };
-    } catch (error: any) {
+    } catch (error: unknown) {
         // 优先用上游已提取的消息（synthesize 内已 describe），否则尝试 axios 提取
-        const errMsg = error?.message
+        const errMsg = error instanceof Error && error.message
             ? error.message
             : describeAxiosError(error);
         return { ok: false, error: errMsg };

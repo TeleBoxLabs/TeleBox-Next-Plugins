@@ -12,6 +12,7 @@ import { getPrefixes } from "@utils/pluginManager";
 import { safeGetReplyMessage } from "@utils/safeGetMessages";
 import { logger } from "@utils/logger";
 import { htmlEscape } from "@utils/htmlEscape";
+import { getErrorMessage } from "@utils/errorHelpers";
 import type { MessageContext } from "@mtcute/dispatcher";
 import { TelegramClient } from "@mtcute/node";
 
@@ -154,19 +155,20 @@ class HisPlugin extends Plugin {
         });
         return;
 
-      } catch (error: any) {
+      } catch (error: unknown) {
         logger.error("[his] 插件执行失败:", error);
+        const errMsg = getErrorMessage(error);
 
         // 处理特定错误类型
-        if (error.message?.includes("FLOOD_WAIT")) {
-          const waitTime = parseInt(error.message.match(/\d+/)?.[0] || "60");
+        if (errMsg.includes("FLOOD_WAIT")) {
+          const waitTime = parseInt(errMsg.match(/\d+/)?.[0] || "60");
           await msg.edit({
             text: html(`⏳ <b>请求过于频繁</b>\n\n需要等待 ${waitTime} 秒后重试`)
           });
           return;
         }
 
-        if (error.message?.includes("MESSAGE_TOO_LONG")) {
+        if (errMsg.includes("MESSAGE_TOO_LONG")) {
           await msg.edit({
             text: html("❌ <b>消息过长</b>\n\n请减少查询数量")
           });
@@ -175,7 +177,7 @@ class HisPlugin extends Plugin {
 
         // 通用错误处理
         await msg.edit({
-          text: html(`❌ <b>操作失败:</b> ${htmlEscape(error.message || "未知错误")}`)
+          text: html(`❌ <b>操作失败:</b> ${htmlEscape(errMsg || "未知错误")}`)
         });
       }
     }
@@ -245,7 +247,7 @@ class HisPlugin extends Plugin {
 
         // 处理媒体消息
         if (message.media) {
-          messageText = await this.processMediaMessage(message, messageText);
+          messageText = this.processMediaMessage(message as { media?: { type?: string; constructor?: { name?: string }; attr?: { _?: string; voice?: boolean } } | null }, messageText);
         }
 
         // 处理服务消息
@@ -334,21 +336,22 @@ class HisPlugin extends Plugin {
 
       logger.info(`[HIS] 查询完成 - 群组: ${chatId}, 目标: ${targetEntity.toString()}, 消息数: ${count}`);
 
-    } catch (error: any) {
+    } catch (error: unknown) {
       logger.error("[HIS_ERROR]:", error);
       await msg.edit({
-        text: html(`❌ 查询失败: ${htmlEscape(error.message || "未知错误")}`)
+        text: html(`❌ 查询失败: ${htmlEscape(getErrorMessage(error) || "未知错误")}`)
       });
     }
   }
 
   // 处理媒体消息
-  private async processMediaMessage(message: any, mediaCaption: string): Promise<string> {
+  private processMediaMessage(message: { media?: { type?: string; constructor?: { name?: string }; attr?: { _?: string; voice?: boolean } } | null }, mediaCaption: string): string {
     // 简化版本：总是显示媒体类型
     const showMediaType = true;
     if (!showMediaType) return mediaCaption;
 
     const media = message.media;
+    if (!media) return mediaCaption;
 
     if (media.type === "photo") {
       return MEDIA_TYPES.PHOTO + " " + mediaCaption;
