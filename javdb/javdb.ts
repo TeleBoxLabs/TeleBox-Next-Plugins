@@ -334,7 +334,7 @@ class JavDBPlugin extends Plugin {
 
         try {
           // 上传文件并发送（带剧透标记）
-          await client.sendMedia(msg.chat.id, { type: 'photo', file: tmpPath, caption: html(caption), spoiler: true }, { replyTo: msg.replyToMessage?.id });
+          sent = await client.sendMedia(msg.chat.id, { type: 'photo', file: tmpPath, caption: html(caption), spoiler: true }, { replyTo: msg.replyToMessage?.id });
 
           // 删除原查询消息
           try { await msg.delete(); } catch (e: unknown) { logger.warn('操作失败', e) }
