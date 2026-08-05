@@ -114,7 +114,9 @@ class CheckInPlugin extends Plugin {
               return;
             }
             await this.edit(msg, "🚀 开始执行所有签到任务...");
-            void this.runAllSigns("手动触发", msg.chat.id, msg);
+            void this.runAllSigns("手动触发", msg.chat.id, msg).catch((e: unknown) =>
+              logger.error("[CheckIn] runAllSigns failed:", e),
+            );
             return;
           }
           await this.edit(msg, this.helpText());
@@ -271,6 +273,7 @@ class CheckInPlugin extends Plugin {
   }
 
   private async runAllSigns(source: string, fallbackPeer?: string | number, statusMsg?: MessageContext): Promise<void> {
+    try {
     const client = await getGlobalClient();
     if (!client) return;
     const conf = this.cfg.get();
@@ -321,6 +324,9 @@ class CheckInPlugin extends Plugin {
       } catch (e: unknown) { logger.warn('操作失败', e) }
     }
     if (!sent) logger.error("[CheckIn] Failed to send summary report.");
+    } catch (e: unknown) {
+      logger.error("[CheckIn] runAllSigns unexpected error:", e);
+    }
   }
 
   private async runSingleSign(target: SignTarget): Promise<SignResult> {
