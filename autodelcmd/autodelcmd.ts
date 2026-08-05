@@ -466,8 +466,8 @@ class AutoDeleteService {
                 shouldDelete = true;
               }
             } else {
-              // 在普通聊天中，查找自己发出的消息
-              if (message.out) {
+              // 在普通聊天中，查找自己发出的消息（mtcute: isOutgoing 替代 gramjs 的 out）
+              if (message.isOutgoing) {
                 shouldDelete = true;
               }
             }
@@ -1063,8 +1063,8 @@ class AutoDeletePlugin extends Plugin {
 
   // 判断是否应该处理此消息
   private async shouldProcessMessage(msg: MessageContext): Promise<boolean> {
-    // 1. 处理自己发出的消息
-    if (msg.out) return true;
+    // 1. 处理自己发出的消息（mtcute: isOutgoing 替代 gramjs 的 out）
+    if (msg.isOutgoing) return true;
     
     // 2. 检查是否是 Saved Messages
     try {
