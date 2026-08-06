@@ -871,7 +871,7 @@ class KeywordPlugin extends Plugin {
           return;
         }
 
-        if ((message as { out?: boolean }).out) {
+        if (message.isOutgoing) {
           return;
         }
 
@@ -893,7 +893,7 @@ export async function processKeywordMessage(
       return;
     }
 
-    if (message.out) {
+    if (message.isOutgoing) {
       return;
     }
 
