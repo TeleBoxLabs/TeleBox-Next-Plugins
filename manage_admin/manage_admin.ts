@@ -142,7 +142,7 @@ class ManageAdminPlugin extends Plugin {
             const uid = Number((r.sender as { id?: number })?.id);
             if (uid && client) {
               try {
-                const input = client.resolvePeer(uid);
+                const input = await client.resolvePeer(uid);
                 return { id: uid, entity: input };
               } catch (e: unknown) { logger.warn('操作失败', e) }
             }
@@ -150,7 +150,7 @@ class ManageAdminPlugin extends Plugin {
           }
           if (!sender) return { id: undefined, entity: undefined };
           const senderUser = sender as User;
-          const input = client.resolvePeer(senderUser.id);
+          const input = await client.resolvePeer(senderUser.id);
           return { id: Number(senderUser.id), entity: input };
         } else if (arg) {
           try {
@@ -159,7 +159,7 @@ class ManageAdminPlugin extends Plugin {
               return { id: undefined, entity: undefined };
             }
             const fullUser = full as User;
-            const input = client.resolvePeer(fullUser.id);
+            const input = await client.resolvePeer(fullUser.id);
             return { id: Number(fullUser.id), entity: input };
           } catch (e: unknown) {
             // Fallback: if arg is numeric and current chat is channel, scan participants to resolve access hash
@@ -188,7 +188,7 @@ class ManageAdminPlugin extends Plugin {
                       (u) => Number(u.id) === numericId
                     );
                     if (user) {
-                      const input = client.resolvePeer(user.id);
+                      const input = await client.resolvePeer(user.id);
                       return { id: Number(user.id), entity: input };
                     }
                   }
