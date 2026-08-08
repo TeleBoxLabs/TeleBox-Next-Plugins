@@ -186,7 +186,7 @@ let dependenciesInstalled = false;
 let isInstalling = false;
 try {
   require.resolve("better-sqlite3");
-  execFileSync("command", ["-v", "sshpass"], { stdio: 'ignore' });
+  execFileSync("sshpass", ["-V"], { stdio: 'ignore' });
   dependenciesInstalled = true;
 } catch (_e: unknown) {
   dependenciesInstalled = false;
@@ -204,7 +204,7 @@ async function installDependencies(msg: MessageContext): Promise<void> {
       logger.info("[SUCCESS] Installed 'better-sqlite3'.");
     }
     try {
-      execFileSync("command", ["-v", "sshpass"], { stdio: 'ignore' });
+      execFileSync("sshpass", ["-V"], { stdio: 'ignore' });
     } catch (e: unknown) {
       logger.info("[INSTALLING] 'sshpass' not found. Installing via system package manager...", e);
       if (fs.existsSync("/usr/bin/apt-get")) {
