@@ -27,6 +27,8 @@ let dbPromise: Promise<Low<CodexImageConfig>> | null = null;
 
 interface CodexImageConfig {
   accessToken: string;
+  model?: string;
+  codexUrl?: string;
 }
 
 type CodexResponseResult = {
@@ -502,7 +504,7 @@ async function handleCximg(msg: MessageContext): Promise<void> {
         {
           key: "codexUrl",
           label: "Codex API URL",
-          type: "text",
+          type: "string",
           default: "https://chatgpt.com/backend-api/codex/responses",
           description: "Codex 后端 API 地址",
         },
@@ -510,8 +512,8 @@ async function handleCximg(msg: MessageContext): Promise<void> {
       getValues: async (): Promise<Record<string, unknown>> => {
         const token = await getStoredToken();
         const db = await getDb();
-        const model = (db.data as Record<string, string>)?.["model"] || CODEX_MODEL;
-        const codexUrl = (db.data as Record<string, string>)?.["codexUrl"] || CODEX_URL;
+        const model = db.data?.model || CODEX_MODEL;
+        const codexUrl = db.data?.codexUrl || CODEX_URL;
         return {
           accessToken: token,
           model,
@@ -524,10 +526,10 @@ async function handleCximg(msg: MessageContext): Promise<void> {
           await setStoredToken(patch.accessToken);
         }
         if (typeof patch.model === "string") {
-          (db.data as Record<string, string>)["model"] = patch.model;
+          db.data.model = patch.model;
         }
         if (typeof patch.codexUrl === "string") {
-          (db.data as Record<string, string>)["codexUrl"] = patch.codexUrl;
+          db.data.codexUrl = patch.codexUrl;
         }
         await db.write();
       },
