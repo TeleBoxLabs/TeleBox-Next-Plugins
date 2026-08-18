@@ -162,7 +162,7 @@ async function callCodexImage(
 
   const headers = {
     Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
+    "Content-Type": "application/json",
   };
 
   const readStreamResult = async (): Promise<CodexResponseResult> => {
@@ -498,32 +498,40 @@ async function handleCximg(msg: MessageContext): Promise<void> {
             { value: "gpt-image-1", label: "gpt-image-1" },
           ],
           default: "gpt-5.4",
-          description: "使用的图片生成模型",
         },
         {
-          key: "maxWaitMs",
-          label: "最大等待时间 (分钟)",
-          type: "number",
-          min: 1,
-          max: 30,
-          default: 10,
-          description: "等待生成完成的最长时间",
+          key: "codexUrl",
+          label: "Codex API URL",
+          type: "text",
+          default: "https://chatgpt.com/backend-api/codex/responses",
+          description: "Codex 后端 API 地址",
         },
       ],
-      getValues: async () => {
+      getValues: async (): Promise<Record<string, unknown>> => {
         const token = await getStoredToken();
+        const db = await getDb();
+        const model = (db.data as Record<string, string>)?.["model"] || CODEX_MODEL;
+        const codexUrl = (db.data as Record<string, string>)?.["codexUrl"] || CODEX_URL;
         return {
           accessToken: token,
-          model: CODEX_MODEL,
-          maxWaitMs: Math.round(CODEX_MAX_WAIT_MS / 60000),
+          model,
+          codexUrl,
         };
       },
-      setValues: async (patch: Record<string, unknown>) => {
+      setValues: async (patch: Record<string, unknown>): Promise<void> => {
+        const db = await getDb();
         if (typeof patch.accessToken === "string") {
           await setStoredToken(patch.accessToken);
         }
+        if (typeof patch.model === "string") {
+          (db.data as Record<string, string>)["model"] = patch.model;
+        }
+        if (typeof patch.codexUrl === "string") {
+          (db.data as Record<string, string>)["codexUrl"] = patch.codexUrl;
+        }
+        await db.write();
       },
     };
   }
 
-  export default new CodexImagePlugin();
+export default new CodexImagePlugin();
