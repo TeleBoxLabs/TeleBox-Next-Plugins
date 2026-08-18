@@ -445,7 +445,8 @@ class AutoDeleteService {
           // 查找最近的响应消息并删除
           // 在 Saved Messages 中，需要特殊处理消息的归属
           const msgChatId = this.getChatId(msg);
-          const isInSavedMessages = cachedUserId && msgChatId?.toString() === cachedUserId;
+          const myId = (this.client.storage?.self?.getCached()?.userId)?.toString() ?? null;
+          const isInSavedMessages = myId && msgChatId?.toString() === myId;
           
           let deletedCount = 0;
           const MAX_RESPONSE_MESSAGES = 3; // 最多删除3条响应消息
