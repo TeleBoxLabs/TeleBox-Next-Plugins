@@ -629,8 +629,18 @@ export_gif(animation, gif_path, 512, 512, 30)
     const scriptPath = path.join(path.dirname(tgsPath), 'convert_tgs.py');
     fs.writeFileSync(scriptPath, pythonScript);
     
+    // 现代 Linux 发行版普遍不再提供 `python` 命令（仅 `python3`），
+    // 优先探测 python3，失败时回退 python。
+    let pythonBin = 'python3';
     try {
-      await execFileAsync('python', [scriptPath, tgsPath, gifPath], { timeout: 60000 });
+      await execFileAsync(pythonBin, ['--version']);
+    } catch (_e: unknown) {
+      logger.warn('python3 不可用，回退到 python:', _e);
+      pythonBin = 'python';
+    }
+    
+    try {
+      await execFileAsync(pythonBin, [scriptPath, tgsPath, gifPath], { timeout: 60000 });
     } finally {
       if (fs.existsSync(scriptPath)) {
         fs.unlinkSync(scriptPath);
