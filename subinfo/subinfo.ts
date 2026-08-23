@@ -532,7 +532,8 @@ class SubinfoPlugin extends Plugin {
     sourceText = sourceText.trim();
     
     if (!sourceText) {
-      await msg.edit({ text: this.description,  });
+      // description 含 HTML 标记，必须经 html() 解析，否则标签原样显示
+      await msg.edit({ text: html(this.description) });
       return;
     }
     
@@ -686,7 +687,8 @@ class SubinfoPlugin extends Plugin {
         }
     } else {
         const messageParts = splitLongMessage(resultText, 4090);
-        await msg.edit({ text: messageParts[0], disableWebPreview: true });
+        // 结果含 HTML 标记，必须经 html() 解析（mtcute 纯字符串不套 parse mode）
+        await msg.edit({ text: html(messageParts[0]), disableWebPreview: true });
         // 注意：消息分片必须按顺序逐条发送，不能并行（handleSub 详细模式，保持消息顺序）
         for (let i = 1; i < messageParts.length; i++) {
             await client.sendText(msg.chat.id, html`${messageParts[i]}`, { replyTo: msg.id });
@@ -828,7 +830,8 @@ class SubinfoPlugin extends Plugin {
         }
     } else {
         const messageParts = splitLongMessage(finalOutput || "未获取到任何信息", 4090);
-        await msg.edit({ text: messageParts[0], disableWebPreview: true });
+        // 结果含 HTML 标记，必须经 html() 解析（mtcute 纯字符串不套 parse mode）
+        await msg.edit({ text: html(messageParts[0]), disableWebPreview: true });
         // 注意：消息分片必须按顺序逐条发送，不能并行（handleCha 简洁模式，保持消息顺序）
         for (let i = 1; i < messageParts.length; i++) {
             await client.sendText(msg.chat.id, html`${messageParts[i]}`, { replyTo: msg.id });
