@@ -781,7 +781,7 @@ async function refreshActiveCaptchas(client: TelegramClient): Promise<void> {
           await client.editMessage({
             chatId: userId,
             message: promptMsgId,
-            text: newCaption,
+            text: html(newCaption),
           });
         } else {
           const newText = rebuildCaptchaText(state);
@@ -789,7 +789,7 @@ async function refreshActiveCaptchas(client: TelegramClient): Promise<void> {
             await client.editMessage({
               chatId: userId,
               message: promptMsgId,
-              text: newText,
+              text: html(newText),
             });
           }
         }
