@@ -2366,7 +2366,7 @@ async function handleIncomingMessage(
   // Panel Settings Adapter
   const panelAdapter: PanelSettingsAdapter = {
     id: "shift",
-    title: "排班",
+    title: "shift",
     description: "排班管理配置",
     category: "插件配置",
     icon: "📋",

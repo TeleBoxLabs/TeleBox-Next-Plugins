@@ -1388,7 +1388,7 @@ class MusicHubPlugin extends Plugin {
   // Panel Settings Adapter
   panelAdapter: PanelSettingsAdapter = {
     id: "music",
-    title: "音乐搜索",
+    title: "music",
     description: "音乐搜索配置：默认音源、音质、搜索结果数",
     category: "插件配置",
     icon: "🎵",

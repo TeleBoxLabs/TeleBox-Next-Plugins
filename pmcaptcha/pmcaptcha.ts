@@ -2035,7 +2035,7 @@ class PMCaptchaPlugin extends Plugin {
   // Panel Settings Adapter
   panelAdapter: PanelSettingsAdapter = {
     id: "pmcaptcha",
-    title: "私聊验证",
+    title: "pmcaptcha",
     description: "私聊验证码配置",
     category: "插件配置",
     icon: "🛡️",

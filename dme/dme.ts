@@ -1466,7 +1466,7 @@ class DmePlugin extends Plugin {
 
   panelAdapter: PanelSettingsAdapter = {
     id: "dme",
-    title: "防撤回删除",
+    title: "dme",
     description: "智能防撤回删除插件，支持批量删除和防撤回管理",
     category: "管理",
     icon: "🗑️",
