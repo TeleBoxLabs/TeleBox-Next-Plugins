@@ -230,8 +230,15 @@ async function collectMessages(
     // 构建迭代器参数
     const iterParams: Record<string, unknown> = { limit: maxCount };
 
-    // 如果需要按用户过滤，使用 fromUser 参数（直接让 API 过滤，避免 flood wait）
-    if (filterSenderId) {
+    // fromUser 在群组/频道可用，但私聊中 Telegram 不可靠支持该服务端过滤；
+    // 私聊改为本地按发送者过滤。
+    let chatIsPrivate = false;
+    try {
+        const chat = await client.getChat(chatPeerId);
+        chatIsPrivate = (chat as { type?: string }).type === "private";
+    } catch { /* 保留默认 false，维持群组行为 */ }
+
+    if (filterSenderId && !chatIsPrivate) {
         try {
             // 尝试获取用户实体
             const userEntity = await client.resolvePeer(filterSenderId);
@@ -244,9 +251,15 @@ async function collectMessages(
         }
     }
 
-    const msgs = await client.searchMessages({ ...iterParams, chatId: chatPeerId });
     const normalizedFilterId = filterSenderId ? normalizeId(filterSenderId) : null;
-    const needManualFilter = filterSenderId && !iterParams.fromUser;
+    const needManualFilter = Boolean(filterSenderId && !iterParams.fromUser);
+
+    // 私聊本地过滤时，需多取消息以容纳对方发送的部分
+    if (needManualFilter && limit.type === "count") {
+        iterParams.limit = Math.min(maxCount * 20, 3000);
+    }
+
+    const msgs = await client.searchMessages({ ...iterParams, chatId: chatPeerId });
 
     for (const msg of msgs) {
         if (!msg) continue;

@@ -145,16 +145,14 @@ class AtAdminsPlugin extends Plugin {
           }
           
           adminCount++;
-          if (member.username) {
-            admins.push(`@${member.username}`);
-          } else {
-            const firstName = member.firstName || "";
-            const lastName = member.lastName || "";
-            const fullName = `${firstName} ${lastName}`.trim() || "用户";
-            // HTML转义用户名
-            const escapedName = htmlEscape(fullName);
-            admins.push(`<a href="tg://user?id=${member.id}">${escapedName}</a>`);
-          }
+          const firstName = member.firstName || "";
+          const lastName = member.lastName || "";
+          const fullName = `${firstName} ${lastName}`.trim() || member.username || "用户";
+          const escapedName = htmlEscape(fullName);
+
+          // 始终用数字 ID 提及。NFT/收藏用户名不一定暴露在 username 字段，
+          // 普通 @username 无法可靠通知；text mention 不依赖用户名。
+          admins.push(`<a href="tg://user?id=${member.id}">${escapedName}</a>`);
         }
       }
 

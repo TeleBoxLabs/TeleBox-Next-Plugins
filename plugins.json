@@ -183,6 +183,10 @@
     "url": "https://github.com/TeleBoxOrg/TeleBox-Next-Plugins/blob/main/epic/epic.ts?raw=true",
     "desc": "检查Epic Games喜加一优惠"
   },
+  "exec": {
+    "url": "https://github.com/TeleBoxOrg/TeleBox-Next-Plugins/blob/main/exec/exec.ts?raw=true",
+    "desc": "运行命令"
+  },
   "fadian": {
     "url": "https://github.com/TeleBoxOrg/TeleBox-Next-Plugins/blob/main/fadian/fadian.ts?raw=true",
     "desc": "fadian语录"
@@ -375,13 +379,13 @@
     "url": "https://github.com/TeleBoxOrg/TeleBox-Next-Plugins/blob/main/rev/rev.ts?raw=true",
     "desc": "反转你的消息"
   },
-  "say": {
-    "url": "https://github.com/TeleBoxOrg/TeleBox-Next-Plugins/blob/main/say/say.ts?raw=true",
-    "desc": "自动语音合成 (MiMo / 火山豆包 / Fish)，每会话独立开关"
-  },
   "save": {
     "url": "https://github.com/TeleBoxOrg/TeleBox-Next-Plugins/blob/main/save/save.ts?raw=true",
     "desc": "突破限制保存/转发消息"
+  },
+  "say": {
+    "url": "https://github.com/TeleBoxOrg/TeleBox-Next-Plugins/blob/main/say/say.ts?raw=true",
+    "desc": "自动语音合成 (MiMo / 火山豆包 / Fish)，每会话独立开关"
   },
   "search": {
     "url": "https://github.com/TeleBoxOrg/TeleBox-Next-Plugins/blob/main/search/search.ts?raw=true",

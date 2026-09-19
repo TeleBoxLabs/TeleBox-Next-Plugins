@@ -238,7 +238,7 @@ class TeletypePlugin extends Plugin {
         }
         
       } catch (error: unknown) {
-        if (!getErrorMessage(error).includes("MESSAGE_NOT_MODIFIED")) {
+        if (!this.isMessageNotModified(error)) {
           throw error;
         }
         continue;
@@ -247,25 +247,17 @@ class TeletypePlugin extends Plugin {
       await this.sleep(interval);
     }
     
-    const finalText = htmlEscape(text);
-    try {
-      await msg.edit({
-        text: html(finalText)
-      });
-    } catch (error: unknown) {
-      if (!getErrorMessage(error).includes("MESSAGE_NOT_MODIFIED")) {
-        throw error;
-      }
-    }
+    // 最后一轮循环已去掉光标并写入完成文本；再次编辑只会触发
+    // Telegram 的 MESSAGE_NOT_MODIFIED，并非真实失败。
   }
   
   private async handleError(msg: MessageContext, error: unknown): Promise<void> {
     logger.error(`[${this.PLUGIN_NAME}] Error:`, error);
     
-    const errMsg = getErrorMessage(error);
-    if (errMsg?.includes("MESSAGE_NOT_MODIFIED")) {
+    if (this.isMessageNotModified(error)) {
       return;
     }
+    const errMsg = getErrorMessage(error);
     
     let errorMessage = "❌ <b>操作失败:</b> ";
     
@@ -282,6 +274,13 @@ class TeletypePlugin extends Plugin {
   
   private sleep(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  private isMessageNotModified(error: unknown): boolean {
+    const message = getErrorMessage(error).toLowerCase();
+    return message.includes("message_not_modified") ||
+      message.includes("message wasn't modified") ||
+      message.includes("message was not modified");
   }
 
 
