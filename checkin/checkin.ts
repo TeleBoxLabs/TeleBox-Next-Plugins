@@ -387,17 +387,18 @@ class CheckInPlugin extends Plugin {
       _: 'messages.getBotCallbackAnswer',
       peer: resolvedPeer,
       msgId: msg.id,
-      // btn.data 为 string | Buffer，需要转换为 Uint8Array | undefined
-      data: btn.data ? Buffer.isBuffer(btn.data) ? btn.data : Buffer.from(btn.data) : Buffer.from(target.callbackData || "", "utf-8"),
+      data: btn.data,
     });
   }
 
-  private findCallbackButton(msg: Message, target: SignTarget): { data?: string | Buffer; text?: string } | null {
-    const rows = (msg.markup as { rows?: Array<{ buttons?: unknown[] }> } | null)?.rows || [];
-    for (const row of rows) {
-      for (const b of row.buttons as Array<{ data?: string; text?: string }>) {
-        const d = this.decodeData(b.data);
-        if (target.callbackData && d === target.callbackData) return b;
+  /** mtcute 的 msg.markup 为 { type: "inline", buttons: 二维数组 }，不是 rows */
+  private findCallbackButton(msg: Message, target: SignTarget): { text: string; data: Uint8Array } | null {
+    const markup = msg.markup;
+    if (!markup || !("type" in markup) || markup.type !== "inline") return null;
+    for (const row of markup.buttons) {
+      for (const b of row) {
+        if (b._ !== "keyboardButtonCallback") continue;
+        if (target.callbackData && this.decodeData(b.data) === target.callbackData) return b;
         if (!target.callbackData && target.buttonText && b.text === target.buttonText) return b;
       }
     }
