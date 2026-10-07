@@ -131,15 +131,17 @@ async function searchAndSendMusic(
   // mtcute: use getCallbackAnswer instead of gramjs Message.click()
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      const rawMsg = replyWithButtons.raw as { replyMarkup?: { _?: string; rows: { buttons: { _?: string; data?: Uint8Array }[] }[] } };
+      const rawMsg = replyWithButtons.raw as { replyMarkup?: { _?: string; rows: { buttons: { _?: string; type?: { _?: string; data?: Uint8Array } }[] }[] } };
       const markup = rawMsg.replyMarkup;
       if (markup?._ === 'replyInlineMarkup') {
         const firstBtn = markup.rows[0]?.buttons[0];
-        if (firstBtn?._ === 'keyboardButtonCallback' && firstBtn.data) {
+        // layer 229: keyboardButtonCallback → keyboardInlineButton，data 在 type: inlineButtonTypeCallback.data
+        const data = firstBtn?._ === 'keyboardInlineButton' && firstBtn.type?._ === 'inlineButtonTypeCallback' ? firstBtn.type.data : undefined;
+        if (data) {
           await client.getCallbackAnswer({
             chatId: replyWithButtons.chat.id,
             message: replyWithButtons.id,
-            data: firstBtn.data,
+            data,
             fireAndForget: true,
           });
         }

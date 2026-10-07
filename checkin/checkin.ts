@@ -156,15 +156,18 @@ function hasMatcher(t: SignTarget): boolean {
   return !!(t.callbackData || t.buttonText);
 }
 
-/** mtcute 的 msg.markup 为 { type: "inline", buttons: 二维数组 } */
+/** mtcute 的 msg.markup 为 { type: "inline", buttons: 二维数组 }
+ *  layer 229: keyboardButtonCallback → keyboardInlineButton { text, type }, callback data 在 type: inlineButtonTypeCallback.data */
 function findCallbackData(msg: Message, target: SignTarget): Uint8Array | undefined {
   const markup = msg.markup;
   if (!markup || !("type" in markup) || markup.type !== "inline") return undefined;
   for (const row of markup.buttons) {
     for (const b of row) {
-      if (b._ !== "keyboardButtonCallback") continue;
-      const hit = target.callbackData ? Buffer.from(b.data).toString("utf-8") === target.callbackData : b.text === target.buttonText;
-      if (hit) return b.data;
+      if (b._ !== "keyboardInlineButton") continue;
+      const cb = b.type;
+      if (!cb || cb._ !== "inlineButtonTypeCallback") continue;
+      const hit = target.callbackData ? Buffer.from(cb.data).toString("utf-8") === target.callbackData : b.text === target.buttonText;
+      if (hit) return cb.data;
     }
   }
   return undefined;
